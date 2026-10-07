@@ -237,9 +237,9 @@ impl RuleSet {
         self.rules.iter().find(|rule| rule.matches_request(host, method, path))
     }
 
-    /// Authorize DNS by hostname alone, ignoring HTTP constraints.
-    pub fn dns(&self, host: &str) -> bool {
-        self.rules.iter().any(|rule| rule.matches_host(host))
+    /// Return the first hostname match for DNS and CONNECT, ignoring HTTP constraints.
+    pub fn dns_rule(&self, host: &str) -> Option<&Rule> {
+        self.rules.iter().find(|rule| rule.matches_host(host))
     }
 }
 
@@ -275,7 +275,7 @@ mod tests {
             let mut decisions = suite.expected.into_iter();
 
             for (host, dns_allowed) in fixture.hosts.iter().zip(suite.dns) {
-                assert_eq!(rules.dns(host), dns_allowed, "{}: {host}", suite.rules);
+                assert_eq!(rules.dns_rule(host).is_some(), dns_allowed, "{}: {host}", suite.rules);
 
                 for method in &fixture.methods {
                     for path in &fixture.paths {
@@ -322,8 +322,8 @@ methods = 'ANY'
             1
         );
         assert!(rules.request("example.com", "GET", "/api/42").unwrap().inject_headers.is_empty());
-        assert!(rules.dns("sub.example.com"));
-        assert!(!rules.dns("example.com.evil.test"));
+        assert!(rules.dns_rule("sub.example.com").is_some());
+        assert!(rules.dns_rule("example.com.evil.test").is_none());
     }
 
     /// Reject malformed rule formats and accept the shipped example rules.

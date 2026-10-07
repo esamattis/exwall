@@ -1,4 +1,5 @@
 //! TOML-driven transparent HTTP(S) and DNS egress filtering for Linux.
+mod access_log;
 mod ca;
 mod config;
 mod dns;
@@ -9,6 +10,7 @@ mod pathname;
 mod proxy;
 mod rules;
 mod state;
+mod udp;
 
 use crate::error::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
@@ -185,6 +187,7 @@ async fn serve(
         "DNS upstream cannot be the DNS listener"
     );
     let config = config::Config::load(&config_path)?;
+    let access_log_config = config.access_log.clone();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(config.tracing_level()));
     tracing_subscriber::fmt().with_env_filter(filter).with_target(false).init();
@@ -201,20 +204,29 @@ async fn serve(
     let shutdown = rama::graceful::Shutdown::new(async move {
         let _ = shutdown_receiver.await;
     });
+    let (access_log, mut access_task) = access_log::AccessLog::start(access_log_config).await?;
     let proxy = proxy::Proxy {
+        access_log: access_log.clone(),
         policy: policy.clone(),
         authority,
         exec: rama::rt::Executor::graceful(shutdown.guard()),
     };
-    let dns = dns::Dns::new(policy.clone(), dns_upstream);
+    let dns = dns::Dns::new(policy.clone(), dns_upstream, access_log.clone());
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut http_task = tokio::spawn(proxy.serve(http));
     let mut dns_task = tokio::spawn(dns.serve(dns_udp, dns_tcp));
+    let mut access_finished = false;
     tracing::info!(%listen, %dns_listen, rules = policy.load().rules.rules.len(), "ramawall ready");
     let result = loop {
         tokio::select! {
+            result = &mut access_task => {
+                access_finished = true;
+                break result.context("access-log task failed")
+                    .and_then(|result| result)
+                    .and_then(|()| Err(error::Error::message("access-log actor exited unexpectedly")));
+            }
             result = &mut http_task => {
                 break result.context("HTTP listener task failed").and_then(|result| result);
             }
@@ -229,7 +241,7 @@ async fn serve(
                     Ok(new_policy) => {
                         tracing::info!(
                             rules = new_policy.rules.rules.len(),
-                            "reloaded policy; restart service to apply firewall/resolver/log-level changes"
+                            "reloaded policy; restart service to apply firewall/resolver/log-level/access-log changes"
                         );
                         policy.store(Arc::new(new_policy));
                     }
@@ -247,11 +259,18 @@ async fn serve(
         dns_task.abort();
         let _ = dns_task.await;
     }
-    shutdown
+    let graceful_result = shutdown
         .shutdown_with_limit(std::time::Duration::from_secs(10))
         .await
-        .context("graceful shutdown")?;
-    result
+        .context("graceful shutdown");
+    // Wait for cancelled handlers to submit their entries and drop the final sender.
+    drop(access_log);
+    let access_result = if access_finished {
+        Ok(())
+    } else {
+        access_task.await.context("join access-log actor").and_then(|result| result)
+    };
+    result.and(graceful_result).and(access_result)
 }
 
 /// Compile a complete policy before publishing it to either HTTP or DNS handlers.

@@ -73,7 +73,8 @@ def main():
         command(binary, "init-ca", "--ca-dir", str(ca))
         cert = ca / "ramawall-ca-cert.pem"
         config = root / "config.toml"
-        config.write_text("manage_resolv_conf = false\n")
+        config.write_text("manage_resolv_conf = false\n"
+                          + f"[access_log]\npath = {json.dumps(str(root / 'access.log'))}\n")
         rules = root / "rules"
         rules.mkdir()
         (rules / "1-test.toml").write_text(

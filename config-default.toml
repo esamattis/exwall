@@ -35,3 +35,11 @@ bypass_users = ["root", "_apt"]
 # [[iptables.bypass]]
 # network = "192.168.5.0/24"
 # port = 1234
+
+# Access logs are independent of log_level. Restart to apply these settings.
+# Every check_interval entries, trim an oversized file to its last keep_entries.
+[access_log]
+path = "/var/log/ramawall/access.log"
+check_interval = 100
+max_size_bytes = 10485760
+keep_entries = 1000

@@ -1,12 +1,16 @@
 use crate::error::{Context, Result, ensure};
 use serde::Deserialize;
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 /// Runtime settings compatible with mitmwall config.toml.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub log_level: String,
+    pub access_log: AccessLogConfig,
     pub block_dns: bool,
     pub manage_resolv_conf: bool,
     pub flow_history_clear_interval: u64,
@@ -20,6 +24,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             log_level: "info".into(),
+            access_log: AccessLogConfig::default(),
             block_dns: true,
             manage_resolv_conf: true,
             flow_history_clear_interval: 1000,
@@ -27,6 +32,28 @@ impl Default for Config {
             // The Python hook defaults to no bypass users; the shipped config includes root/_apt.
             bypass_users: Vec::new(),
             iptables: Iptables::default(),
+        }
+    }
+}
+
+/// Access-log destination and periodic size-based retention settings.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AccessLogConfig {
+    pub path: PathBuf,
+    pub check_interval: u64,
+    pub max_size_bytes: u64,
+    pub keep_entries: usize,
+}
+
+impl Default for AccessLogConfig {
+    /// Log to the service directory and check every 100 entries against a 10 MiB limit.
+    fn default() -> Self {
+        Self {
+            path: "/var/log/ramawall/access.log".into(),
+            check_interval: 100,
+            max_size_bytes: 10 * 1024 * 1024,
+            keep_entries: 1000,
         }
     }
 }
@@ -84,6 +111,17 @@ impl Config {
             "flow history settings must be positive integers"
         );
         ensure!(
+            config.access_log.path.file_name().is_some()
+                && !config.access_log.path.as_os_str().is_empty(),
+            "access_log.path must name a file"
+        );
+        ensure!(
+            config.access_log.check_interval > 0
+                && config.access_log.max_size_bytes > 0
+                && config.access_log.keep_entries > 0,
+            "access log retention settings must be positive integers"
+        );
+        ensure!(
             config.bypass_users.iter().all(|s| !s.is_empty()),
             "bypass_users must contain nonempty names"
         );
@@ -112,6 +150,7 @@ mod tests {
     fn configuration_compatibility() {
         let config = Config::parse(include_str!("../config-default.toml")).unwrap();
         assert_eq!(config.bypass_users, ["root", "_apt"]);
+        assert_eq!(config.access_log, AccessLogConfig::default());
         let config =
             Config::parse("[[iptables.bypass]]\nnetwork = '192.168.5.19/24'\nport = 1234").unwrap();
         assert_eq!(config.iptables.bypass[0].network.to_string(), "192.168.5.0/24");
@@ -121,9 +160,30 @@ mod tests {
             "block_dns = 1",
             "flow_history_keep_entries = 0",
             "typo = true",
+            "[access_log]\npath = ''",
+            "[access_log]\npath = '/'",
+            "[access_log]\ncheck_interval = 0",
+            "[access_log]\nmax_size_bytes = 0",
+            "[access_log]\nkeep_entries = 0",
+            "[access_log]\ntypo = 1",
             "[[iptables.bypass]]\nnetwork = '::1'\nport = 0",
         ] {
             assert!(Config::parse(text).is_err(), "{text}");
         }
+    }
+
+    /// Accept access-log overrides while retaining defaults for omitted fields.
+    #[test]
+    fn access_log_configuration() {
+        let config = Config::parse("[access_log]\npath = '/tmp/access.log'\ncheck_interval = 5\nmax_size_bytes = 4096\nkeep_entries = 20").unwrap();
+        assert_eq!(
+            config.access_log,
+            AccessLogConfig {
+                path: "/tmp/access.log".into(),
+                check_interval: 5,
+                max_size_bytes: 4096,
+                keep_entries: 20,
+            }
+        );
     }
 }

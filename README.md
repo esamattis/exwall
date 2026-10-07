@@ -56,6 +56,7 @@ The installer creates:
 - `/usr/local/bin/ramawall`
 - `/etc/ramawall/config.toml` and `/etc/ramawall/rules.d/*.toml`
 - `/var/lib/ramawall/ramawall-ca-cert.pem` and a private CA key
+- `/var/log/ramawall/`, owned by the service user, for `access.log`
 - `/etc/systemd/system/ramawall.service`
 - `/usr/local/share/ca-certificates/ramawall.crt`
 - Managed CA environment settings in `/etc/environment` and `/etc/profile.d/ramawall.sh`
@@ -150,7 +151,80 @@ ramawall hook --dry-run stop
 
 SIGHUP reloads the config and complete ruleset atomically. Invalid reloads keep the
 previous policy. Restart to apply changes to firewall bypasses, resolver
-management, or log level. `RUST_LOG` can override logging at process startup.
+management, application log level, or access-log settings. `RUST_LOG` can override
+application logging at process startup.
+
+Application logs still go to stdout and the systemd journal. Independently of
+`log_level`, access logs record every HTTP(S) request handled by the proxy and
+every DNS message processed by the DNS service. Explicit CONNECT requests have
+their own entry in addition to the HTTPS requests inside the tunnel. Traffic
+that bypasses the proxy is not visible to the access logger.
+
+The default destination is `/var/log/ramawall/access.log`. Each line has exactly
+nine columns:
+
+```text
+TIMESTAMP PROTOCOL RESULT RULE HTTP_METHOD URL HTTP_STATUS DNS_RCODE ERROR
+2026-10-07T12:34:56Z https ALLOW /etc/ramawall/rules.d/5-examples.toml:allow#1 GET https://github.com:443/api 200 - -
+2026-10-07T12:34:57Z http DENY - POST http://denied.test/upload 403 - -
+2026-10-07T12:34:58Z dns DENY - - dns://denied.test/A - REFUSED -
+2026-10-07T12:34:59Z https ALLOW /etc/ramawall/rules.d/5-examples.toml:allow#1 GET https://github.com:443/api 502 - UPSTREAM_TIMEOUT
+```
+
+Timestamps are UTC arrival times; entries are written as request handlers finish.
+`PROTOCOL` is `dns`, `http`, or `https`. `RESULT` is the policy decision (`ALLOW`
+or `DENY`), or `-` if policy was not evaluated. An allowed request keeps `ALLOW`
+even if forwarding subsequently fails. `HTTP_STATUS` is the status returned to
+an HTTP(S) client, and `DNS_RCODE` is the response code returned to a DNS client;
+unused or unavailable response fields are `-`. HTTP status is recorded when
+response headers arrive; response bodies remain streamed.
+
+`ERROR` records a processing failure independently of the policy and response:
+
+- `UPSTREAM_FAILURE`: upstream connection, TLS, protocol, or I/O failure.
+- `UPSTREAM_TIMEOUT`: the upstream request deadline expired.
+- `INVALID_DNS_REPLY`: a malformed or mismatched DNS upstream response.
+- `INVALID_REQUEST`: invalid HTTP metadata or an unsupported operation.
+- `MALFORMED_DNS`: an incoming DNS packet could not be parsed.
+- `CONNECT_SETUP`: the local CONNECT reply service failed.
+- `CANCELLED`: the request handler was interrupted before producing a response.
+- `OVERLOADED`: a UDP DNS request was dropped at the concurrency limit.
+- `-`: no processing failure, including normal policy denials and upstream error
+  responses such as HTTP 500 or 502.
+
+For example, an upstream HTTP 502 response logs `HTTP_STATUS=502, ERROR=-`;
+a proxy-generated 502 logs `HTTP_STATUS=502` with an upstream failure category.
+Application logs retain available diagnostic details about the underlying error.
+`RULE` identifies the first matching rule by filename and allow-table number,
+or `-` when none matched. DNS exceptions use `@dns-bypass` or `@local-hostname`.
+DNS uses `-` for the HTTP method and `dns://hostname/query-type` for the URL;
+multi-question messages list their rules and URLs in question order, separated
+by commas. Full HTTP URLs include query strings. Whitespace, control characters,
+and percent signs in fields are percent-escaped to prevent injected log lines;
+headers and bodies are not logged.
+
+The file is owned by a logging actor that receives entries through a mailbox.
+Request handlers never wait for file writes or trimming. Shutdown drains the
+mailbox, and an access-log I/O failure fails the service instead of silently
+discarding subsequent logs. The following settings are configurable in
+`config.toml` and take effect after a restart:
+
+```toml
+[access_log]
+path = "/var/log/ramawall/access.log"
+check_interval = 100
+max_size_bytes = 10485760 # 10 MiB
+keep_entries = 1000
+```
+
+Every 100 logged requests, the actor checks the actual file size. If it exceeds
+10 MiB, the actor atomically replaces it with the last 1,000 complete entries in
+their original order. These are periodic limits: the file can grow between
+checks, and the retained entries may themselves exceed the size threshold.
+Use `sudo tail -F /var/log/ramawall/access.log` to follow the file across trimming.
+The installer and systemd create the default parent directory; for a custom path
+or a manual `serve` invocation, create a parent directory writable by the process
+user first. New log files are created with mode `0600`.
 
 Defaults are dual-stack HTTP(S) on port **58080**, UDP/TCP DNS on **58053**, and
 upstream DNS at **127.0.0.53:53**. `serve --help` exposes alternate listener,

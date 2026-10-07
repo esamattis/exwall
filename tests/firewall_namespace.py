@@ -111,7 +111,8 @@ def main():
 
             # A source-port-scoped redirect lets this single-UID namespace test
             # original destinations without redirecting the proxy's own sockets.
-            config.write_text("manage_resolv_conf = false\n")
+            config.write_text("manage_resolv_conf = false\n"
+                          + f"[access_log]\npath = {json.dumps(str(root / 'access.log'))}\n")
             rules_file.write_text("[[allow]]\ndomain='allowed.test'\npathname_pattern='/allowed'\n")
             ca = root / "ca"
             command(binary, "init-ca", "--ca-dir", str(ca))

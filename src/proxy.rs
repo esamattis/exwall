@@ -1,6 +1,7 @@
 //! Rama HTTP server/client and rustls interception for REDIRECT and explicit proxy traffic.
 use crate::error::{Context, Result, ensure};
 use crate::{
+    access_log::{AccessLog, Entry, Failure, Protocol},
     ca::{Authority, Resolver},
     rules::normalize_host,
     state::SharedPolicy,
@@ -41,6 +42,7 @@ use tokio::{
 /// Shared HTTP policy, certificate authority, and Rama task executor.
 #[derive(Clone)]
 pub struct Proxy {
+    pub access_log: AccessLog,
     pub policy: SharedPolicy,
     pub authority: Arc<Authority>,
     pub exec: Executor,
@@ -73,9 +75,16 @@ impl Proxy {
 
     /// Apply policy and relay an allowed request as a streaming HTTP response.
     async fn http(&self, mut request: Request, target: Target) -> Result<Response, Infallible> {
-        match self.prepare(&mut request, &target) {
+        let mut access = self.access_log.track(access_entry(&request, &target));
+        match self.prepare(&mut request, &target, access.entry()) {
             Ok(()) => (),
-            Err((code, message)) => return Ok(response(code, message)),
+            Err((code, message)) => {
+                access.entry().http_response(code.as_u16());
+                if code != StatusCode::FORBIDDEN {
+                    access.entry().fail(Failure::InvalidRequest);
+                }
+                return Ok(response(code, message));
+            }
         }
         // No automatic redirects or upstream proxy environment: every request is independently filtered.
         // Upstream certificates are verified by rustls' default verifier.
@@ -99,9 +108,18 @@ impl Proxy {
         )
             .into_layer(client);
         match timeout(Duration::from_secs(60), client.serve(request)).await {
-            Ok(Ok(response)) => Ok(response),
+            Ok(Ok(response)) => {
+                access.entry().http_response(response.status().as_u16());
+                Ok(response)
+            }
             error => {
                 tracing::warn!(?error, "upstream HTTP request failed");
+                access.entry().http_response(502);
+                access.entry().fail(if error.is_err() {
+                    Failure::UpstreamTimeout
+                } else {
+                    Failure::Upstream
+                });
                 Ok(response(StatusCode::BAD_GATEWAY, "upstream request failed\n"))
             }
         }
@@ -112,6 +130,7 @@ impl Proxy {
         &self,
         request: &mut Request,
         target: &Target,
+        access: &mut Entry,
     ) -> std::result::Result<(), (StatusCode, &'static str)> {
         if request.method() == Method::CONNECT {
             return Err((StatusCode::METHOD_NOT_ALLOWED, "nested CONNECT is not allowed\n"));
@@ -179,9 +198,12 @@ impl Proxy {
         }
         let policy = self.policy.load();
         let Some(rule) = policy.rules.request(&host, request.method().as_str(), &path) else {
+            access.decision(false);
             tracing::warn!(%host, method = %request.method(), pathname = %request.uri().path_or_root(), "blocked HTTP request");
             return Err((StatusCode::FORBIDDEN, "ramawall: no allow rule matched\n"));
         };
+        access.decision(true);
+        access.rule.clone_from(&rule.name);
         tracing::debug!(%host, method = %request.method(), rule = %rule.name, stream = rule.stream, "allowed HTTP request");
         // Fix the route before injecting headers; credentials can never change the selected destination.
         let scheme = if target.tls {
@@ -209,6 +231,7 @@ impl Proxy {
         let uri = rama::net::uri::Uri::parse(format!("{scheme}://{routed_host}:{port}{path}"))
             .map_err(|_| (StatusCode::BAD_REQUEST, "invalid destination URI\n"))?;
         *request.uri_mut() = uri;
+        access.url = request.uri().to_string();
         if let Some(original) = target.original {
             request.extensions().insert(rama::net::client::ConnectorTarget(original.into()));
         }
@@ -261,22 +284,42 @@ impl Proxy {
                 service_fn(move |request: Request| {
                     let proxy = accept_proxy.clone();
                     async move {
+                        let mut access = proxy.access_log.track(access_entry(
+                            &request,
+                            &Target {
+                                tls: true,
+                                ..Target::default()
+                            },
+                        ));
                         let Some(authority) = request.uri().authority() else {
+                            access.entry().http_response(400);
+                            access.entry().fail(Failure::InvalidRequest);
                             return Err(response(StatusCode::BAD_REQUEST, "invalid CONNECT\n"));
                         };
-                        if !proxy
-                            .policy
-                            .load()
+                        let policy = proxy.policy.load();
+                        let Some(rule) = policy
                             .rules
-                            .dns(authority.host().to_string().trim_matches(['[', ']']))
-                        {
+                            .dns_rule(authority.host().to_string().trim_matches(['[', ']']))
+                        else {
+                            access.entry().decision(false);
+                            access.entry().http_response(403);
                             return Err(response(
                                 StatusCode::FORBIDDEN,
                                 "ramawall: CONNECT hostname denied\n",
                             ));
-                        }
+                        };
+                        access.entry().decision(true);
+                        access.entry().rule.clone_from(&rule.name);
                         request.extensions().insert(Tunnel(authority.into_owned()));
-                        LazyHttpProxyConnectReplyService::new().serve(request).await
+                        let result = LazyHttpProxyConnectReplyService::new().serve(request).await;
+                        match &result {
+                            Ok(_) => access.entry().http_response(200),
+                            Err(response) => {
+                                access.entry().http_response(response.status().as_u16());
+                                access.entry().fail(Failure::ConnectSetup);
+                            }
+                        }
+                        result
                     }
                 }),
                 service_fn(move |upgraded: Upgraded| {
@@ -344,6 +387,40 @@ impl Proxy {
             }
         }
     }
+}
+
+/// Capture a full URL for both absolute proxy requests and origin-form TLS traffic.
+fn access_entry(request: &Request, target: &Target) -> Entry {
+    let scheme = if target.tls {
+        "https"
+    } else {
+        request.uri().scheme_str().unwrap_or("http")
+    };
+    let protocol = if scheme == "https" {
+        Protocol::Https
+    } else {
+        Protocol::Http
+    };
+    let authority = request
+        .uri()
+        .authority()
+        .map(|a| a.to_string())
+        .or_else(|| request.headers().get("host").and_then(|h| h.to_str().ok()).map(str::to_owned))
+        .or_else(|| target.tunnel.as_ref().map(ToString::to_string))
+        .or_else(|| target.original.map(|a| a.to_string()));
+    let url = match authority {
+        Some(authority) if request.method() == Method::CONNECT => format!("https://{authority}/"),
+        Some(authority) => {
+            let mut url = format!("{scheme}://{authority}{}", request.uri().path_or_root());
+            if let Some(query) = request.uri().query() {
+                url.push('?');
+                url.push_str(&query.to_string());
+            }
+            url
+        }
+        None => request.uri().to_string(),
+    };
+    Entry::new(protocol, request.method().as_str(), url)
 }
 
 /// Create a local HTTP error response with a short plaintext explanation.
@@ -426,7 +503,7 @@ mod tests {
     use crate::{config::Config, rules::RuleSet, state::Policy};
 
     /// Build isolated proxy policy and CA material for request-validation tests.
-    fn test_proxy() -> (tempfile::TempDir, Proxy) {
+    async fn test_proxy() -> (tempfile::TempDir, Proxy, tokio::task::JoinHandle<Result<()>>) {
         let directory = tempfile::tempdir().unwrap();
         crate::ca::init(directory.path()).unwrap();
         let rules = RuleSet::parse(
@@ -439,7 +516,14 @@ inject_headers = [{ name = 'Authorization', value = 'replacement' }]
             "test",
         )
         .unwrap();
+        let (access_log, task) = AccessLog::start(crate::config::AccessLogConfig {
+            path: directory.path().join("access.log"),
+            ..crate::config::AccessLogConfig::default()
+        })
+        .await
+        .unwrap();
         let proxy = Proxy {
+            access_log,
             policy: Arc::new(arc_swap::ArcSwap::from_pointee(Policy {
                 config: Config::default(),
                 rules,
@@ -447,13 +531,13 @@ inject_headers = [{ name = 'Authorization', value = 'replacement' }]
             authority: Arc::new(Authority::load(directory.path()).unwrap()),
             exec: Executor::default(),
         };
-        (directory, proxy)
+        (directory, proxy, task)
     }
 
     /// Verify injections survive client hop-by-hop directives while proxy credentials are removed.
-    #[test]
-    fn fixes_route_before_injection_and_cleans_client_headers() {
-        let (_directory, proxy) = test_proxy();
+    #[tokio::test]
+    async fn fixes_route_before_injection_and_cleans_client_headers() {
+        let (_directory, proxy, task) = test_proxy().await;
         let mut request = Request::builder()
             .uri("http://allowed.test/allowed?x=1")
             .header("Host", "allowed.test")
@@ -463,34 +547,42 @@ inject_headers = [{ name = 'Authorization', value = 'replacement' }]
             .body(Body::empty())
             .unwrap();
 
-        proxy.prepare(&mut request, &Target::default()).unwrap();
+        let mut entry = access_entry(&request, &Target::default());
+        proxy.prepare(&mut request, &Target::default(), &mut entry).unwrap();
 
         assert_eq!(request.headers()["authorization"], "replacement");
         assert!(!request.headers().contains_key("proxy-authorization"));
         assert!(!request.headers().contains_key("connection"));
         assert_eq!(request.uri().host_str().unwrap(), "allowed.test");
         assert_eq!(request.uri().query_or_empty(), "x=1");
+        assert_eq!(entry.rule, "test:allow#1");
+        assert_eq!(entry.url, "http://allowed.test:80/allowed?x=1");
+        drop(proxy);
+        task.await.unwrap().unwrap();
     }
 
     /// Reject conflicting authority metadata and unsupported upgrades before forwarding.
-    #[test]
-    fn rejects_conflicting_hosts_and_raw_upgrades() {
-        let (_directory, proxy) = test_proxy();
+    #[tokio::test]
+    async fn rejects_conflicting_hosts_and_raw_upgrades() {
+        let (_directory, proxy, task) = test_proxy().await;
         let mut request = Request::builder()
             .uri("http://allowed.test/allowed")
             .header("Host", "denied.test")
             .body(Body::empty())
             .unwrap();
+        let mut entry = access_entry(&request, &Target::default());
         assert_eq!(
-            proxy.prepare(&mut request, &Target::default()).unwrap_err().0,
+            proxy.prepare(&mut request, &Target::default(), &mut entry).unwrap_err().0,
             StatusCode::MISDIRECTED_REQUEST
         );
 
         request.headers_mut().insert("host", "allowed.test".parse().unwrap());
         request.headers_mut().insert("upgrade", "websocket".parse().unwrap());
         assert_eq!(
-            proxy.prepare(&mut request, &Target::default()).unwrap_err().0,
+            proxy.prepare(&mut request, &Target::default(), &mut entry).unwrap_err().0,
             StatusCode::NOT_IMPLEMENTED
         );
+        drop(proxy);
+        task.await.unwrap().unwrap();
     }
 }

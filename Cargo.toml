@@ -12,6 +12,7 @@ clap = { version = "4", features = ["derive"] }
 fancy-regex = "0.17"
 hickory-proto = "0.25"
 ipnet = { version = "2", features = ["serde"] }
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 libc = "0.2"
 rama = { version = "=0.4.0", features = ["http-full", "tcp", "rustls", "ring"] }
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }

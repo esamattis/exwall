@@ -102,6 +102,8 @@ impl Authority {
         params.distinguished_name.push(DnType::CommonName, host);
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        // Strict TLS clients require a leaf to identify the CA that signed it.
+        params.use_authority_key_identifier_extension = true;
         let cert = params.signed_by(&key, &self.issuer)?;
         let private_key =
             PrivateKeyDer::try_from(key.serialize_der()).map_err(crate::error::Error::msg)?;

@@ -32,6 +32,7 @@ fi
 install -m 0755 "$binary" /usr/local/bin/ramawall
 install -d -o root -g ramawall -m 0750 /etc/ramawall /etc/ramawall/rules.d
 install -d -o ramawall -g ramawall -m 0700 /var/lib/ramawall
+install -d -o ramawall -g ramawall -m 0700 /var/log/ramawall
 
 # Preserve operator rules and configuration across repeated installs. Existing
 # mitmwall TOML can be copied verbatim with its filename precedence intact.
@@ -87,5 +88,6 @@ if [ "$was_active" -eq 1 ]; then
 fi
 printf '\nInstalled. Start with: sudo systemctl enable --now ramawall\n'
 printf 'Logs: sudo journalctl -u ramawall -f\n'
+printf 'Access log: /var/log/ramawall/access.log\n'
 printf 'Reload rules: sudo systemctl reload ramawall\n'
 printf 'Current shell CA settings: . /etc/profile.d/ramawall.sh\n'

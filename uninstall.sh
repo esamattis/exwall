@@ -24,7 +24,7 @@ fi
 update-ca-certificates
 systemctl daemon-reload
 if [ "${1:-}" = --purge ]; then
-    rm -rf /etc/ramawall /var/lib/ramawall /run/ramawall
+    rm -rf /etc/ramawall /var/lib/ramawall /var/log/ramawall /run/ramawall
     if id ramawall >/dev/null 2>&1; then
         userdel ramawall
     fi

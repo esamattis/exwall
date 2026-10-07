@@ -35,7 +35,8 @@ class EchoHandler(http.server.BaseHTTPRequestHandler):
             return
         body = json.dumps({"path": self.path, "authorization": self.headers.get(
             "Authorization"), "trace": self.headers.get("X-Trace")}).encode()
-        self.send_response(200)
+        status = 502 if self.path == "/allowed?upstream_status=502" else 200
+        self.send_response(status)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -222,7 +223,9 @@ def main():
         rules = root / "rules"
         rules.mkdir()
         config = root / "config.toml"
-        config.write_text("block_dns = true\nmanage_resolv_conf = false\n")
+        access_log = root / "access.log"
+        access_config = f"[access_log]\npath = {json.dumps(str(access_log))}\n"
+        config.write_text("block_dns = true\nmanage_resolv_conf = false\n" + access_config)
         rule_file = rules / "1-test.toml"
         rule_text = '''[[allow]]
 domain = ['127.0.0.1', 'localhost']
@@ -294,6 +297,7 @@ stream = true
                 assert echoed == {"path": "/allowed?query=retained",
                                   "authorization": "replacement", "trace": "injected"}, echoed
                 assert request_http(proxy_port, port, "/allowed", ipv6=True)[0] == 200
+                assert request_http(proxy_port, port, "/allowed?upstream_status=502")[0] == 502
                 status, body = request_http(
                     proxy_port, port, "/allowed", headers={"Authorization": "old", "Connection": "Authorization"})
                 assert status == 200 and json.loads(body)["authorization"] == "replacement"
@@ -382,7 +386,7 @@ stream = true
                 assert request_http(proxy_port, port, "/allowed")[0] == 200
 
                 rule_file.write_text(rule_text)
-                config.write_text("block_dns = false\nmanage_resolv_conf = false\n")
+                config.write_text("block_dns = false\nmanage_resolv_conf = false\n" + access_config)
                 process.send_signal(signal.SIGHUP)
                 deadline = time.monotonic() + 3
                 while query_dns(dns_port, "denied.test") != 0:
@@ -390,6 +394,53 @@ stream = true
                     time.sleep(0.05)
                 process.terminate()
                 assert process.wait(timeout=15) == 0
+                rows = [line.split() for line in access_log.read_text().splitlines()]
+                assert rows and all(len(row) == 9 for row in rows), rows
+                columns = ("timestamp", "protocol", "decision", "rule", "method", "url",
+                           "http_status", "dns_rcode", "error")
+                entries = [dict(zip(columns, row)) for row in rows]
+                matched_rule = str(rule_file) + ":allow#1"
+                assert any(entry["protocol"] == "http" and entry["decision"] == "ALLOW"
+                           and entry["rule"] == matched_rule and entry["method"] == "GET"
+                           and entry["url"].endswith("/allowed?query=retained")
+                           and entry["http_status"] == "200" and entry["error"] == "-"
+                           for entry in entries)
+                assert any(entry["protocol"] == "http" and entry["decision"] == "DENY"
+                           and entry["method"] == "POST" and entry["rule"] == "-"
+                           and entry["http_status"] == "403" and entry["error"] == "-"
+                           for entry in entries)
+                for method in ("GET", "CONNECT"):
+                    assert any(entry["protocol"] == "https" and entry["decision"] == "ALLOW"
+                               and entry["rule"] == matched_rule and entry["method"] == method
+                               and entry["http_status"] == "200" and entry["error"] == "-"
+                               for entry in entries)
+                assert any(entry["protocol"] == "https" and entry["decision"] == "DENY"
+                           and entry["http_status"] == "403" and entry["error"] == "-"
+                           for entry in entries)
+                assert any(entry["protocol"] == "https" and entry["decision"] == "ALLOW"
+                           and entry["http_status"] == "502" and entry["error"] == "UPSTREAM_FAILURE"
+                           for entry in entries)
+                assert any(entry["protocol"] == "http" and entry["decision"] == "ALLOW"
+                           and entry["url"].endswith("/allowed?upstream_status=502")
+                           and entry["http_status"] == "502" and entry["error"] == "-"
+                           for entry in entries)
+                assert any(entry["protocol"] == "dns" and entry["decision"] == "ALLOW"
+                           and entry["rule"] == matched_rule and entry["url"] == "dns://localhost/A"
+                           and entry["dns_rcode"] == "NOERROR" and entry["error"] == "-"
+                           for entry in entries)
+                assert any(entry["protocol"] == "dns" and entry["decision"] == "DENY"
+                           and entry["rule"] == "-" and entry["url"] == "dns://denied.test/A"
+                           and entry["dns_rcode"] == "REFUSED" and entry["error"] == "-"
+                           for entry in entries)
+                assert any(entry["protocol"] == "dns" and entry["decision"] == "ALLOW"
+                           and entry["rule"] == "@dns-bypass" and entry["dns_rcode"] == "NOERROR"
+                           and entry["error"] == "-" for entry in entries)
+                assert all(entry["http_status"] == "-" and entry["method"] == "-"
+                           for entry in entries if entry["protocol"] == "dns")
+                assert all(entry["dns_rcode"] == "-"
+                           for entry in entries if entry["protocol"] != "dns")
+                assert "replacement" not in access_log.read_text()
+                assert "proxy-secret" not in access_log.read_text()
             except BaseException:
                 print(log.read_text(), file=sys.stderr)
                 raise
@@ -400,7 +451,7 @@ stream = true
                 for server in (upstream, secure_upstream, rogue_upstream, dns_udp, dns_tcp):
                     server.shutdown()
                     server.server_close()
-    print("PASS: HTTP filtering, header injection, TLS MITM/CONNECT, HTTP/2, streaming, UDP/TCP DNS, IPv6, reloads")
+    print("PASS: HTTP filtering, header injection, TLS MITM/CONNECT, HTTP/2, streaming, UDP/TCP DNS, IPv6, reloads, access-log decisions and outcomes")
 
 
 if __name__ == "__main__":
