@@ -11,11 +11,13 @@ User=ramawall
 Group=ramawall
 LogsDirectory=ramawall
 LogsDirectoryMode=0700
+ExecStartPre=+/usr/local/bin/ramawall hook guard
 ExecStartPre=/usr/local/bin/ramawall check
 ExecStartPre=+/usr/local/bin/ramawall hook start
 ExecStart=/usr/local/bin/ramawall serve
 ExecReload=/bin/kill -HUP $MAINPID
-ExecStopPost=+/usr/local/bin/ramawall hook stop
+# Enforcement survives stop, restart, and failed starts.
+# To remove it intentionally: systemctl stop ramawall; ramawall hook stop
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=30

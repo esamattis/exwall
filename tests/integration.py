@@ -39,6 +39,9 @@ class EchoHandler(http.server.BaseHTTPRequestHandler):
         status = 502 if self.path == "/allowed?upstream_status=502" else 200
         self.send_response(status)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Upstream-Protocol", self.request_version)
+        if isinstance(self.connection, ssl.SSLSocket):
+            self.send_header("X-Upstream-ALPN", self.connection.selected_alpn_protocol() or "none")
         self.end_headers()
         self.wfile.write(body)
 
@@ -136,7 +139,7 @@ def request_tls(
         proxy_port,
         upstream_port,
         ca_cert,
-        path="/allowed",
+        path="/secure",
         tunnel=False,
         host="localhost"):
     """Verify CA trust while testing either direct TLS interception or CONNECT."""
@@ -154,6 +157,9 @@ def request_tls(
             f"GET {path} HTTP/1.1\r\nHost: {host}:{upstream_port}\r\nConnection: close\r\n\r\n".encode())
         response = http.client.HTTPResponse(secure)
         response.begin()
+        if response.status == 200:
+            assert response.getheader("X-Upstream-Protocol") == "HTTP/1.1"
+            assert response.getheader("X-Upstream-ALPN") == "http/1.1"
         return response.status, response.read()
 
 
@@ -233,10 +239,14 @@ def main():
         rule_file = rules / "1-test.toml"
         rule_text = '''[[allow]]
 domain = ['127.0.0.1', 'localhost']
-pathname_pattern = ['/allowed', '/stream']
+pathname_pattern = ['/secure']
 methods = ['GET']
 inject_headers = [{ name = 'Authorization', value = 'replacement' }, { name = 'X-Trace', value = 'injected' }]
 stream = true
+[[allow]]
+domain = ['127.0.0.1', 'localhost']
+pathname_pattern = ['/allowed', '/stream']
+methods = ['GET']
 '''
         rule_file.write_text(rule_text)
         subprocess.run([str(binary), "init-ca", "--ca-dir", str(ca)],
@@ -246,6 +256,7 @@ stream = true
         upstream = start_server(http.server.ThreadingHTTPServer(("127.0.0.1", 0), EchoHandler))
         secure_upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), EchoHandler)
         tls_context = make_tls_context(root, ca, "localhost")
+        tls_context.set_alpn_protocols(["http/1.1"])
         secure_upstream.socket = tls_context.wrap_socket(secure_upstream.socket, server_side=True)
         start_server(secure_upstream)
         rogue_ca = root / "rogue-ca"
@@ -318,12 +329,13 @@ stream = true
                 assert status == 200, (status, body)
                 echoed = json.loads(body)
                 assert echoed == {"path": "/allowed?query=retained",
-                                  "authorization": "replacement", "trace": "injected"}, echoed
+                                  "authorization": None, "trace": None}, echoed
+                assert request_http(proxy_port, port, "/secure")[0] == 403
                 assert request_http(proxy_port, port, "/allowed", ipv6=True)[0] == 200
                 assert request_http(proxy_port, port, "/allowed?upstream_status=502")[0] == 502
                 status, body = request_http(
                     proxy_port, port, "/allowed", headers={"Authorization": "old", "Connection": "Authorization"})
-                assert status == 200 and json.loads(body)["authorization"] == "replacement"
+                assert status == 200 and json.loads(body)["authorization"] is None
                 assert request_http(
                     proxy_port,
                     port,
@@ -357,6 +369,12 @@ stream = true
                     host="127.0.0.1")[0] == 421
                 assert request_tls(proxy_port, rogue_upstream.server_port, cert)[0] == 502
 
+                subprocess.run(["mise", "exec", "--", "node",
+                                str(Path(__file__).with_name("http2_upstream.mjs")),
+                                str(proxy_port), str(root / "upstream.pem"),
+                                str(root / "upstream.key"), str(cert)],
+                               check=True, timeout=20)
+
                 # curl's HTTP/2-capable client verifies downstream ALPN and framing.
                 result = subprocess.run(["curl",
                                          "--silent",
@@ -368,7 +386,7 @@ stream = true
                                          str(cert),
                                          "--proxy",
                                          f"http://127.0.0.1:{proxy_port}",
-                                         f"https://localhost:{secure_upstream.server_port}/allowed",
+                                         f"https://localhost:{secure_upstream.server_port}/secure",
                                          "--write-out",
                                          "\n%{http_version}"],
                                         capture_output=True,
@@ -422,7 +440,7 @@ stream = true
                 columns = ("timestamp", "protocol", "decision", "rule", "method", "url",
                            "http_status", "dns_rcode", "error")
                 entries = [dict(zip(columns, row)) for row in rows]
-                matched_rule = str(rule_file) + ":allow#1"
+                matched_rule = str(rule_file) + ":allow#2"
                 assert any(entry["protocol"] == "http" and entry["decision"] == "ALLOW"
                            and entry["rule"] == matched_rule and entry["method"] == "GET"
                            and entry["url"].endswith("/allowed?query=retained")
@@ -434,7 +452,7 @@ stream = true
                            for entry in entries)
                 for method in ("GET", "CONNECT"):
                     assert any(entry["protocol"] == "https" and entry["decision"] == "ALLOW"
-                               and entry["rule"] == matched_rule and entry["method"] == method
+                               and entry["rule"] == str(rule_file) + ":allow#1" and entry["method"] == method
                                and entry["http_status"] == "200" and entry["error"] == "-"
                                for entry in entries)
                 assert any(entry["protocol"] == "https" and entry["decision"] == "DENY"
@@ -448,7 +466,7 @@ stream = true
                            and entry["http_status"] == "502" and entry["error"] == "-"
                            for entry in entries)
                 assert any(entry["protocol"] == "dns" and entry["decision"] == "ALLOW"
-                           and entry["rule"] == matched_rule and entry["url"] == "dns://localhost/A"
+                           and entry["rule"] == str(rule_file) + ":allow#1" and entry["url"] == "dns://localhost/A"
                            and entry["dns_rcode"] == "NOERROR" and entry["error"] == "-"
                            for entry in entries)
                 assert any(entry["protocol"] == "dns" and entry["decision"] == "DENY"

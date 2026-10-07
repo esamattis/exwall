@@ -15,6 +15,15 @@ from integration import EchoHandler, free_port, make_tls_context, start_server, 
 from namespace_support import assert_namespace
 
 
+class CountingHandler(EchoHandler):
+    """Record requests so routing checks can prove the attacker was never contacted."""
+
+    def do_GET(self):
+        """Capture received authorization before returning the normal echo response."""
+        self.server.received.append((self.path, self.headers.get("Authorization")))
+        super().do_GET()
+
+
 class IPv6Server(http.server.ThreadingHTTPServer):
     """An IPv6 loopback HTTP upstream for transparent connection tests."""
 
@@ -28,10 +37,10 @@ def command(*args):
     return result.stdout
 
 
-def intercepted_request(proxy_port, server, ca_cert, ipv6, tls, path):
+def intercepted_request(proxy_port, server, ca_cert, ipv6, tls, path, destination=None):
     """Redirect one scoped client socket while leaving upstream proxy sockets untouched."""
     family = socket.AF_INET6 if ipv6 else socket.AF_INET
-    address = "::1" if ipv6 else "127.0.0.1"
+    address = "::1" if ipv6 else "127.0.0.2"
     tool = "ip6tables" if ipv6 else "iptables"
     connection = socket.socket(family)
     connection.settimeout(3)
@@ -49,12 +58,12 @@ def intercepted_request(proxy_port, server, ca_cert, ipv6, tls, path):
                 str(proxy_port)]
     command(tool, "-t", "nat", "-I", "OUTPUT", *redirect)
     try:
-        connection.connect((address, server.server_port))
+        connection.connect((destination or address, server.server_port))
         if tls:
             context = ssl.create_default_context(cafile=str(ca_cert))
-            connection = context.wrap_socket(connection, server_hostname="allowed.test")
+            connection = context.wrap_socket(connection, server_hostname="allowed-v6.test" if ipv6 else "allowed.test")
         connection.sendall(
-            f"GET {path} HTTP/1.1\r\nHost: allowed.test\r\nConnection: close\r\n\r\n".encode())
+            f"GET {path} HTTP/1.1\r\nHost: {'allowed-v6.test' if ipv6 else 'allowed.test'}\r\nConnection: close\r\n\r\n".encode())
         response = http.client.HTTPResponse(connection)
         response.begin()
         return response.status, response.read()
@@ -73,23 +82,32 @@ def main():
         ca = root / "ca"
         command(binary, "init-ca", "--ca-dir", str(ca))
         cert = ca / "ramawall-ca-cert.pem"
+        hosts = root / "hosts"
+        hosts.write_text("127.0.0.2 allowed.test\n::1 allowed-v6.test\n")
+        command("mount", "--bind", str(hosts), "/etc/hosts")
         config = root / "config.toml"
         config.write_text("manage_resolv_conf = false\n"
                           + f"[access_log]\npath = {json.dumps(str(root / 'access.log'))}\n")
         rules = root / "rules"
         rules.mkdir()
         (rules / "1-test.toml").write_text(
-            "[[allow]]\ndomain = 'allowed.test'\npathname_pattern = '/allowed'\ninject_headers = [{name='Authorization', value='injected'}]\n")
-        context = make_tls_context(root, ca, "allowed.test")
+            "[[allow]]\ndomain = ['allowed.test', 'allowed-v6.test']\npathname_pattern = '/secure'\ninject_headers = [{name='Authorization', value='injected'}]\n[[allow]]\ndomain = ['allowed.test', 'allowed-v6.test']\npathname_pattern = '/allowed'\n")
+        context = make_tls_context(root, ca, "allowed.test", ("allowed.test", "allowed-v6.test"))
         servers = []
+        attackers = []
         for ipv6 in (False, True):
             for tls in (False, True):
                 server_class = IPv6Server if ipv6 else http.server.ThreadingHTTPServer
-                address = "::1" if ipv6 else "127.0.0.1"
-                server = server_class((address, 0), EchoHandler)
+                address = "::1" if ipv6 else "127.0.0.2"
+                server = server_class((address, 0), CountingHandler)
+                server.received = []
                 if tls:
                     server.socket = context.wrap_socket(server.socket, server_side=True)
                 servers.append((start_server(server), ipv6, tls))
+                if not ipv6:
+                    attacker = http.server.ThreadingHTTPServer(("127.0.0.1", server.server_port), CountingHandler)
+                    attacker.received = []
+                    attackers.append((start_server(attacker), server, tls))
         proxy_port = free_port()
         dns_port = free_port()
         log = root / "proxy.log"
@@ -115,18 +133,31 @@ def main():
                 wait_for_ready(proxy, proxy_port)
                 for server, ipv6, tls in servers:
                     status, body = intercepted_request(
-                        proxy_port, server, cert, ipv6, tls, "/allowed")
+                        proxy_port, server, cert, ipv6, tls, "/secure" if tls else "/allowed")
                     assert status == 200, (ipv6, tls, status, body, log.read_text())
-                    assert json.loads(body)["authorization"] == "injected"
+                    assert json.loads(body)["authorization"] == ("injected" if tls else None)
+                    if not tls:
+                        assert intercepted_request(proxy_port, server, cert, ipv6, tls, "/secure")[0] == 403
                     assert intercepted_request(
                         proxy_port, server, cert, ipv6, tls, "/denied")[0] == 403
+                for attacker, authorized, tls in attackers:
+                    # The socket targets an attacker, but Host authorizes the other IP.
+                    status, body = intercepted_request(proxy_port, authorized, cert, False, tls,
+                                                       "/secure" if tls else "/allowed",
+                                                       destination="127.0.0.1")
+                    assert status == 200, (tls, status, body, log.read_text())
+                    assert json.loads(body)["authorization"] == ("injected" if tls else None)
+                    if not tls:
+                        assert intercepted_request(proxy_port, authorized, cert, False, False,
+                                                   "/secure", destination="127.0.0.1")[0] == 403
+                    assert attacker.received == [], attacker.received
                 proxy.terminate()
                 assert proxy.wait(timeout=15) == 0
             finally:
                 if proxy.poll() is None:
                     proxy.kill()
                     proxy.wait()
-                for server, _, _ in servers:
+                for server, _, _ in servers + attackers:
                     server.shutdown()
                     server.server_close()
     print("PASS: transparent IPv4/IPv6 HTTP and HTTPS through dual-stack listener, original destinations, upstream TLS identity, filtering")

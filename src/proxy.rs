@@ -15,7 +15,7 @@ use rama::{
         client::EasyHttpWebClient,
         layer::{
             map_response_body::MapResponseBodyLayer,
-            remove_header::{RemoveRequestHeaderLayer, RemoveResponseHeaderLayer},
+            remove_header::RemoveResponseHeaderLayer,
             required_header::AddRequiredRequestHeadersLayer,
             upgrade::{LazyHttpProxyConnectReplyService, UpgradeLayer, Upgraded},
         },
@@ -94,7 +94,7 @@ impl Proxy {
             .without_tls_proxy_support()
             .without_proxy_support()
             .with_tls_support_using_rustls_and_default_http_version(
-                TlsClientConfig::new().with_alpn_http_1(),
+                TlsClientConfig::new().with_alpn_http_auto(),
                 Version::HTTP_11,
             )
             .with_default_http_connector(self.exec.clone())
@@ -103,7 +103,6 @@ impl Proxy {
         let client = (
             MapResponseBodyLayer::new_boxed_streaming_body(),
             RemoveResponseHeaderLayer::hop_by_hop(),
-            RemoveRequestHeaderLayer::hop_by_hop(),
             AddRequiredRequestHeadersLayer::new(),
         )
             .into_layer(client);
@@ -214,6 +213,12 @@ impl Proxy {
         if !matches!(scheme, "http" | "https") {
             return Err((StatusCode::BAD_REQUEST, "unsupported scheme\n"));
         }
+        // Resolve the authorized URI through the proxy's resolver. The client-selected
+        // original IP supplies only a port; it must never override hostname routing.
+        if !rule.inject_headers.is_empty() && scheme != "https" {
+            access.decision(false);
+            return Err((StatusCode::FORBIDDEN, "ramawall: header injection requires HTTPS\n"));
+        }
         let port = authority
             .port_u16()
             .or_else(|| target.tunnel.as_ref().and_then(|a| a.port_u16()))
@@ -232,10 +237,18 @@ impl Proxy {
             .map_err(|_| (StatusCode::BAD_REQUEST, "invalid destination URI\n"))?;
         *request.uri_mut() = uri;
         access.url = request.uri().to_string();
-        if let Some(original) = target.original {
-            request.extensions().insert(rama::net::client::ConnectorTarget(original.into()));
-        }
+        // TE: trailers is legal on HTTP/2 and advertises support for gRPC trailers.
+        let accepts_trailers = request
+            .headers()
+            .get_all("te")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|value| value.trim().eq_ignore_ascii_case("trailers"));
         rama::http::layer::remove_header::remove_hop_by_hop_request_headers(request.headers_mut());
+        if accepts_trailers {
+            request.headers_mut().insert("te", "trailers".parse().expect("static header"));
+        }
         for (name, value) in &rule.inject_headers {
             request.headers_mut().insert(name.clone(), value.clone());
         }
@@ -539,7 +552,7 @@ inject_headers = [{ name = 'Authorization', value = 'replacement' }]
     async fn fixes_route_before_injection_and_cleans_client_headers() {
         let (_directory, proxy, task) = test_proxy().await;
         let mut request = Request::builder()
-            .uri("http://allowed.test/allowed?x=1")
+            .uri("https://allowed.test/allowed?x=1")
             .header("Host", "allowed.test")
             .header("Authorization", "client-supplied")
             .header("Proxy-Authorization", "proxy-secret")
@@ -556,7 +569,34 @@ inject_headers = [{ name = 'Authorization', value = 'replacement' }]
         assert_eq!(request.uri().host_str().unwrap(), "allowed.test");
         assert_eq!(request.uri().query_or_empty(), "x=1");
         assert_eq!(entry.rule, "test:allow#1");
-        assert_eq!(entry.url, "http://allowed.test:80/allowed?x=1");
+        assert_eq!(entry.url, "https://allowed.test:443/allowed?x=1");
+        drop(proxy);
+        task.await.unwrap().unwrap();
+    }
+
+    /// Reject plaintext injections and keep transparent routing bound to the authorized URI.
+    #[tokio::test]
+    async fn rejects_plaintext_secrets_and_original_destination_override() {
+        let (_directory, proxy, task) = test_proxy().await;
+        let target = Target {
+            original: Some("127.0.0.1:8443".parse().unwrap()),
+            ..Target::default()
+        };
+        let mut request =
+            Request::builder().uri("http://allowed.test/allowed").body(Body::empty()).unwrap();
+        let mut entry = access_entry(&request, &target);
+        assert_eq!(
+            proxy.prepare(&mut request, &target, &mut entry).unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
+        assert!(!request.headers().contains_key("authorization"));
+
+        *request.uri_mut() = "https://allowed.test/allowed".parse().unwrap();
+        request.headers_mut().insert("te", "gzip, trailers".parse().unwrap());
+        proxy.prepare(&mut request, &target, &mut entry).unwrap();
+        assert_eq!(request.uri().to_string(), "https://allowed.test:8443/allowed");
+        assert!(request.extensions().get_ref::<rama::net::client::ConnectorTarget>().is_none());
+        assert_eq!(request.headers()["te"], "trailers");
         drop(proxy);
         task.await.unwrap().unwrap();
     }

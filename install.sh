@@ -23,7 +23,7 @@ fi
 was_active=0
 if systemctl is-active --quiet ramawall.service; then
     was_active=1
-    # The existing unit and binary must perform cleanup before being replaced.
+    # Stop using the old unit before replacing its binary and service definition.
     systemctl stop ramawall.service
 fi
 if ! id ramawall >/dev/null 2>&1; then

@@ -34,16 +34,20 @@ Clippy, and unit tests. The rule tests include
 8,160 HTTP and 170 DNS decisions recorded from the original mitmwall Python
 implementation. Protocol integration tests use local upstreams and temporary CA
 material to exercise HTTP filtering, header injection, TLS interception, CONNECT,
-HTTP/2, streaming, UDP/TCP DNS, IPv6 listeners, successful/rejected reloads, and
+HTTP/2-only upstreams, bidirectional streaming with gRPC trailers, HTTP/1.1
+fallback, UDP/TCP DNS, IPv6 listeners, successful/rejected reloads, and
 embedded UI assets over both IPv4 and IPv6.
 
 `integration_tests.sh` also exercises real IPv4/IPv6 firewall startup, repeated
-startup/stop, bypass ordering, original-destination recovery, and exact sysctl
+startup/stop, bypass ordering, authorized-host routing, and exact sysctl
 restoration in disposable network/mount namespaces. With root or passwordless
-sudo, it runs all 37 network cases ported from mitmwall, plus four additional
+sudo, it runs all 37 network cases ported from mitmwall, plus seven additional
 cases covering control-service access, full IPv6 interception, private hook
-state/restoration, and corrupt-state rejection. The original TOML fixtures and
-HTTP case names are retained. Public upstreams are replaced by local HTTP(S),
+state/restoration, corrupt-state rejection, invalid policies, startup failures,
+and real automatic restarts under a private systemd manager. These lifecycle
+tests require `/usr/lib/systemd/systemd`; unit overrides select temporary paths
+and root execution inside the disposable namespaces. The original TOML fixtures
+and HTTP case names are retained. Public upstreams are replaced by local HTTP(S),
 DNS, SSH, and FTP servers in a second namespace, connected through a veth pair.
 Distinct client UIDs verify user bypasses; certificate comparisons verify network
 bypasses and their removal. Allowed requests must reach the upstream, and denied
@@ -183,6 +187,11 @@ include their preceding slash, so `/books/:id?` matches `/books` and
 `/books/123`. Trailing slashes remain strict unless explicitly optional.
 
 Methods default to `GET` and `HEAD`. `methods = "ANY"` allows all methods.
+Injected headers require upstream HTTPS with certificate verification. Requests
+matching an injection rule over plaintext HTTP are denied, including non-secret
+headers. Forwarding resolves the authorized hostname through the proxy's system
+resolver; a transparent connection's original IP cannot override that route.
+
 HTTP authorization, header injection, and streaming settings come from the **first
 matching rule**, matching the current executable mitmwall implementation. Header
 values are never logged. Every response streams, so `stream = true` is accepted
@@ -208,6 +217,7 @@ ramawall --config /etc/mitmwall/config.toml --rules-dir /etc/mitmwall/rules.d ch
 sudo systemctl reload ramawall
 sudo systemctl restart ramawall
 sudo systemctl stop ramawall
+sudo ramawall hook stop       # intentionally remove enforcement and restore host state
 ramawall hook --dry-run start
 ramawall hook --dry-run stop
 ```
@@ -292,31 +302,41 @@ user first. New log files are created with mode `0600`.
 Defaults are dual-stack HTTP(S) on port **58080**, UDP/TCP DNS on **58053**, and
 upstream DNS at **127.0.0.53:53**. `serve --help` exposes alternate listener,
 upstream, and CA paths. `serve` alone never changes host networking. The installed
-systemd unit pairs it with privileged `hook start` and `hook stop` commands.
+systemd unit runs privileged `hook guard` before validation, then `hook start`.
+Upstream TLS negotiates HTTP/2 or HTTP/1.1; streaming bodies and HTTP/2 trailers
+are relayed, including gRPC trailers.
 
 The hooks call `iptables`/`ip6tables` with the xtables lock and argv arguments,
-using owned `RAMAWALL_OUTPUT` and `RAMAWALL_NAT` chains. Custom TCP network/port
+using owned `RAMAWALL_OUTPUT`, `RAMAWALL_NAT`, and bootstrap `RAMAWALL_GUARD`
+chains. Custom TCP network/port
 bypasses precede redirects. The output policy preserves reply-direction
 established inbound connections, proxy/bypass users, systemd-resolved, installed
 NTP users' DNS/NTP, ICMPv6, and loopback/local listeners. All other outbound
 traffic is dropped, including original-direction connections predating startup.
 Startup uses a temporary guard while rebuilding the policy. Cleanup identifies
-owned chains, so changed or malformed config never prevents stopping.
+owned chains, so changed or malformed config never prevents explicit cleanup.
 
 Original forwarding and redirect sysctls are stored privately in
-`/run/ramawall/forwarding.json` and restored exactly on stop. Forwarding newly
+`/run/ramawall/forwarding.json` and restored exactly by `hook stop`. Forwarding newly
 enabled by the service is guarded against transit traffic. When
 `manage_resolv_conf = true` and `/etc/resolv.conf` uses external nameservers, the
 hook saves the original file or symlink and temporarily replaces it with
-systemd-resolved's loopback stub. Stop restores contents/target, permissions,
+systemd-resolved's loopback stub. `hook stop` restores contents/target, permissions,
 and ownership, while preserving replacements made by an administrator. Failed
 restoration retains snapshots and guards for repair and retry. The unit's
-resolved lifecycle dependencies ensure resolver restoration precedes resolved
-shutdown.
+resolved lifecycle dependencies stop the proxy with the resolver. Enforcement
+and saved state remain in place until an explicit `hook stop`.
 
-The firewall is active during service operation and removed on an intentional
-stop, failed-start cleanup, or systemd restart. As in mitmwall, it governs local
-processes and relies on unprivileged applications lacking firewall-changing
+The firewall survives systemd stops, failed starts, and automatic or manual
+restarts. A valid existing policy, including its bypass exceptions, remains
+active if configuration or rules cannot be parsed. On first start, `hook guard`
+installs a minimal deny policy before parsing, preserving root, the proxy,
+resolver, DNS/NTP service exceptions, loopback, inbound replies, and ICMPv6.
+An incomplete installation retains guards and the original snapshots for retry.
+To intentionally disable enforcement, stop the service and run
+`sudo ramawall hook stop`; uninstall does both. Resolver and sysctl restoration
+occurs only on that explicit cleanup, which works with malformed TOML.
+As in mitmwall, it governs local processes and relies on unprivileged applications lacking firewall-changing
 capabilities. Container forwarding policy that was enabled before startup is
 preserved. Historical Python-hook migrations are not run; stop/uninstall the old
 service with its own hooks when migrating.

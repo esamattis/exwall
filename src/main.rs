@@ -71,6 +71,8 @@ enum Action {
 /// Firewall hook operations invoked by systemd's privileged lifecycle commands.
 #[derive(Subcommand)]
 enum HookAction {
+    /// Preserve existing enforcement or install a minimal configuration-independent deny policy.
+    Guard,
     /// Install egress policy and save the original resolver and sysctl state.
     Start,
     /// Restore saved host state and remove managed firewall chains.
@@ -97,15 +99,6 @@ async fn main() -> Result<()> {
             proxy_port,
             dns_port,
         } => {
-            let start = matches!(action, HookAction::Start);
-            let config = if start {
-                Some(config::Config::load(&cli.config)?)
-            } else {
-                None
-            };
-            if start {
-                rules::RuleSet::load(&cli.rules_dir)?;
-            }
             let hooks = hooks::Hooks {
                 dry_run,
                 proxy_user,
@@ -113,6 +106,20 @@ async fn main() -> Result<()> {
                 proxy_port,
                 dns_port,
                 ..hooks::Hooks::default()
+            };
+            if matches!(action, HookAction::Guard | HookAction::Start) {
+                hooks.guard()?;
+            }
+            if matches!(action, HookAction::Guard) {
+                return Ok(());
+            }
+            let start = matches!(action, HookAction::Start);
+            let config = if start {
+                let config = config::Config::load(&cli.config)?;
+                rules::RuleSet::load(&cli.rules_dir)?;
+                Some(config)
+            } else {
+                None
             };
             hooks.run(start, config.as_ref())?;
         }

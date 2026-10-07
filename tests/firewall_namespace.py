@@ -61,6 +61,9 @@ def main():
             accounts.append(":".join(fields))
         passwd.write_text("\n".join(accounts) + "\n")
         command("mount", "--bind", str(passwd), "/etc/passwd")
+        hosts = root / "hosts"
+        hosts.write_text("127.0.0.1 localhost allowed.test\n::1 localhost\n")
+        command("mount", "--bind", str(hosts), "/etc/hosts")
         config = root / "config.toml"
         config.write_text(
             "manage_resolv_conf = false\nbypass_users = []\n[[iptables.bypass]]\nnetwork = '192.0.2.19/24'\nport = 443\n")

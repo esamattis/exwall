@@ -270,32 +270,8 @@ impl Hooks {
         Ok(())
     }
 
-    /// Serialize hook operations and restore host state on startup failure.
-    pub fn run(&self, start: bool, config: Option<&Config>) -> Result<()> {
-        if self.dry_run {
-            if start {
-                let config = config.context("start requires config")?;
-                for firewall in self.firewalls() {
-                    firewall.setup_guard()?;
-                    firewall.install(
-                        config,
-                        &self.proxy_user,
-                        &[],
-                        self.proxy_port,
-                        self.dns_port,
-                    )?;
-                    firewall.clear_setup_guard()?;
-                }
-                println!(
-                    "# Live start also saves/restores forwarding sysctls and resolv.conf; dry-run changes neither."
-                );
-            } else {
-                for firewall in self.firewalls() {
-                    firewall.clear()?;
-                }
-            }
-            return Ok(());
-        }
+    /// Acquire the private lifecycle lock before changing enforcement or saved state.
+    fn lock(&self) -> Result<fs::File> {
         // SAFETY: geteuid has no pointer arguments or preconditions.
         ensure!(
             unsafe { libc::geteuid() } == 0,
@@ -312,6 +288,50 @@ impl Hooks {
             unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } == 0,
             "failed to lock hooks"
         );
+        Ok(lock)
+    }
+
+    /// Establish fail-closed enforcement before any fallible configuration parsing.
+    pub fn guard(&self) -> Result<()> {
+        let _lock = if self.dry_run {
+            None
+        } else {
+            Some(self.lock()?)
+        };
+        for firewall in self.firewalls() {
+            firewall.guard(&self.proxy_user)?;
+        }
+        Ok(())
+    }
+
+    /// Serialize installation or explicit removal, retaining protection after failures.
+    pub fn run(&self, start: bool, config: Option<&Config>) -> Result<()> {
+        if self.dry_run {
+            if start {
+                let config = config.context("start requires config")?;
+                for firewall in self.firewalls() {
+                    firewall.setup_guard()?;
+                    firewall.install(
+                        config,
+                        &self.proxy_user,
+                        &[],
+                        self.proxy_port,
+                        self.dns_port,
+                    )?;
+                    firewall.clear_guard()?;
+                    firewall.clear_setup_guard()?;
+                }
+                println!(
+                    "# Live start also saves/restores forwarding sysctls and resolv.conf; dry-run changes neither."
+                );
+            } else {
+                for firewall in self.firewalls() {
+                    firewall.clear()?;
+                }
+            }
+            return Ok(());
+        }
+        let _lock = self.lock()?;
         if start {
             let config = config.context("start requires config")?;
             for user in config
@@ -346,19 +366,15 @@ impl Hooks {
                     )?;
                 }
                 for firewall in self.firewalls() {
+                    firewall.clear_guard()?;
                     firewall.clear_setup_guard()?;
                 }
                 Ok(())
             })();
             if let Err(error) = work {
-                // Keep egress closed until ExecStopPost cleans up a failed start.
-                let forwarding = self.forwarding_stop();
-                let resolver = self.resolver_stop();
-                let message = format!(
-                    "startup failed (state restoration: forwarding={forwarding:?}, \
-                     resolver={resolver:?}); stop hook must clean firewall rules"
-                );
-                return Err(error).context(message);
+                // Retries retain enforcement and the original snapshots. Only an
+                // explicit operator stop may remove policy and restore host state.
+                return Err(error).context("startup failed; enforcement retained; repair and retry or explicitly run hook stop");
             }
         } else {
             // Restore forwarding before removing guards; preserve guards on restoration failure.

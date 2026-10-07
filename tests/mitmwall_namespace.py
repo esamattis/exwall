@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 
 from integration import EchoHandler, free_port, make_tls_context, start_server, wait_for_ready
 from namespace_support import assert_namespace
+from systemd_lifecycle import check_systemd_lifecycle
 
 TESTS = Path(__file__).resolve().parent
 SYSCTLS = ("net.ipv4.ip_forward", "net.ipv6.conf.all.forwarding",
@@ -638,6 +639,69 @@ class RamawallNetworkTests(unittest.TestCase):
             self.assertFalse(state_file.exists())
         finally:
             command(*self.hook_args, "start")
+
+    def test_invalid_policy_and_startup_failure_retain_enforcement(self):
+        """Keep ordinary users restricted across malformed files, retries, and listener failure."""
+        snapshot = self.firewall_snapshot()
+        saved = (self.state / "forwarding.json").read_bytes()
+        rule = self.rules / "5-integration.toml"
+        original_rule = rule.read_text()
+        try:
+            for path in (rule, self.config):
+                original = path.read_text()
+                path.write_text("not valid TOML")
+                for _ in range(3):
+                    self.assertNotEqual(command(*self.hook_args, "start", check=False).returncode, 0)
+                    self.assertEqual(self.firewall_snapshot(), snapshot)
+                    self.assertEqual((self.state / "forwarding.json").read_bytes(), saved)
+                    self.assertEqual(self.sysctl_values(), ["1", "1", "0"])
+                    self.assert_direct_tcp_blocked("ftp.ubuntu-tw.org", 21)
+                path.write_text(original)
+            # Valid hooks followed by a listener startup failure must also keep policy.
+            command(*self.hook_args, "start")
+            failed = command(self.binary, "--config", str(self.config), "--rules-dir", str(self.rules),
+                             "serve", "--listen", f"[::]:{self.proxy_port}",
+                             "--dns-listen", f"[::]:{self.dns_port}", "--ca-dir", str(self.ca),
+                             check=False)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("bind HTTP proxy", failed.stderr)
+            self.assertEqual(self.firewall_snapshot(), snapshot)
+            self.assert_direct_tcp_blocked("ftp.ubuntu-tw.org", 21)
+        finally:
+            rule.write_text(original_rule)
+            self.config.write_text(self.config_text)
+            command(*self.hook_args, "start")
+
+    def test_initial_invalid_configuration_installs_bootstrap_guard(self):
+        """Deny ordinary-user egress before parsing broken first-start configuration or rules."""
+        rule = self.rules / "5-integration.toml"
+        original_rule = rule.read_text()
+        try:
+            for path in (self.config, rule):
+                command(*self.hook_args, "stop")
+                previous = path.read_text()
+                path.write_text("not valid TOML")
+                for _ in range(2):
+                    self.assertNotEqual(command(*self.hook_args, "start", check=False).returncode, 0)
+                    for tool in ("iptables", "ip6tables"):
+                        self.assertIn("RAMAWALL_GUARD", command(tool, "-S", "OUTPUT").stdout)
+                    # Root remains an administrative bypass with unparseable policy.
+                    self.assertEqual(self.client("tcp", user="root", host="ftp.ubuntu-tw.org", port=21),
+                                     {"result": True})
+                    result = self.client("tcp", host="ftp.ubuntu-tw.org", port=21)
+                    self.assertEqual(result.get("error_type"), "TimeoutError", result)
+                command(*self.hook_args, "stop")
+                self.assertEqual(self.firewall_snapshot(), self.baseline)
+                self.assertEqual(self.sysctl_values(), self.original_sysctls)
+                path.write_text(previous)
+        finally:
+            self.config.write_text(self.config_text)
+            rule.write_text(original_rule)
+            command(*self.hook_args, "start")
+
+    def test_systemd_failures_and_automatic_restarts_remain_closed(self):
+        """Exercise the production unit in a private manager inside the fixture namespaces."""
+        check_systemd_lifecycle(self)
 
     def test_corrupt_forwarding_state_fails_without_sysctl_changes(self):
         """Reject corrupt snapshots without changing forwarding or losing diagnostic context."""

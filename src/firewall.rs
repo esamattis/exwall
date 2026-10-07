@@ -8,6 +8,7 @@ use std::{
 
 pub const OUTPUT: &str = "RAMAWALL_OUTPUT";
 pub const NAT: &str = "RAMAWALL_NAT";
+const GUARD: &str = "RAMAWALL_GUARD";
 const SETUP: &str = "ramawall-setup-guard";
 const FORWARD: &str = "ramawall-forwarding-guard";
 const ABSENT_RULE: &str = "Bad rule (does a matching rule exist in that chain?).";
@@ -114,6 +115,82 @@ impl Firewall {
         self.checked(&strings(&["-t", table, "-F", chain]))
     }
 
+    /// Keep existing enforcement, or attach a configuration-independent deny policy.
+    pub fn guard(&self, proxy_user: &str) -> Result<()> {
+        if self.chain("filter", OUTPUT)? {
+            // A restart must retain the complete previous policy and its exceptions.
+            return Ok(());
+        }
+        let jump = Self::rule_args("filter", "-C", "OUTPUT", &strings(&["-j", GUARD]));
+        if self.chain("filter", GUARD)? && self.probe(&jump, ABSENT_RULE)? {
+            return Ok(());
+        }
+        self.rebuild("filter", GUARD)?;
+        self.append(
+            "filter",
+            GUARD,
+            &strings(&["-m", "conntrack", "--ctdir", "REPLY", "-j", "ACCEPT"]),
+        )?;
+        self.append(
+            "filter",
+            GUARD,
+            &strings(&["-m", "owner", "--uid-owner", "0", "-j", "ACCEPT"]),
+        )?;
+        for user in [proxy_user, "systemd-resolve", "systemd-timesync", "_chrony", "ntp"] {
+            if user_exists(user)? {
+                let protocols: &[(&str, &str)] =
+                    if matches!(user, "systemd-timesync" | "_chrony" | "ntp") {
+                        &[("udp", "123"), ("udp", "53"), ("tcp", "53")]
+                    } else {
+                        &[]
+                    };
+                if protocols.is_empty() {
+                    self.append(
+                        "filter",
+                        GUARD,
+                        &strings(&["-m", "owner", "--uid-owner", user, "-j", "ACCEPT"]),
+                    )?;
+                } else {
+                    for (protocol, port) in protocols {
+                        self.append(
+                            "filter",
+                            GUARD,
+                            &strings(&[
+                                "-p",
+                                protocol,
+                                "--dport",
+                                port,
+                                "-m",
+                                "owner",
+                                "--uid-owner",
+                                user,
+                                "-j",
+                                "ACCEPT",
+                            ]),
+                        )?;
+                    }
+                }
+            }
+        }
+        self.append("filter", GUARD, &strings(&["-o", "lo", "-j", "ACCEPT"]))?;
+        if self.command == "ip6tables" {
+            self.append("filter", GUARD, &strings(&["-p", "ipv6-icmp", "-j", "ACCEPT"]))?;
+        }
+        self.append("filter", GUARD, &strings(&["-j", "DROP"]))?;
+        self.checked(&Self::rule_args("filter", "-I", "OUTPUT", &strings(&["-j", GUARD])))?;
+        Ok(())
+    }
+
+    /// Remove the bootstrap policy only after replacement enforcement is installed.
+    pub fn clear_guard(&self) -> Result<()> {
+        if self.chain("filter", GUARD)? {
+            self.remove("filter", "OUTPUT", &strings(&["-j", GUARD]))?;
+            self.checked(&strings(&["-t", "filter", "-F", GUARD]))?;
+            self.checked(&strings(&["-t", "filter", "-X", GUARD]))?;
+        }
+        Ok(())
+    }
+
     /// Temporarily block outbound original-direction packets while rebuilding.
     pub fn setup_guard(&self) -> Result<()> {
         self.first(
@@ -209,7 +286,8 @@ impl Firewall {
                 self.checked(&strings(&["-t", table, "-X", chain]))?;
             }
         }
-        self.clear_setup_guard()
+        self.clear_setup_guard()?;
+        self.clear_guard()
     }
 }
 
