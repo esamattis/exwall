@@ -46,8 +46,9 @@ struct RawRule {
     pathname_pattern: Option<Strings>,
     pathname_regex: Option<Strings>,
     inject_headers: Option<Vec<RawHeader>>,
-    #[serde(default)]
-    stream: bool,
+    /// Accept the legacy streaming option; all proxy responses already stream.
+    #[serde(default, rename = "stream")]
+    _stream: bool,
 }
 
 /// A configured upstream header name and value.
@@ -67,7 +68,6 @@ pub struct Rule {
     methods: Vec<String>,
     paths: Vec<Regex>,
     pub inject_headers: Vec<(HeaderName, HeaderValue)>,
-    pub stream: bool,
 }
 
 /// Rules in deterministic filename and table order.
@@ -93,15 +93,9 @@ fn compile_regex(source: &str, insensitive: bool) -> Result<Regex> {
     Ok(fancy_regex::RegexBuilder::new(&source).backtrack_limit(100_000).build()?)
 }
 
-/// Evaluate a regex and deny matches when evaluation exceeds its limits.
+/// Evaluate a regex, treating evaluation errors as no match without application logging.
 fn matches(re: &Regex, value: &str) -> bool {
-    match re.is_match(value) {
-        Ok(result) => result,
-        Err(error) => {
-            tracing::warn!(%error, "rule regex evaluation failed; treating as no match");
-            false
-        }
-    }
+    re.is_match(value).unwrap_or(false)
 }
 
 impl Rule {
@@ -198,7 +192,6 @@ impl RuleSet {
                     methods,
                     paths,
                     inject_headers,
-                    stream: raw.stream,
                 })
             })()
             .with_context(|| name)?;

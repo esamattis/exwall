@@ -107,7 +107,6 @@ impl Dns {
         let (request, allowed, mut access) = inspected;
         if !allowed {
             access.entry().dns_response("REFUSED");
-            tracing::warn!(questions = ?request.queries(), "blocked DNS request");
             return error_response(&request, ResponseCode::Refused);
         }
         match timeout(Duration::from_secs(10), self.forward(wire, tcp)).await {

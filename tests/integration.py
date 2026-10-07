@@ -235,7 +235,7 @@ def main():
         ui_port = free_port()
         access_config = (f"[access_log]\npath = {json.dumps(str(access_log))}\n"
                          f"[ui]\nhosts = ['127.0.0.1', '::1']\nport = {ui_port}\n")
-        config.write_text("block_dns = true\nmanage_resolv_conf = false\n" + access_config)
+        config.write_text("log_level = 'debug'\nblock_dns = true\nmanage_resolv_conf = false\n" + access_config)
         rule_file = rules / "1-test.toml"
         rule_text = '''[[allow]]
 domain = ['127.0.0.1', 'localhost']
@@ -435,12 +435,17 @@ methods = ['GET']
                     time.sleep(0.05)
                 process.terminate()
                 assert process.wait(timeout=15) == 0
+                application_log = log.read_text()
+                for message in ("allowed HTTP request", "blocked HTTP request", "blocked DNS request",
+                                "rule regex evaluation failed"):
+                    assert message not in application_log, application_log
                 rows = [line.split() for line in access_log.read_text().splitlines()]
                 assert rows and all(len(row) == 9 for row in rows), rows
                 columns = ("timestamp", "protocol", "decision", "rule", "method", "url",
                            "http_status", "dns_rcode", "error")
                 entries = [dict(zip(columns, row)) for row in rows]
                 matched_rule = str(rule_file) + ":allow#2"
+                assert matched_rule not in application_log, application_log
                 assert any(entry["protocol"] == "http" and entry["decision"] == "ALLOW"
                            and entry["rule"] == matched_rule and entry["method"] == "GET"
                            and entry["url"].endswith("/allowed?query=retained")

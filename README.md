@@ -232,7 +232,9 @@ so invalid configuration never prevents guarding or cleanup.
 
 Application logs still go to stdout and the systemd journal. Independently of
 `log_level`, access logs record every HTTP(S) request handled by the proxy and
-every DNS message processed by the DNS service. Explicit CONNECT requests have
+every DNS message processed by the DNS service. Rule matches and allow/deny
+decisions appear only in the dedicated access log, even at debug level.
+Explicit CONNECT requests have
 their own entry in addition to the HTTPS requests inside the tunnel. Traffic
 that bypasses the proxy is not visible to the access logger.
 

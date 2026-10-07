@@ -198,12 +198,10 @@ impl Proxy {
         let policy = self.policy.load();
         let Some(rule) = policy.rules.request(&host, request.method().as_str(), &path) else {
             access.decision(false);
-            tracing::warn!(%host, method = %request.method(), pathname = %request.uri().path_or_root(), "blocked HTTP request");
             return Err((StatusCode::FORBIDDEN, "ramawall: no allow rule matched\n"));
         };
         access.decision(true);
         access.rule.clone_from(&rule.name);
-        tracing::debug!(%host, method = %request.method(), rule = %rule.name, stream = rule.stream, "allowed HTTP request");
         // Fix the route before injecting headers; credentials can never change the selected destination.
         let scheme = if target.tls {
             "https"
