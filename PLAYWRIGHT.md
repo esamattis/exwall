@@ -36,9 +36,6 @@ and `openssl`. Missing privileges, namespace support, or Chromium fail the run.
 Node's pinned version executes `.mts` files directly. Child commands are spawned
 through `zx`, with argument arrays quoted by its template API.
 
-`mise exec -- pnpm test:ui` still runs the separate Vite-based UI tests with mocked
-REST responses. Those tests do not start exwall or firewall hooks.
-
 ## Helper files and imports
 
 All Playwright support scripts live in `tests/playwright_helpers/`.

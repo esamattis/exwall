@@ -2,7 +2,6 @@
     "include": [
         "ui/**/*.ts",
         "ui/**/*.tsx",
-        "playwright.config.ts",
         "playwright.e2e.config.ts",
         "tests/playwright_helpers/**/*.mts"
     ],

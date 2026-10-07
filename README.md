@@ -405,10 +405,8 @@ transparent traffic. CONNECT performs TLS interception and every inner HTTP
 request is filtered; it never grants an unrestricted byte tunnel. Conflicting
 request authorities, Host headers, and TLS server names are rejected.
 
-Run UI browser tests with `mise exec -- pnpm test:ui`. Install Chromium once with
-`mise exec -- pnpm exec playwright install --with-deps chromium`. These tests start only Vite
-and use Playwright's built-in `page.route()` mocking for all REST API requests;
-they do not start exwall or invoke firewall hooks.
+Install Chromium once with
+`mise exec -- pnpm exec playwright install --with-deps chromium`.
 
 Run full browser E2E tests with `mise exec -- pnpm test:e2e` (or
 `./e2e_tests.sh`). They run the production exwall binary and real hooks in

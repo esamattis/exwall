@@ -10,12 +10,11 @@
         "build:ui": "pnpm types && vite build ./ui",
         "build": "pnpm build:ui && cargo build --locked",
         "types": "tsc -p tsconfig.json",
-        "lint": "oxlint --type-aware --deny-warnings ui tests/playwright_helpers playwright.config.ts playwright.e2e.config.ts",
+        "lint": "oxlint --type-aware --deny-warnings ui tests/playwright_helpers playwright.e2e.config.ts",
         "lint:fix": "pnpm lint --fix",
-        "format": "oxfmt --write ui package.json tsconfig.json .oxlintrc.json .oxfmtrc.json playwright.config.ts playwright.e2e.config.ts tests/playwright_helpers",
-        "format:check": "oxfmt --check ui package.json tsconfig.json .oxlintrc.json .oxfmtrc.json playwright.config.ts playwright.e2e.config.ts tests/playwright_helpers",
+        "format": "oxfmt --write ui package.json tsconfig.json .oxlintrc.json .oxfmtrc.json playwright.e2e.config.ts tests/playwright_helpers",
+        "format:check": "oxfmt --check ui package.json tsconfig.json .oxlintrc.json .oxfmtrc.json playwright.e2e.config.ts tests/playwright_helpers",
         "check": "pnpm types && pnpm lint && pnpm format:check",
-        "test:ui": "playwright test",
         "test:e2e": "node tests/playwright_helpers/run_e2e.mts"
     },
     "dependencies": {
