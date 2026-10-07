@@ -10,7 +10,7 @@ use std::{
     fs,
     io::Write,
     os::unix::{
-        fs::{MetadataExt, PermissionsExt, symlink},
+        fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink},
         io::AsRawFd,
     },
     path::{Path, PathBuf},
@@ -40,6 +40,8 @@ struct ResolverState {
 
 /// Host paths and listener settings used by privileged service hooks.
 pub struct Hooks {
+    /// Directory containing administrator rules and the private UI rules file.
+    pub rules_dir: PathBuf,
     pub state_dir: PathBuf,
     pub resolv_conf: PathBuf,
     pub resolved_stub: PathBuf,
@@ -52,6 +54,7 @@ impl Default for Hooks {
     /// Return the installed service paths and mitmwall-compatible ports.
     fn default() -> Self {
         Self {
+            rules_dir: "/etc/exwall/rules.d".into(),
             state_dir: "/run/exwall".into(),
             resolv_conf: "/etc/resolv.conf".into(),
             resolved_stub: "/run/systemd/resolve/stub-resolv.conf".into(),
@@ -293,6 +296,21 @@ impl Hooks {
         Ok(lock)
     }
 
+    /// Create the UI rules file and make existing contents private to the service account.
+    fn prepare_web_rules(&self) -> Result<()> {
+        let mut ids = Vec::new();
+        for flag in ["-u", "-g"] {
+            let mut command = Command::new("id");
+            command.args([flag, "--", &self.proxy_user]).env("LC_ALL", "C");
+            log_command(&command);
+            let output = command.output()?;
+            ensure!(output.status.success(), "cannot resolve service account {}", self.proxy_user);
+            ids.push(String::from_utf8(output.stdout)?.trim().parse::<u32>()?);
+        }
+        fs::create_dir_all(&self.rules_dir)?;
+        prepare_web_rules_file(&self.rules_dir.join("05-web.toml"), ids[0], ids[1])
+    }
+
     /// Establish fail-closed enforcement before configuration failures can abort startup.
     pub fn guard(&self) -> Result<()> {
         let _lock = if self.dry_run {
@@ -323,6 +341,11 @@ impl Hooks {
                     firewall.clear_guard()?;
                     firewall.clear_setup_guard()?;
                 }
+                println!(
+                    "# Create/retain {} owned by {} with mode 0600",
+                    self.rules_dir.join("05-web.toml").display(),
+                    self.proxy_user
+                );
                 println!(
                     "# Live start also saves/restores forwarding sysctls and resolv.conf; dry-run changes neither."
                 );
@@ -356,6 +379,7 @@ impl Hooks {
                 for firewall in self.firewalls() {
                     firewall.setup_guard()?;
                 }
+                self.prepare_web_rules()?;
                 self.resolver_start(config.manage_resolv_conf)?;
                 self.forwarding_start()?;
                 for firewall in self.firewalls() {
@@ -428,6 +452,23 @@ fn replace_symlink(path: &Path, target: &Path, owner: Option<(u32, u32)>) -> Res
     Ok(())
 }
 
+/// Retain existing rules and use a file descriptor to prevent symlink ownership changes.
+fn prepare_web_rules_file(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    ensure!(file.metadata()?.is_file(), "UI rules must be a regular file");
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    chown_fd(&file, uid, gid)?;
+    file.sync_all()?;
+    Ok(())
+}
+
 /// Detect resolver configurations that contain non-loopback nameservers.
 fn external_nameservers(path: &Path) -> Result<bool> {
     let text = fs::read_to_string(path)?;
@@ -454,6 +495,30 @@ fn external_nameservers(path: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Verify private UI file creation, repeated-start preservation, and symlink rejection.
+    #[test]
+    fn private_web_rules_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("05-web.toml");
+        // SAFETY: these identity syscalls take no pointers and have no preconditions.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        prepare_web_rules_file(&path, uid, gid).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+        fs::write(&path, "[[allow]]\ndomain = 'retained.test'\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        prepare_web_rules_file(&path, uid, gid).unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        assert_eq!((metadata.uid(), metadata.gid()), (uid, gid));
+        assert!(fs::read_to_string(&path).unwrap().contains("retained.test"));
+        let target = temporary.path().join("untouched");
+        fs::write(&target, "target").unwrap();
+        fs::remove_file(&path).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(prepare_web_rules_file(&path, uid, gid).is_err());
+        assert_eq!(fs::read_to_string(target).unwrap(), "target");
+    }
+
     /// Verify resolver restoration and preservation of administrator replacements.
     #[test]
     fn resolver_restoration_preserves_files_symlinks_and_admin_edits() {

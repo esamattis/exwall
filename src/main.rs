@@ -14,6 +14,7 @@ mod rules_watch;
 mod state;
 mod udp;
 mod ui;
+mod ui_api;
 
 use crate::error::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
@@ -105,6 +106,7 @@ async fn main() -> Result<()> {
             let log_level = hook_config.as_ref().map_or("info", |config| config.tracing_level());
             init_logging(log_level);
             let hooks = hooks::Hooks {
+                rules_dir: cli.rules_dir.clone(),
                 dry_run,
                 proxy_user,
                 state_dir,
@@ -241,8 +243,12 @@ async fn serve(
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut http_task = tokio::spawn(proxy.serve(http));
     let mut dns_task = tokio::spawn(dns.serve(dns_udp, dns_tcp));
-    let mut ui_task =
-        tokio::spawn(ui::serve(ui_listeners, rama::rt::Executor::graceful(shutdown.guard())));
+    let ui_api = Arc::new(ui_api::Api::new(ui_config.clone(), rules_dir.clone(), policy.clone()));
+    let mut ui_task = tokio::spawn(ui::serve(
+        ui_listeners,
+        rama::rt::Executor::graceful(shutdown.guard()),
+        ui_api,
+    ));
     let mut access_finished = false;
     tracing::info!(hosts = ?ui_config.hosts, port = ui_config.port, "UI listeners configured");
     tracing::info!(%listen, %dns_listen, rules = policy.load().rules.rules.len(), "exwall ready");

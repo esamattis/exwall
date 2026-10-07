@@ -1,5 +1,5 @@
 # mitmwall allow rules
-# Installed to /etc/mitmwall/rules.d/5-examples.toml.
+# Installed to /etc/exwall/rules.d/10-examples.toml.
 # All outbound HTTP/HTTPS traffic is blocked unless it matches an [[allow]] rule.
 #
 # ─── Overview ─────────────────────────────────────────────────────────────────

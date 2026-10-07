@@ -42,10 +42,14 @@ pub fn bind(config: &UiConfig) -> Result<Vec<TcpListener>> {
 }
 
 /// Supervise UI listeners together so a listener failure fails the service.
-pub async fn serve(listeners: Vec<TcpListener>, exec: Executor) -> Result<()> {
+pub async fn serve(
+    listeners: Vec<TcpListener>,
+    exec: Executor,
+    api: Arc<crate::ui_api::Api>,
+) -> Result<()> {
     let mut tasks = JoinSet::new();
     for listener in listeners {
-        tasks.spawn(serve_listener(listener, exec.clone()));
+        tasks.spawn(serve_listener(listener, exec.clone(), api.clone()));
     }
     match tasks.join_next().await {
         Some(result) => result.context("UI listener task failed")?,
@@ -54,7 +58,11 @@ pub async fn serve(listeners: Vec<TcpListener>, exec: Executor) -> Result<()> {
 }
 
 /// Accept bounded HTTP connections and cancel them when the listener shuts down.
-async fn serve_listener(listener: TcpListener, exec: Executor) -> Result<()> {
+async fn serve_listener(
+    listener: TcpListener,
+    exec: Executor,
+    api: Arc<crate::ui_api::Api>,
+) -> Result<()> {
     let limit = Arc::new(Semaphore::new(128));
     let mut connections = JoinSet::new();
     loop {
@@ -64,7 +72,17 @@ async fn serve_listener(listener: TcpListener, exec: Executor) -> Result<()> {
                 let Ok(permit) = limit.clone().try_acquire_owned() else {
                     continue;
                 };
-                let server = HttpServer::auto(exec.clone()).service(service_fn(response));
+                let api = api.clone();
+                let server = HttpServer::auto(exec.clone()).service(service_fn(move |request: Request| {
+                    let api = api.clone();
+                    async move {
+                        if request.uri().path_or_root().starts_with("/api/") {
+                            Ok::<_, Infallible>(api.response(request).await)
+                        } else {
+                            response(request).await
+                        }
+                    }
+                }));
                 connections.spawn(async move {
                     let _permit = permit;
                     if let Err(error) = server.serve(rama::tcp::TcpStream::new(stream)).await {

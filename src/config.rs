@@ -49,6 +49,12 @@ pub struct UiConfig {
     pub hosts: Vec<std::net::IpAddr>,
     /// Shared TCP port for every configured interface.
     pub port: u16,
+    /// Login account; an empty username or password disables authenticated API access.
+    pub username: String,
+    /// Login password shared by cookie login and HTTP Basic authentication.
+    pub password: String,
+    /// Directory containing private, persistent JSON cookie sessions.
+    pub sessions_dir: PathBuf,
 }
 
 impl Default for UiConfig {
@@ -57,6 +63,9 @@ impl Default for UiConfig {
         Self {
             hosts: vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)],
             port: 58000,
+            username: String::new(),
+            password: String::new(),
+            sessions_dir: "/var/lib/exwall/ui/sessions/".into(),
         }
     }
 }
@@ -149,6 +158,10 @@ impl Config {
         ensure!(
             config.bypass_users.iter().all(|s| !s.is_empty()),
             "bypass_users must contain nonempty names"
+        );
+        ensure!(
+            !config.ui.sessions_dir.as_os_str().is_empty(),
+            "ui.sessions_dir must not be empty"
         );
         ensure!(config.ui.port > 0, "ui.port must be 1..65535");
         for (index, host) in config.ui.hosts.iter().enumerate() {

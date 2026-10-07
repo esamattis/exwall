@@ -1,5 +1,6 @@
 """Exercise the real proxy with local upstreams; never modify host network policy."""
 
+import base64
 import http.client
 import http.server
 import json
@@ -234,7 +235,9 @@ def main():
         access_log = root / "access.log"
         ui_port = free_port()
         access_config = (f"[access_log]\npath = {json.dumps(str(access_log))}\n"
-                         f"[ui]\nhosts = ['127.0.0.1', '::1']\nport = {ui_port}\n")
+                         f"[ui]\nhosts = ['127.0.0.1', '::1']\nport = {ui_port}\n"
+                         f"username = 'admin'\npassword = 'integration-password'\n"
+                         f"sessions_dir = {json.dumps(str(root / 'sessions'))}\n")
         config.write_text("log_level = 'debug'\nblock_dns = true\nmanage_resolv_conf = false\n" + access_config)
         rule_file = rules / "1-test.toml"
         rule_text = '''[[allow]]
@@ -318,12 +321,55 @@ methods = ['GET']
                     ui_response = connection.getresponse()
                     assert ui_response.status == 200
                     assert ui_response.getheader("Content-Type").startswith("text/javascript")
-                    assert b"Hello world" in ui_response.read()
+                    assert b"Save changes" in ui_response.read()
                     connection.request("GET", "/assets/missing.js")
                     ui_response = connection.getresponse()
                     assert ui_response.status == 404
                     ui_response.read()
                     connection.close()
+                connection = http.client.HTTPConnection("127.0.0.1", ui_port, timeout=3)
+                connection.request("GET", "/api/rules")
+                response = connection.getresponse()
+                assert response.status == 401
+                response.read()
+                headers = {"Content-Type": "application/json"}
+                connection.request("POST", "/api/login", json.dumps({
+                    "username": "admin", "password": "integration-password"}), headers)
+                response = connection.getresponse()
+                assert response.status == 200
+                cookie = response.getheader("Set-Cookie").split(";")[0]
+                response.read()
+                assert len(list((root / "sessions").glob("*.json"))) == 1
+                headers["Cookie"] = cookie
+                connection.request("GET", "/api/rules", headers=headers)
+                response = connection.getresponse()
+                assert response.status == 200
+                document = json.loads(response.read())
+                assert document["rules"] == []
+                document["rules"] = [{"index": None, "fields": {"domain": "ui.test"}}]
+                connection.request("PUT", "/api/rules", json.dumps(document), headers)
+                response = connection.getresponse()
+                assert response.status == 200, response.read()
+                document = json.loads(response.read())
+                assert 'domain = "ui.test"' in (rules / "05-web.toml").read_text()
+                time.sleep(0.3)
+                assert query_dns(dns_port, "ui.test") == 0
+                basic = base64.b64encode(b"admin:integration-password").decode()
+                connection.request("GET", "/api/rules", headers={"Authorization": f"Basic {basic}"})
+                response = connection.getresponse()
+                assert response.status == 200
+                assert json.loads(response.read())["revision"] == document["revision"]
+                document["rules"] = []
+                connection.request("PUT", "/api/rules", json.dumps(document), headers)
+                response = connection.getresponse()
+                assert response.status == 200
+                response.read()
+                connection.request("POST", "/api/logout", "{}", headers)
+                response = connection.getresponse()
+                assert response.status == 200
+                response.read()
+                connection.close()
+                assert not list((root / "sessions").glob("*.json"))
                 port = upstream.server_port
                 status, body = request_http(proxy_port, port, "/allowed?query=retained")
                 assert status == 200, (status, body)

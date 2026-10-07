@@ -53,7 +53,7 @@ if [ -d /etc/mitmwall/rules.d ]; then
     done
 fi
 if ! find /etc/exwall/rules.d -maxdepth 1 -name '*.toml' -print -quit | read -r unused; then
-    install -o root -g exwall -m 0640 "$scriptdir/example-rules.toml" /etc/exwall/rules.d/5-examples.toml
+    install -o root -g exwall -m 0640 "$scriptdir/example-rules.toml" /etc/exwall/rules.d/10-examples.toml
 fi
 runuser -u exwall -- /usr/local/bin/exwall check
 runuser -u exwall -- /usr/local/bin/exwall init-ca

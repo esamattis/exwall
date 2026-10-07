@@ -1,5 +1,5 @@
 {
-    "include": ["ui/**/*.ts", "ui/**/*.tsx"],
+    "include": ["ui/**/*.ts", "ui/**/*.tsx", "playwright.config.ts"],
     "compilerOptions": {
         "target": "ES2022",
         "jsx": "react-jsx",

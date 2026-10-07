@@ -69,7 +69,7 @@ namespace support is also reported explicitly.
 
 ## Web UI development
 
-The Hello world page uses React, TypeScript, TanStack Router and Query, Tailwind
+The login and rules editor use React, TypeScript, TanStack Router and Query, Tailwind
 CSS, and Vite. TypeScript is strict with `noUncheckedIndexedAccess`. Oxlint runs
 with type-aware checks, and oxfmt formats the frontend. Package versions are
 pinned in `package.json` and `pnpm-lock.yaml`. Node and pnpm versions are defined
@@ -99,12 +99,47 @@ Configure literal IPv4/IPv6 bind addresses and a shared TCP port in `config.toml
 [ui]
 hosts = ["127.0.0.1", "::1"]
 port = 58000
+username = "admin"
+password = "replace-with-your-password"
+sessions_dir = "/var/lib/exwall/ui/sessions/"
 ```
 
 Use `hosts = ["0.0.0.0", "::"]` to bind all interfaces, or `hosts = []` to disable
 UI serving. Port zero and duplicate addresses are rejected. UI settings take
 effect after restarting; SIGHUP continues to reload policy. The Vite development
-server has separate settings in `ui/vite.config.ts`.
+server has separate settings in `ui/vite.config.ts` and proxies `/api` to port 58000.
+
+Set both `username` and `password` to enable API access; empty credentials disable
+login. The login page issues an HttpOnly, SameSite=Strict cookie lasting 365 days.
+Sessions survive restarts as private JSON files in `sessions_dir` (the default is
+`/var/lib/exwall/ui/sessions/`). Logout removes the session, and changing credentials
+invalidates existing sessions after restart.
+
+`exwall hook start` creates `/etc/exwall/rules.d/05-web.toml` (or `05-web.toml`
+in `--rules-dir`) without replacing existing contents, and sets ownership to the
+proxy account (`exwall` by default) with mode `0600`. The rules directory remains
+owned by root; the UI writes this file without needing permission to replace
+other rule files.
+
+The rules page lists the allow tables in `05-web.toml` under the configured rules
+directory, with plain-text fields, boolean and method selectors, header rows, and add/remove controls.
+Enter one domain or pattern per line; quotes and TOML escaping are handled automatically.
+Saving uses `toml_edit` to retain unchanged formatting and comments, validates the
+rules, and writes the service-owned file. Concurrent file edits return a conflict;
+reload the file before retrying. Other TOML rule files are unaffected. The watcher
+picks up saves automatically; when `watch_rules = false`, the API explicitly reloads
+all rule files into the active policy.
+
+REST endpoints accept either the session cookie or HTTP Basic credentials:
+`POST /api/login`, `GET /api/session`, `POST /api/logout`, and `GET`/`PUT /api/rules`.
+Writes require `Content-Type: application/json`. `GET /api/rules` returns a
+`revision` and `rules` array; send that revision with edited rule fields to `PUT`. Field values are ordinary JSON
+strings, arrays, booleans, or header objects, rather than TOML literals.
+For example:
+
+```sh
+curl --user admin http://127.0.0.1:58000/api/rules
+```
 
 ## Install on Ubuntu/systemd
 
@@ -249,10 +284,10 @@ nine columns:
 
 ```text
 TIMESTAMP PROTOCOL RESULT RULE HTTP_METHOD URL HTTP_STATUS DNS_RCODE ERROR
-2026-10-07T12:34:56Z https ALLOW /etc/exwall/rules.d/5-examples.toml:allow#1 GET https://github.com:443/api 200 - -
+2026-10-07T12:34:56Z https ALLOW /etc/exwall/rules.d/10-examples.toml:allow#1 GET https://github.com:443/api 200 - -
 2026-10-07T12:34:57Z http DENY - POST http://denied.test/upload 403 - -
 2026-10-07T12:34:58Z dns DENY - - dns://denied.test/A - REFUSED -
-2026-10-07T12:34:59Z https ALLOW /etc/exwall/rules.d/5-examples.toml:allow#1 GET https://github.com:443/api 502 - UPSTREAM_TIMEOUT
+2026-10-07T12:34:59Z https ALLOW /etc/exwall/rules.d/10-examples.toml:allow#1 GET https://github.com:443/api 502 - UPSTREAM_TIMEOUT
 ```
 
 Timestamps are UTC arrival times; entries are written as request handlers finish.
@@ -356,7 +391,7 @@ service with its own hooks when migrating.
 
 ```sh
 mkdir -p /tmp/exwall-dev/rules
-cp example-rules.toml /tmp/exwall-dev/rules/5-examples.toml
+cp example-rules.toml /tmp/exwall-dev/rules/10-examples.toml
 cargo run -- init-ca --ca-dir /tmp/exwall-dev/ca
 cargo run -- --rules-dir /tmp/exwall-dev/rules serve \
   --listen 127.0.0.1:58080 --dns-listen 127.0.0.1:58053 \
@@ -369,3 +404,8 @@ Explicit HTTP proxy requests and HTTPS CONNECT are supported alongside
 transparent traffic. CONNECT performs TLS interception and every inner HTTP
 request is filtered; it never grants an unrestricted byte tunnel. Conflicting
 request authorities, Host headers, and TLS server names are rejected.
+
+Run UI browser tests with `mise exec -- pnpm test:ui`. Install Chromium once with
+`mise exec -- pnpm exec playwright install --with-deps chromium`. These tests start only Vite
+and use Playwright's built-in `page.route()` mocking for all REST API requests;
+they do not start exwall or invoke firewall hooks.

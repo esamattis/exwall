@@ -55,3 +55,13 @@ keep_entries = 1000
 [ui]
 hosts = ["127.0.0.1"]
 port = 58000
+# Set both credentials to enable login and HTTP Basic API authentication.
+# Empty credentials disable API access. Protect this configuration file.
+# Replace the empty values below with your credentials, for example:
+# username = "admin"
+# password = "replace-with-your-password"
+# Changing credentials invalidates existing sessions after restart.
+username = ""
+password = ""
+# Persistent cookie sessions expire after 365 days.
+sessions_dir = "/var/lib/exwall/ui/sessions/"
