@@ -1,4 +1,5 @@
 //! Privileged, idempotent iptables hooks. All commands use argv, never a shell.
+use crate::command_log::log_command;
 use crate::config::Config;
 use crate::error::{Context, Result, bail, ensure};
 use std::{
@@ -33,7 +34,7 @@ impl Firewall {
         }
         let mut command = Command::new(self.command);
         command.args(["-w", "10"]).args(args).env("LC_ALL", "C");
-        tracing::debug!(command = ?command, "executing command");
+        log_command(&command);
         Ok(Some(command.output().with_context(|| self.command.to_owned())?))
     }
 
@@ -444,7 +445,7 @@ fn nat_rules(
 pub fn user_exists(user: &str) -> Result<bool> {
     let mut command = Command::new("id");
     command.args(["-u", "--", user]).env("LC_ALL", "C");
-    tracing::debug!(command = ?command, "executing command");
+    log_command(&command);
     let output = command.output()?;
     if output.status.success() {
         return Ok(true);

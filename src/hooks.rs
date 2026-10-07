@@ -1,4 +1,5 @@
 //! systemd's privileged start/stop hooks, with exact resolver and forwarding-state restoration.
+use crate::command_log::log_command;
 use crate::error::{Context, Result, ensure};
 use crate::{
     config::Config,
@@ -70,7 +71,7 @@ fn sysctl(name: &str, value: Option<u8>) -> Result<u8> {
     } else {
         command.args(["-n", name]);
     }
-    tracing::debug!(command = ?command, "executing command");
+    log_command(&command);
     let output = command.output()?;
     ensure!(output.status.success(), "sysctl {name}: {}", String::from_utf8_lossy(&output.stderr));
     if let Some(value) = value {
@@ -200,7 +201,7 @@ impl Hooks {
         }
         let mut command = Command::new("systemctl");
         command.args(["is-active", "--quiet", "systemd-resolved.service"]);
-        tracing::debug!(command = ?command, "executing command");
+        log_command(&command);
         ensure!(
             command.status()?.success(),
             "systemd-resolved must be active before replacing resolv.conf"

@@ -1,6 +1,7 @@
 //! TOML-driven transparent HTTP(S) and DNS egress filtering for Linux.
 mod access_log;
 mod ca;
+mod command_log;
 mod config;
 mod dns;
 mod error;

@@ -87,8 +87,9 @@ def main():
             logs = command("env", "RUST_LOG=error", *args, "start")
             for program in ("iptables", "ip6tables", "id", "sysctl"):
                 assert any("DEBUG" in line and "executing command" in line
-                           and f'"{program}"' in line for line in logs.splitlines()), logs
-            assert '"-w" "10"' in logs, logs
+                           and f"{program} " in line for line in logs.splitlines()), logs
+            assert "iptables -w 10 -t filter" in logs, logs
+            assert '"-w"' not in logs, logs
             first = firewall_snapshot()
             saved = (state / "forwarding.json").read_bytes()
             assert [command("sysctl", "-n", name).strip() for name in SYSCTLS] == ["1", "1", "0"]
