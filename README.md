@@ -322,18 +322,23 @@ Explicit CONNECT requests have
 their own entry in addition to the HTTPS requests inside the tunnel. Traffic
 that bypasses the proxy is not visible to the access logger.
 
-The default destination is `/var/log/exwall/access.log`. Each line has exactly
-nine columns:
+The default destination is `/var/log/exwall/access.log`. Each line has nine columns,
+plus an `xN` suffix when the same message occurs more than once in a batch:
 
 ```text
 TIMESTAMP PROTOCOL RESULT RULE HTTP_METHOD URL HTTP_STATUS DNS_RCODE ERROR
 2026-10-07T12:34:56Z https ALLOW /etc/exwall/rules.d/10-examples.toml:allow#1 GET https://github.com:443/api 200 - -
 2026-10-07T12:34:57Z http DENY - POST http://denied.test/upload 403 - -
-2026-10-07T12:34:58Z dns DENY - - dns://denied.test/A - REFUSED -
+2026-10-07T12:34:58Z dns DENY - - dns://denied.test/A - REFUSED - x3
 2026-10-07T12:34:59Z https ALLOW /etc/exwall/rules.d/10-examples.toml:allow#1 GET https://github.com:443/api 502 - UPSTREAM_TIMEOUT
 ```
 
-Timestamps are UTC arrival times; entries are written as request handlers finish.
+Timestamps are UTC request arrival times. Completed messages are buffered for one
+second starting with the first message in each batch. Messages whose fields match
+except for the timestamp are combined, with a suffix such as `x3` counting all
+three occurrences. Each combined message keeps its first received timestamp and
+position: `A, B, A` is written as `A x2, B`. Messages in different batches remain
+separate. Domain counters still count every request.
 `PROTOCOL` is `dns`, `http`, or `https`. `RESULT` is the policy decision (`ALLOW`
 or `DENY`), or `-` if policy was not evaluated. An allowed request keeps `ALLOW`
 even if forwarding subsequently fails. `HTTP_STATUS` is the status returned to
@@ -367,9 +372,9 @@ headers and bodies are not logged.
 
 The file is owned by a logging actor that receives entries through a mailbox.
 Request handlers never wait for file writes or trimming. Shutdown drains the
-mailbox, and an access-log I/O failure fails the service instead of silently
-discarding subsequent logs. The following settings are configurable in
-`config.toml` and take effect after a restart:
+mailbox and writes the pending batch immediately. An access-log I/O failure fails
+the service instead of silently discarding subsequent logs. The following settings
+are configurable in `config.toml` and take effect after a restart:
 
 ```toml
 [access_log]
@@ -379,7 +384,7 @@ max_size_bytes = 10485760 # 10 MiB
 keep_entries = 1000
 ```
 
-Every 100 logged requests, the actor checks the actual file size. If it exceeds
+Every 100 written rows, the actor checks the actual file size. If it exceeds
 10 MiB, the actor atomically replaces it with the last 1,000 complete entries in
 their original order. These are periodic limits: the file can grow between
 checks, and the retained entries may themselves exceed the size threshold.

@@ -201,7 +201,13 @@ test("local proxy protocols, TLS trust, streaming, DNS, reloads, UI API, and acc
         .split("\n")
         .map((line) => line.split(/\s+/));
     expect(rows.length).toBeGreaterThan(0);
-    expect(rows.every((row) => row.length === 9)).toBe(true);
+    for (const row of rows) {
+        expect([9, 10]).toContain(row.length);
+        if (row.length === 10) {
+            expect(row[9]).toMatch(/^x[1-9]\d*$/);
+            expect(Number(row[9]?.slice(1))).toBeGreaterThan(1);
+        }
+    }
     const entries = rows.map((row) =>
         Object.fromEntries(
             [
