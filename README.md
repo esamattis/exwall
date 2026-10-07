@@ -109,10 +109,14 @@ effect after restarting; SIGHUP continues to reload policy. The Vite development
 server has separate settings in `ui/vite.config.ts` and proxies `/api` to port 58000.
 
 Set both `username` and `password` to enable API access; empty credentials disable
-login. The login page issues an HttpOnly, SameSite=Strict cookie lasting 365 days.
-Sessions survive restarts as private JSON files in `sessions_dir` (the default is
+login. The login page stores a bearer token in the browser's local storage for
+the UI's exact origin (scheme, hostname, and port), lasting 365 days. Requests send
+it explicitly in the Authorization header; another localhost port receives no
+session credentials. Sessions survive restarts as private JSON files in `sessions_dir` (the default is
 `/var/lib/exwall/ui/sessions/`). Logout removes the session, and changing credentials
 invalidates existing sessions after restart.
+Upgrading from cookie sessions requires signing in again. Cookie authentication
+and old session files are rejected, including old tokens replayed as bearer tokens.
 
 `exwall hook start` creates `/etc/exwall/rules.d/05-web.toml` (or `05-web.toml`
 in `--rules-dir`) without replacing existing contents, and sets ownership to the
@@ -149,9 +153,11 @@ Each row can allow the exact domain, method, and pathname; query strings are
 excluded and pathname metacharacters are matched literally. This list resets
 on restart and excludes DNS denials and CONNECT setup.
 
-REST endpoints accept either the session cookie or HTTP Basic credentials:
+REST endpoints accept either `Authorization: Bearer <token>` or HTTP Basic credentials:
 `POST /api/login`, `GET /api/session`, `POST /api/logout`, `GET /api/domains`, `GET /api/http-denials`, and `GET`/`PUT /api/rules`.
-Writes require `Content-Type: application/json`. `GET /api/rules` returns a
+`POST /api/login` returns `username` and `token` on success. Writes require
+`Content-Type: application/json`; JSON bodies are limited to 1 MiB and must arrive
+within 10 seconds. Body reads do not lock other API requests. `GET /api/rules` returns a
 `revision` and `rules` array; send that revision with edited rule fields to `PUT`. Field values are ordinary JSON
 strings, arrays, booleans, or header objects, rather than TOML literals.
 For example:
@@ -235,6 +241,11 @@ Python-specific regex syntax outside this engine's capabilities is rejected at
 startup instead of silently broadening a rule.
 
 Pathname patterns match the entire path, excluding query strings and fragments.
+Before matching or injecting headers, the proxy rejects dot traversal segments
+(`.` and `..`, including percent-encoded and repeatedly encoded forms), backslashes,
+control characters, encoded path delimiters, and ambiguous matrix-style dot
+segments. Ordinary encoded filenames and query strings remain supported. Denied
+paths receive 403; they are never rewritten into a different permitted route.
 They support named parameters, quoted parameter names, `*` wildcards, custom
 regex groups, `?`/`+`/`*` modifiers, and `{tokens}` groups. Modified parameters
 include their preceding slash, so `/books/:id?` matches `/books` and
@@ -264,6 +275,17 @@ Unknown config/rule keys and malformed values are rejected. Legacy
 accepted; exwall does not retain mitmproxy flow history. There is no mitmweb
 allow-all toggle, flow viewer, capture/replay facility, or WebSocket relay.
 WebSocket upgrade requests are rejected rather than forwarded as a raw tunnel.
+
+**Isolation limitation:** exwall filters IP traffic; it does not isolate local
+IPC. On hosts exposing systemd-resolved's D-Bus or Varlink APIs, an ordinary user
+can submit DNS queries directly to the exempt resolver, bypassing `block_dns`.
+The firewall therefore does not provide complete DNS confinement for untrusted
+local processes. Such workloads need an independently configured isolation
+boundary that prevents access to the host resolver's IPC interfaces while sending
+their DNS traffic through exwall. Simply removing the resolver exemption causes
+a forwarding loop with the default upstream at `127.0.0.53:53`. Global IPC
+restrictions are not installed automatically because they can disrupt existing
+resolver clients and require host-specific deployment and compatibility testing.
 
 ## Operation and hooks
 

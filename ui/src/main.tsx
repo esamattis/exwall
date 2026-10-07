@@ -48,16 +48,28 @@ class ApiError extends Error {
     }
 }
 
-/** Fetch same-origin JSON using the browser's persistent session cookie. */
+/** Persist sessions within this exact scheme, hostname, and port rather than shared cookies. */
+const sessionKey = "exwall.session";
+
+/** Fetch same-origin JSON with a token that other localhost ports cannot read or receive. */
 async function api<T>(
     path: string,
     method: "GET" | "POST" | "PUT" = "GET",
     body?: unknown,
 ): Promise<T> {
+    const headers = new Headers();
+    const token = localStorage.getItem(sessionKey);
+    if (token && path !== "login") {
+        headers.set("Authorization", `Bearer ${token}`);
+    }
+    if (body !== undefined) {
+        headers.set("Content-Type", "application/json");
+    }
     const options: RequestInit = {
         method,
-        credentials: "same-origin",
-        headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+        credentials: "omit",
+        redirect: "error",
+        headers,
     };
     if (method !== "GET" && body !== undefined) {
         options.body = JSON.stringify(body);
@@ -65,6 +77,9 @@ async function api<T>(
     const response = await fetch(`/api/${path}`, options);
     const result: T & { error?: string } = await response.json();
     if (!response.ok) {
+        if (response.status === 401 && path !== "login") {
+            localStorage.removeItem(sessionKey);
+        }
         throw new ApiError(response.status, result.error ?? "Request failed");
     }
     return result;
@@ -99,8 +114,10 @@ function LoginPage() {
     const navigate = useNavigate();
     const client = useQueryClient();
     const login = useMutation({
-        mutationFn: () => api<{ username: string }>("login", "POST", { username, password }),
-        onSuccess: async () => {
+        mutationFn: () =>
+            api<{ username: string; token: string }>("login", "POST", { username, password }),
+        onSuccess: async ({ token }) => {
+            localStorage.setItem(sessionKey, token);
             client.clear();
             await navigate({ to: "/" });
         },
@@ -488,6 +505,7 @@ function RulesPage() {
     const logout = useMutation({
         mutationFn: () => api("logout", "POST", {}),
         onSuccess: async () => {
+            localStorage.removeItem(sessionKey);
             client.clear();
             await navigate({ to: "/login" });
         },

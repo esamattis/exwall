@@ -63,5 +63,5 @@ port = 58000
 # Changing credentials invalidates existing sessions after restart.
 username = ""
 password = ""
-# Persistent cookie sessions expire after 365 days.
+# Persistent bearer sessions expire after 365 days; browser storage is scoped to the UI origin.
 sessions_dir = "/var/lib/exwall/ui/sessions/"

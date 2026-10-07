@@ -48,13 +48,15 @@ test("local proxy protocols, TLS trust, streaming, DNS, reloads, UI API, and acc
         data: { username: "admin", password: "integration-password" },
     });
     expect(login.status()).toBe(200);
+    const { token }: { token: string } = await login.json();
+    const headers = { Authorization: `Bearer ${token}` };
     expect(
         (await readdir(join(fixture.root, "sessions"))).filter((name) => name.endsWith(".json")),
     ).toHaveLength(1);
-    let document = await (await request.get(`${ui}/api/rules`)).json();
+    let document = await (await request.get(`${ui}/api/rules`, { headers })).json();
     expect(document.rules).toEqual([]);
     document.rules = [{ index: null, fields: { domain: "ui.test" } }];
-    const saved = await request.put(`${ui}/api/rules`, { data: document });
+    const saved = await request.put(`${ui}/api/rules`, { headers, data: document });
     expect(saved.status()).toBe(200);
     document = await saved.json();
     expect(await readFile(join(fixture.rules, "05-web.toml"), "utf8")).toContain(
@@ -70,8 +72,8 @@ test("local proxy protocols, TLS trust, streaming, DNS, reloads, UI API, and acc
     expect(basic.status()).toBe(200);
     expect((await basic.json()).revision).toBe(document.revision);
     document.rules = [];
-    expect((await request.put(`${ui}/api/rules`, { data: document })).status()).toBe(200);
-    expect((await request.post(`${ui}/api/logout`, { data: {} })).status()).toBe(200);
+    expect((await request.put(`${ui}/api/rules`, { headers, data: document })).status()).toBe(200);
+    expect((await request.post(`${ui}/api/logout`, { headers, data: {} })).status()).toBe(200);
     expect(
         (await readdir(join(fixture.root, "sessions"))).filter((name) => name.endsWith(".json")),
     ).toHaveLength(0);

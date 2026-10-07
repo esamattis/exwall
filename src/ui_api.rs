@@ -16,16 +16,22 @@ use std::{
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::PathBuf,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
 
-/// A fixed one-year lifetime in seconds, shared by the cookie and session record.
+/// A fixed one-year lifetime in seconds for persistent bearer sessions.
 const SESSION_LIFETIME: u64 = 365 * 24 * 60 * 60;
 
-/// UI API settings and a lock serializing reads, updates, and session mutations.
+/// Bound body reads independently of the byte limit so idle clients cannot retain connections.
+const BODY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Expire the legacy cookie without ever using it to authenticate a request.
+const CLEAR_COOKIE: &str = "exwall_session=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0";
+
+/// UI API settings and a lock serializing rule reads and writes after body collection.
 pub struct Api {
     config: UiConfig,
     directory: PathBuf,
@@ -45,6 +51,8 @@ struct Login {
 /// A private disk record invalidated by expiration or changed configured credentials.
 #[derive(Serialize, Deserialize)]
 struct Session {
+    /// Require the new token format so previously exposed cookie sessions are invalidated.
+    bearer: bool,
     username: String,
     expires_at: u64,
     credentials: String,
@@ -85,7 +93,6 @@ impl Api {
 
     /// Route API requests and report internal failures without disclosing host details.
     pub async fn response(&self, request: Request) -> Response {
-        let _guard = self.lock.lock().await;
         match self.handle(request).await {
             Ok(response) => response,
             Err(error) => {
@@ -135,6 +142,12 @@ impl Api {
         if path == "/api/login" && method == Method::POST {
             let login: Login = match read_json(request).await {
                 Ok(value) => value,
+                Err(crate::error::Error::Timeout(_)) => {
+                    return Ok(json(
+                        StatusCode::REQUEST_TIMEOUT,
+                        &serde_json::json!({"error": "Request body timed out"}),
+                    ));
+                }
                 Err(_) => {
                     return Ok(json(
                         StatusCode::BAD_REQUEST,
@@ -146,9 +159,11 @@ impl Api {
                 return Ok(unauthorized());
             }
             let token = self.create_session()?;
-            let mut response =
-                json(StatusCode::OK, &serde_json::json!({"username": self.config.username}));
-            response.headers_mut().insert(header::SET_COOKIE, format!("exwall_session={token}; Path=/api; HttpOnly; SameSite=Strict; Max-Age={SESSION_LIFETIME}").parse().unwrap());
+            let mut response = json(
+                StatusCode::OK,
+                &serde_json::json!({"username": self.config.username, "token": token}),
+            );
+            response.headers_mut().insert(header::SET_COOKIE, CLEAR_COOKIE.parse().unwrap());
             return Ok(response);
         }
         if !self.authenticated(&request)? {
@@ -159,7 +174,7 @@ impl Api {
                 Ok(json(StatusCode::OK, &serde_json::json!({"username": self.config.username})))
             }
             (Method::POST, "/api/logout") => {
-                if let Some(token) = cookie_token(&request) {
+                if let Some(token) = bearer_token(&request) {
                     match fs::remove_file(self.session_path(token)) {
                         Ok(()) => {}
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -167,22 +182,26 @@ impl Api {
                     }
                 }
                 let mut response = json(StatusCode::OK, &serde_json::json!({}));
-                response.headers_mut().insert(
-                    header::SET_COOKIE,
-                    "exwall_session=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0"
-                        .parse()
-                        .unwrap(),
-                );
+                response.headers_mut().insert(header::SET_COOKIE, CLEAR_COOKIE.parse().unwrap());
                 Ok(response)
             }
             (Method::GET, "/api/http-denials") => {
                 Ok(json(StatusCode::OK, &self.domains.denials_snapshot()))
             }
             (Method::GET, "/api/domains") => Ok(json(StatusCode::OK, &self.domains.snapshot())),
-            (Method::GET, "/api/rules") => Ok(json(StatusCode::OK, &self.read_rules()?)),
+            (Method::GET, "/api/rules") => {
+                let _guard = self.lock.lock().await;
+                Ok(json(StatusCode::OK, &self.read_rules()?))
+            }
             (Method::PUT, "/api/rules") => {
                 let draft: RulesDocument = match read_json(request).await {
                     Ok(value) => value,
+                    Err(crate::error::Error::Timeout(_)) => {
+                        return Ok(json(
+                            StatusCode::REQUEST_TIMEOUT,
+                            &serde_json::json!({"error": "Request body timed out"}),
+                        ));
+                    }
                     Err(_) => {
                         return Ok(json(
                             StatusCode::BAD_REQUEST,
@@ -190,6 +209,8 @@ impl Api {
                         ));
                     }
                 };
+                // No shared lock is held while waiting for client-controlled bytes.
+                let _guard = self.lock.lock().await;
                 let current = self.read_rules()?;
                 if draft.revision != current.revision {
                     return Ok(json(
@@ -259,15 +280,16 @@ impl Api {
         bool::from(provided.as_bytes().ct_eq(expected.as_bytes()))
     }
 
-    /// Accept HTTP Basic credentials or a valid persistent session cookie.
+    /// Accept HTTP Basic credentials or an explicitly supplied persistent bearer token.
     fn authenticated(&self, request: &Request) -> Result<bool> {
-        if let Some(authorization) = request.headers().get(header::AUTHORIZATION) {
-            let credentials = authorization
-                .to_str()
-                .ok()
-                .and_then(|value| value.strip_prefix("Basic "))
-                .and_then(|value| STANDARD.decode(value).ok())
-                .and_then(|value| String::from_utf8(value).ok());
+        if let Some(encoded) = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Basic "))
+        {
+            let credentials =
+                STANDARD.decode(encoded).ok().and_then(|value| String::from_utf8(value).ok());
             return Ok(credentials
                 .and_then(|value| {
                     value
@@ -276,7 +298,7 @@ impl Api {
                 })
                 .unwrap_or(false));
         }
-        let Some(token) = cookie_token(request) else {
+        let Some(token) = bearer_token(request) else {
             return Ok(false);
         };
         let path = self.session_path(token);
@@ -289,10 +311,15 @@ impl Api {
             return Ok(false);
         };
         if session.expires_at <= now()? {
-            fs::remove_file(path)?;
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
             return Ok(false);
         }
-        Ok(!self.config.username.is_empty()
+        Ok(session.bearer
+            && !self.config.username.is_empty()
             && !self.config.password.is_empty()
             && session.username == self.config.username
             && session.credentials
@@ -307,6 +334,7 @@ impl Api {
         fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
         let token = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
         let session = Session {
+            bearer: true,
             username: self.config.username.clone(),
             expires_at: now()? + SESSION_LIFETIME,
             credentials: credential_digest(&self.config.username, &self.config.password),
@@ -435,20 +463,22 @@ fn credential_digest(username: &str, password: &str) -> String {
     format!("{:x}", digest.finalize())
 }
 
-/// Extract only canonical hexadecimal session tokens to prevent pathname traversal.
-fn cookie_token(request: &Request) -> Option<&str> {
-    request.headers().get(header::COOKIE)?.to_str().ok()?.split(';').find_map(|cookie| {
-        let token = cookie.trim().strip_prefix("exwall_session=")?;
-        (token.len() == 64
-            && token.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-        .then_some(token)
-    })
+/// Extract canonical bearer tokens without accepting cookies shared across localhost ports.
+fn bearer_token(request: &Request) -> Option<&str> {
+    let token =
+        request.headers().get(header::AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")?;
+    (token.len() == 64
+        && token.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then_some(token)
 }
 
 /// Decode a bounded JSON body without allowing unbounded client allocations.
 async fn read_json<T: serde::de::DeserializeOwned>(request: Request) -> Result<T> {
     let body = rama::http::body::util::Limited::new(request.into_body(), 1024 * 1024);
-    let bytes = body.collect().await.context("read JSON request")?.to_bytes();
+    let bytes = tokio::time::timeout(BODY_TIMEOUT, body.collect())
+        .await?
+        .context("read JSON request")?
+        .to_bytes();
     Ok(serde_json::from_slice(&bytes)?)
 }
 
@@ -497,7 +527,7 @@ mod tests {
         )
     }
 
-    /// Build JSON requests with optional Basic or cookie authentication.
+    /// Build JSON requests with optional Basic or bearer authentication.
     fn request(
         method: Method,
         path: &str,
@@ -520,7 +550,68 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    /// Exercise cookie creation, private storage, restart persistence, revocation, and expiry.
+    /// Reject both ambient cookies and replay of session files issued before bearer migration.
+    #[tokio::test]
+    async fn rejects_cookie_authentication_and_legacy_sessions() {
+        let temporary = tempfile::tempdir().unwrap();
+        let api = test_api(temporary.path(), false);
+        let token = api.create_session().unwrap();
+        let cookie = format!("exwall_session={token}");
+        assert_eq!(
+            api.response(request(Method::GET, "/api/rules", Some(("cookie", &cookie)), &()))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED,
+        );
+        let path = api.session_path(&token);
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("bearer");
+        fs::write(path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let authorization = format!("Bearer {token}");
+        assert_eq!(
+            api.response(request(
+                Method::GET,
+                "/api/rules",
+                Some(("authorization", &authorization)),
+                &()
+            ))
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED,
+        );
+    }
+
+    /// Keep authenticated requests responsive while login or rule-upload bodies are stalled.
+    #[tokio::test]
+    async fn slow_bodies_do_not_lock_other_requests() {
+        let temporary = tempfile::tempdir().unwrap();
+        let api = test_api(temporary.path(), false);
+        let authorization = format!("Bearer {}", api.create_session().unwrap());
+        for (method, path) in [(Method::POST, "/api/login"), (Method::PUT, "/api/rules")] {
+            let mut stalled = request(method, path, Some(("authorization", &authorization)), &());
+            *stalled.body_mut() = Body::from_stream(rama::stream::pending::<
+                std::result::Result<rama::bytes::Bytes, std::io::Error>,
+            >());
+            let slow = api.response(stalled);
+            tokio::pin!(slow);
+            assert!(tokio::time::timeout(Duration::from_millis(20), &mut slow).await.is_err());
+            let response = tokio::time::timeout(
+                Duration::from_secs(1),
+                api.response(request(
+                    Method::GET,
+                    "/api/rules",
+                    Some(("authorization", &authorization)),
+                    &(),
+                )),
+            )
+            .await
+            .expect("a stalled body must not lock the API");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    }
+
+    /// Exercise bearer creation, private storage, restart persistence, revocation, and expiry.
     #[tokio::test]
     async fn persistent_session_lifecycle() {
         let temporary = tempfile::tempdir().unwrap();
@@ -545,9 +636,10 @@ mod tests {
             ))
             .await;
         assert_eq!(response.status(), StatusCode::OK);
-        let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap().to_owned();
-        assert!(cookie.contains("HttpOnly; SameSite=Strict; Max-Age=31536000"));
-        let token = cookie.split(';').next().unwrap().strip_prefix("exwall_session=").unwrap();
+        assert_eq!(response.headers()[header::SET_COOKIE], CLEAR_COOKIE);
+        let login: serde_json::Value = decode(response).await;
+        let token = login["token"].as_str().unwrap();
+        let authorization = format!("Bearer {token}");
         let path = api.session_path(token);
         let session: Session = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(session.expires_at >= now().unwrap() + SESSION_LIFETIME - 1);
@@ -558,14 +650,24 @@ mod tests {
         );
         let restarted = test_api(temporary.path(), false);
         let response = restarted
-            .response(request(Method::GET, "/api/session", Some(("cookie", &cookie)), &()))
+            .response(request(
+                Method::GET,
+                "/api/session",
+                Some(("authorization", &authorization)),
+                &(),
+            ))
             .await;
         assert_eq!(response.status(), StatusCode::OK);
         let mut changed = test_api(temporary.path(), false);
         changed.config.password = "changed".into();
         assert_eq!(
             changed
-                .response(request(Method::GET, "/api/session", Some(("cookie", &cookie)), &()))
+                .response(request(
+                    Method::GET,
+                    "/api/session",
+                    Some(("authorization", &authorization)),
+                    &()
+                ))
                 .await
                 .status(),
             StatusCode::UNAUTHORIZED
@@ -576,19 +678,24 @@ mod tests {
         };
         fs::write(&path, serde_json::to_vec(&expired).unwrap()).unwrap();
         assert_eq!(
-            api.response(request(Method::GET, "/api/session", Some(("cookie", &cookie)), &()))
-                .await
-                .status(),
+            api.response(request(
+                Method::GET,
+                "/api/session",
+                Some(("authorization", &authorization)),
+                &()
+            ))
+            .await
+            .status(),
             StatusCode::UNAUTHORIZED
         );
         assert!(!path.exists());
         let token = api.create_session().unwrap();
-        let cookie = format!("exwall_session={token}");
+        let authorization = format!("Bearer {token}");
         let logout = api
             .response(request(
                 Method::POST,
                 "/api/logout",
-                Some(("cookie", &cookie)),
+                Some(("authorization", &authorization)),
                 &serde_json::json!({}),
             ))
             .await;
@@ -596,10 +703,10 @@ mod tests {
         assert!(logout.headers()[header::SET_COOKIE].to_str().unwrap().contains("Max-Age=0"));
         assert!(!api.session_path(&token).exists());
         assert!(
-            cookie_token(&request(
+            bearer_token(&request(
                 Method::GET,
                 "/api/session",
-                Some(("cookie", "exwall_session=../../etc/passwd")),
+                Some(("authorization", "Bearer ../../etc/passwd")),
                 &()
             ))
             .is_none()

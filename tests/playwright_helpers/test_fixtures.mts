@@ -20,6 +20,28 @@ interface Fixtures {
     networkPolicy: void;
 }
 
+/** Authenticate a browser and persist the token only in the UI's exact origin. */
+export async function loginBrowser(
+    page: Page,
+    ui = "",
+    password = "browser-password",
+): Promise<void> {
+    const login = await page.request.post(`${ui}/api/login`, {
+        data: { username: "admin", password },
+    });
+    expect(login.status()).toBe(200);
+    const { token }: { token: string } = await login.json();
+    await page.goto(`${ui}/login`);
+    await page.evaluate((value) => localStorage.setItem("exwall.session", value), token);
+}
+
+/** Supply the browser's origin-scoped token for explicit API assertions in tests. */
+export async function sessionHeaders(page: Page): Promise<Record<string, string>> {
+    const token = await page.evaluate(() => localStorage.getItem("exwall.session"));
+    expect(token).toBeTruthy();
+    return { Authorization: `Bearer ${token}` };
+}
+
 /** Attach the current shared policy when a test fails, before restoring its original state. */
 async function attachPolicy(testInfo: TestInfo): Promise<void> {
     if (testInfo.status !== testInfo.expectedStatus) {
@@ -64,10 +86,7 @@ export const test = base.extend<Fixtures>({
     },
     /** Authenticate the browser without hiding login behavior in tests that exercise it. */
     authenticatedPage: async ({ page }, use) => {
-        const login = await page.request.post("/api/login", {
-            data: { username: "admin", password: "browser-password" },
-        });
-        expect(login.status()).toBe(200);
+        await loginBrowser(page);
         await use(page);
     },
     /** Restore shared UI policy using a fresh revision and an independent API session. */
@@ -76,17 +95,20 @@ export const test = base.extend<Fixtures>({
             data: { username: "admin", password: "browser-password" },
         });
         expect(login.status()).toBe(200);
-        const originalResponse = await request.get("/api/rules");
+        const { token }: { token: string } = await login.json();
+        const headers = { Authorization: `Bearer ${token}` };
+        const originalResponse = await request.get("/api/rules", { headers });
         expect(originalResponse.status()).toBe(200);
         const original: RulesDocument = await originalResponse.json();
         await use();
         try {
             await attachPolicy(testInfo);
         } finally {
-            const currentResponse = await request.get("/api/rules");
+            const currentResponse = await request.get("/api/rules", { headers });
             expect(currentResponse.status()).toBe(200);
             const current: RulesDocument = await currentResponse.json();
             const restored = await request.put("/api/rules", {
+                headers,
                 data: {
                     revision: current.revision,
                     rules: original.rules.map((rule) => ({ ...rule, index: null })),

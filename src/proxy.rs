@@ -191,6 +191,10 @@ impl Proxy {
             ));
         }
         let mut path = request.uri().path_or_root().into_owned();
+        if !safe_pathname(&path) {
+            access.decision(false);
+            return Err((StatusCode::FORBIDDEN, "exwall: ambiguous pathname denied\n"));
+        }
         if let Some(query) = request.uri().query() {
             path.push('?');
             path.push_str(&query.to_string());
@@ -508,10 +512,126 @@ fn normalize_socket_address(address: SocketAddr) -> SocketAddr {
     address
 }
 
+/// Reject traversal and ambiguous separators before authorization or credential injection.
+fn safe_pathname(path: &str) -> bool {
+    let mut decoded = path.as_bytes().to_vec();
+    // Check repeated encoding as well as the literal request. Excessive encoding is
+    // ambiguous, so reject it instead of guessing how many times an upstream decodes.
+    for _ in 0..8 {
+        if decoded.iter().any(|byte| byte.is_ascii_control() || *byte == b'\\')
+            || decoded.split(|byte| *byte == b'/').any(|segment| {
+                let name = segment.split(|byte| *byte == b';').next().unwrap_or_default();
+                name == b"." || name == b".."
+            })
+        {
+            return false;
+        }
+        let mut next = Vec::with_capacity(decoded.len());
+        let mut index = 0;
+        while index < decoded.len() {
+            if decoded[index] == b'%'
+                && let Some(hex) = decoded.get(index + 1..index + 3)
+                && let (Some(high), Some(low)) =
+                    (char::from(hex[0]).to_digit(16), char::from(hex[1]).to_digit(16))
+            {
+                let byte = (high * 16 + low) as u8;
+                // An encoded separator can change which route a path rule authorizes.
+                if matches!(byte, b'/' | b'\\' | b'?' | b'#') {
+                    return false;
+                }
+                next.push(byte);
+                index += 3;
+            } else {
+                next.push(decoded[index]);
+                index += 1;
+            }
+        }
+        if next == decoded {
+            return true;
+        }
+        decoded = next;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{config::Config, rules::RuleSet, state::Policy};
+
+    /// Deny traversal at each decoding level while preserving ordinary encoded filenames.
+    #[test]
+    fn checks_path_segments_before_forwarding() {
+        for path in [
+            "/allowed/../private",
+            "/allowed/./private",
+            "/allowed/%2e%2E/private",
+            "/allowed/.%2e/private",
+            "/allowed/%252e%252e/private",
+            "/allowed/..;ignored/private",
+            "/allowed/%2f../private",
+            "/allowed/%5c../private",
+            "/allowed\\..\\private",
+            "/allowed/%00/private",
+            "/allowed/%253fprivate",
+            "/allowed/%2523private",
+        ] {
+            assert!(!safe_pathname(path), "must reject {path}");
+        }
+        for path in [
+            "/",
+            "/allowed/file.txt",
+            "/allowed/a%20b",
+            "/allowed/%E2%82%AC",
+            "/allowed/.config",
+            "/allowed/a..b",
+            "/allowed/100%25",
+        ] {
+            assert!(safe_pathname(path), "must preserve {path}");
+        }
+    }
+
+    /// Refuse traversal through an otherwise matching wildcard before injecting credentials.
+    #[tokio::test]
+    async fn rejects_traversal_before_authorization_and_injection() {
+        let (_directory, proxy, task) = test_proxy().await;
+        proxy.policy.store(Arc::new(Policy {
+            config: Config::default(),
+            rules: RuleSet::parse(
+                r#"
+[[allow]]
+domain = 'allowed.test'
+pathname_pattern = '/allowed/*'
+inject_headers = [{name = 'Authorization', value = 'secret'}]
+"#,
+                "test",
+            )
+            .unwrap(),
+        }));
+        for path in
+            ["/allowed/../private", "/allowed/%2e%2e/private", "/allowed/%252e%252e/private"]
+        {
+            let mut request = Request::builder()
+                .uri(format!("https://allowed.test{path}"))
+                .body(Body::empty())
+                .unwrap();
+            let mut entry = access_entry(&request, &Target::default());
+            assert_eq!(
+                proxy.prepare(&mut request, &Target::default(), &mut entry).unwrap_err().0,
+                StatusCode::FORBIDDEN
+            );
+            assert!(!request.headers().contains_key("authorization"));
+        }
+        let mut request = Request::builder()
+            .uri("https://allowed.test/allowed/file.txt?next=/../private")
+            .body(Body::empty())
+            .unwrap();
+        let mut entry = access_entry(&request, &Target::default());
+        proxy.prepare(&mut request, &Target::default(), &mut entry).unwrap();
+        assert_eq!(request.headers()["authorization"], "secret");
+        drop(proxy);
+        task.await.unwrap().unwrap();
+    }
 
     /// Build isolated proxy policy and CA material for request-validation tests.
     async fn test_proxy() -> (tempfile::TempDir, Proxy, tokio::task::JoinHandle<Result<()>>) {

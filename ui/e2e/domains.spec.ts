@@ -1,6 +1,11 @@
 import { expect } from "@playwright/test";
 import type { RulesDocument } from "#playwright_helpers/test_fixtures.mts";
-import { test, firewallTest } from "#playwright_helpers/test_fixtures.mts";
+import {
+    test,
+    firewallTest,
+    loginBrowser,
+    sessionHeaders,
+} from "#playwright_helpers/test_fixtures.mts";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fixtureOperation, fixtureRules, networkRequest } from "#playwright_helpers/client.mts";
@@ -37,7 +42,9 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
         });
     /** Fetch counters using the same authenticated browser context as the UI. */
     const snapshot = async (): Promise<DomainStats[]> => {
-        const response = await page.request.get(`${ui}/api/domains`);
+        const response = await page.request.get(`${ui}/api/domains`, {
+            headers: await sessionHeaders(page),
+        });
         expect(response.status()).toBe(200);
         return response.json();
     };
@@ -255,18 +262,14 @@ test("last 100 HTTP denials refresh manually and allow only an exact method and 
         });
     /** Read the authenticated denial API without changing the manually refreshed table. */
     const snapshot = async (): Promise<HttpDenial[]> => {
-        const response = await page.request.get(`${ui}/api/http-denials`);
+        const response = await page.request.get(`${ui}/api/http-denials`, {
+            headers: await sessionHeaders(page),
+        });
         expect(response.status()).toBe(200);
         return response.json();
     };
     expect((await page.request.get(`${ui}/api/http-denials`)).status()).toBe(401);
-    expect(
-        (
-            await page.request.post(`${ui}/api/login`, {
-                data: { username: "admin", password: "integration-password" },
-            })
-        ).status(),
-    ).toBe(200);
+    await loginBrowser(page, ui, "integration-password");
     await page.goto(`${ui}/domains`);
     const section = page.getByRole("region", { name: "HTTP denials", exact: true });
     await expect(section.getByText("No HTTP denials yet.")).toBeVisible();
@@ -301,7 +304,9 @@ test("last 100 HTTP denials refresh manually and allow only an exact method and 
     });
     await button.click();
     await expect(section.getByRole("status")).toHaveText("Method and pathname allowed.");
-    const document: RulesDocument = await (await page.request.get(`${ui}/api/rules`)).json();
+    const document: RulesDocument = await (
+        await page.request.get(`${ui}/api/rules`, { headers: await sessionHeaders(page) })
+    ).json();
     expect(document.rules).toHaveLength(1);
     expect(document.rules[0]!.fields).toEqual({
         domain: "127.0.0.1",
@@ -320,7 +325,13 @@ test("last 100 HTTP denials refresh manually and allow only an exact method and 
     }
     await button.click();
     await expect(button).toBeEnabled();
-    expect((await (await page.request.get(`${ui}/api/rules`)).json()).rules).toHaveLength(1);
+    expect(
+        (
+            await (
+                await page.request.get(`${ui}/api/rules`, { headers: await sessionHeaders(page) })
+            ).json()
+        ).rules,
+    ).toHaveLength(1);
     const after = await snapshot();
     expect(after).toHaveLength(100);
     expect(after[0]).toMatchObject({ method: "POST", pathname: "/denied/103" });
@@ -337,13 +348,7 @@ test("HTTP allow actions remove only fully covered DNS-only rules, including dup
     protocolProxy: fixture,
 }) => {
     const ui = `http://127.0.0.1:${fixture.uiPort}`;
-    expect(
-        (
-            await page.request.post(`${ui}/api/login`, {
-                data: { username: "admin", password: "integration-password" },
-            })
-        ).status(),
-    ).toBe(200);
+    await loginBrowser(page, ui, "integration-password");
     await page.route("**/api/domains", (route) =>
         route.fulfill({
             json: [
@@ -400,12 +405,21 @@ test("HTTP allow actions remove only fully covered DNS-only rules, including dup
         { fields: { domain: "example.com" }, button: exact, retained: false, existingHttp: true },
     ];
     for (const entry of cases) {
-        const current: RulesDocument = await (await page.request.get(`${ui}/api/rules`)).json();
+        const current: RulesDocument = await (
+            await page.request.get(`${ui}/api/rules`, { headers: await sessionHeaders(page) })
+        ).json();
         current.rules = [{ index: null, fields: { ...entry.fields, dns_only: true } }];
         if (entry.existingHttp) {
             current.rules.push({ index: null, fields: { domain: "example.com", methods: "ANY" } });
         }
-        expect((await page.request.put(`${ui}/api/rules`, { data: current })).status()).toBe(200);
+        expect(
+            (
+                await page.request.put(`${ui}/api/rules`, {
+                    headers: await sessionHeaders(page),
+                    data: current,
+                })
+            ).status(),
+        ).toBe(200);
         await page.goto(`${ui}/domains`);
         await page.getByRole("button", { name: entry.button, exact: true }).click();
         let message = "Domain allowed on all routes and methods.";
@@ -415,7 +429,9 @@ test("HTTP allow actions remove only fully covered DNS-only rules, including dup
             message = "Domain and its subdomains allowed on all routes and methods.";
         }
         await expect(page.getByRole("status")).toHaveText(message);
-        const saved: RulesDocument = await (await page.request.get(`${ui}/api/rules`)).json();
+        const saved: RulesDocument = await (
+            await page.request.get(`${ui}/api/rules`, { headers: await sessionHeaders(page) })
+        ).json();
         expect(saved.rules.filter((rule) => rule.fields.dns_only === true)).toEqual(
             entry.retained
                 ? [{ index: expect.any(Number), fields: { ...entry.fields, dns_only: true } }]
