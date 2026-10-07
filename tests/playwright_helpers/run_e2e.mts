@@ -53,14 +53,12 @@ async function main(): Promise<void> {
         await runCommand([...privilege, "true"]);
     }
     const browser = chromium.executablePath();
-    try {
-        await access(browser);
-    } catch (error) {
+    await access(browser).catch((error: unknown) => {
         throw new Error(
             "Install Chromium first: mise exec -- pnpm exec playwright install chromium",
             { cause: error },
         );
-    }
+    });
     await mkdir(join(repository, "test-results"), { recursive: true });
     const output = await mkdtemp(join(repository, "test-results/e2e-"));
     const sockets = await mkdtemp(join(tmpdir(), "exwall-browser-"));
@@ -134,48 +132,47 @@ async function main(): Promise<void> {
             failures.push(error);
         } finally {
             if (bridge) {
-                try {
-                    await bridge.close();
-                } catch (error) {
+                await bridge.close().catch((error: unknown) => {
                     failures.push(error);
-                }
+                });
             }
             fixture.stdin.end();
-            try {
-                const finished = await bounded(
-                    fixture.then((result) => result),
-                    30_000,
-                    "Namespace fixture shutdown",
-                );
-                if (finished.exitCode !== 0) {
-                    failures.push(new Error(`Namespace fixture exited with ${finished.exitCode}`));
-                }
-            } catch (error) {
+            await bounded(
+                fixture.then((result) => result),
+                30_000,
+                "Namespace fixture shutdown",
+            )
+                .then((finished) => {
+                    if (finished.exitCode !== 0) {
+                        failures.push(
+                            new Error(`Namespace fixture exited with ${finished.exitCode}`),
+                        );
+                    }
+                })
+                .catch((error: unknown) => {
+                    failures.push(error);
+                });
+            await stopProcess(fixture, true).catch((error: unknown) => {
                 failures.push(error);
-            }
-            try {
-                await stopProcess(fixture, true);
-            } catch (error) {
-                failures.push(error);
-            }
+            });
             messages.close();
         }
     } catch (error) {
         failures.push(error);
     } finally {
-        try {
-            await rm(sockets, { recursive: true, force: true });
-        } catch (error) {
+        await rm(sockets, { recursive: true, force: true }).catch((error: unknown) => {
             failures.push(error);
-        }
+        });
         console.log(`Playwright artifacts: ${output}`);
-        try {
-            if ((await hostSnapshot(privilege)) !== before) {
-                failures.push(new Error("Browser E2E changed host system state"));
-            }
-        } catch (error) {
-            failures.push(error);
-        }
+        await hostSnapshot(privilege)
+            .then((after) => {
+                if (after !== before) {
+                    failures.push(new Error("Browser E2E changed host system state"));
+                }
+            })
+            .catch((error: unknown) => {
+                failures.push(error);
+            });
     }
     if (failures.length) {
         throw new AggregateError(failures, "Playwright E2E failed");
