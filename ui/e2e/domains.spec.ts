@@ -1,8 +1,15 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fixtureOperation, fixtureRules, networkRequest } from "#playwright_helpers/client.mts";
 import { queryDns } from "#playwright_helpers/dns.mts";
 import { exchange, startProtocolFixture, tlsExchange } from "#playwright_helpers/proxy_fixture.mts";
+
+/** Rules returned by the API so a browser test can restore the original policy. */
+interface RulesDocument {
+    revision: string;
+    rules: { index: number | null; fields: Record<string, unknown> }[];
+}
 
 /** Domain snapshots contain only current protocol totals and the latest update. */
 interface DomainStats {
@@ -142,5 +149,109 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
         await expect(rows.nth(0).getByRole("cell").nth(2)).toHaveText("4");
     } finally {
         await fixture.close();
+    }
+});
+
+test("DNS-only allowance stays out of HTTP and can expand to all methods and subdomains", async ({
+    page,
+}) => {
+    const login = await page.request.post("/api/login", {
+        data: { username: "admin", password: "browser-password" },
+    });
+    expect(login.status()).toBe(200);
+    const original: RulesDocument = await (await page.request.get("/api/rules")).json();
+    /** Exercise DNS through the isolated fixture's real UDP or TCP redirect. */
+    const dns = (name: string, tcp = false) =>
+        fixtureOperation({
+            operation: "dns",
+            host: "192.0.2.2",
+            name,
+            tcp,
+        });
+    /** Observe an HTTP policy result under the fixture's restricted client identity. */
+    const http = async (host: string, scheme = "http", method = "POST") => {
+        const response = await networkRequest({
+            operation: "http",
+            url: `${scheme}://${host}/domain-control`,
+            method,
+        });
+        if (response.error || typeof response.result !== "object") {
+            throw new Error(JSON.stringify(response));
+        }
+        return response.result.status;
+    };
+    /** Wait for a button's save to finish before checking persisted and active policy. */
+    const allow = async (name: string, message: string) => {
+        await page.getByRole("button", { name, exact: true }).click();
+        await expect(page.getByRole("status")).toHaveText(message);
+    };
+    try {
+        await expect.poll(() => dns("openai.com")).toEqual({ result: 5 });
+        expect(await dns("api.openai.com")).toEqual({ result: 5 });
+        expect(await http("openai.com")).toBe(403);
+        await page.goto("/domains");
+        await allow("Allow openai.com DNS only", "Domain allowed for DNS only.");
+        const dnsOnly = await fixtureRules();
+        expect(dnsOnly).toContain('domain = "openai.com"');
+        expect(dnsOnly).toContain("dns_only = true");
+        await expect.poll(() => dns("openai.com")).toEqual({ result: 0 });
+        expect(await dns("openai.com", true)).toEqual({ result: 0 });
+        expect(await dns("api.openai.com")).toEqual({ result: 5 });
+        for (const scheme of ["http", "https"]) {
+            for (const method of ["GET", "POST", "DELETE"]) {
+                expect(await http("openai.com", scheme, method)).toBe(403);
+            }
+        }
+        await allow("Allow openai.com DNS only", "Domain allowed for DNS only.");
+        expect(await fixtureRules()).toBe(dnsOnly);
+        await page.getByRole("link", { name: "Rules", exact: true }).click();
+        await expect(
+            page.getByRole("combobox", { name: "Rule 1 dns_only", exact: true }),
+        ).toHaveValue("true");
+        await page.getByRole("link", { name: "Domains", exact: true }).click();
+
+        await allow("Allow openai.com completely", "Domain allowed on all routes and methods.");
+        await expect.poll(() => http("openai.com")).toBe(200);
+        expect(await http("api.openai.com")).toBe(403);
+        await allow(
+            "Allow openai.com with subdomains",
+            "Domain and its subdomains allowed on all routes and methods.",
+        );
+        const withSubdomains = await fixtureRules();
+        expect(withSubdomains).toContain("include_subdomains = true");
+        expect(withSubdomains).toContain('methods = "ANY"');
+        await expect.poll(() => http("api.openai.com", "https")).toBe(200);
+        for (const scheme of ["http", "https"]) {
+            for (const host of ["openai.com", "api.openai.com"]) {
+                for (const method of ["GET", "POST", "DELETE"]) {
+                    expect(await http(host, scheme, method)).toBe(200);
+                }
+            }
+        }
+        for (const tcp of [false, true]) {
+            expect(await dns("api.openai.com", tcp)).toEqual({ result: 0 });
+            expect(await dns("otheropenai.com", tcp)).toEqual({ result: 5 });
+        }
+        expect(await http("example.com")).toBe(403);
+        await allow(
+            "Allow openai.com with subdomains",
+            "Domain and its subdomains allowed on all routes and methods.",
+        );
+        expect(await fixtureRules()).toBe(withSubdomains);
+        await page.reload();
+        await expect(
+            page.getByRole("button", { name: "Allow openai.com with subdomains", exact: true }),
+        ).toBeVisible();
+        expect(await http("api.openai.com", "https", "DELETE")).toBe(200);
+    } finally {
+        const current: RulesDocument = await (await page.request.get("/api/rules")).json();
+        const restored = await page.request.put("/api/rules", {
+            data: {
+                revision: current.revision,
+                rules: original.rules.map((rule) => ({ ...rule, index: null })),
+            },
+        });
+        expect(restored.status()).toBe(200);
+        await expect.poll(() => http("openai.com")).toBe(403);
     }
 });

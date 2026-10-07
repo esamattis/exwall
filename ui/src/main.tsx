@@ -156,6 +156,7 @@ const fields = [
     "domain",
     "domain_regex",
     "include_subdomains",
+    "dns_only",
     "methods",
     "pathname_pattern",
     "pathname_regex",
@@ -190,7 +191,7 @@ function RuleField({
         }
         return "";
     });
-    if (field === "include_subdomains" || field === "stream") {
+    if (field === "include_subdomains" || field === "stream" || field === "dns_only") {
         return (
             <select
                 className="input mt-2"
@@ -571,7 +572,7 @@ interface DomainStats {
     last_updated: string;
 }
 
-/** Show every encountered domain, newest first, and save unrestricted allow rules. */
+/** Show seen domains and allow an exact domain, DNS only, or a domain with subdomains. */
 function DomainsPage() {
     const client = useQueryClient();
     const domains = useQuery({
@@ -582,19 +583,37 @@ function DomainsPage() {
         retry: false,
     });
     const allow = useMutation({
-        mutationFn: async (domain: string) => {
+        mutationFn: async ({
+            domain,
+            dnsOnly,
+            includeSubdomains = false,
+        }: {
+            domain: string;
+            dnsOnly: boolean;
+            includeSubdomains?: boolean;
+        }) => {
             const document = await api<RulesDocument>("rules");
             if (
                 !document.rules.some(
                     (rule) =>
                         rule.fields.domain === domain &&
-                        rule.fields.methods === "ANY" &&
-                        rule.fields.pathname_pattern === undefined &&
-                        rule.fields.pathname_regex === undefined &&
-                        rule.fields.inject_headers === undefined,
+                        (!includeSubdomains || rule.fields.include_subdomains === true) &&
+                        (dnsOnly ||
+                            (rule.fields.dns_only !== true &&
+                                rule.fields.methods === "ANY" &&
+                                rule.fields.pathname_pattern === undefined &&
+                                rule.fields.pathname_regex === undefined &&
+                                rule.fields.inject_headers === undefined)),
                 )
             ) {
-                document.rules.unshift({ index: null, fields: { domain, methods: "ANY" } });
+                document.rules.unshift({
+                    index: null,
+                    fields: {
+                        domain,
+                        ...(dnsOnly ? { dns_only: true } : { methods: "ANY" }),
+                        ...(includeSubdomains ? { include_subdomains: true } : {}),
+                    },
+                });
                 return api<RulesDocument>("rules", "PUT", document);
             }
             return document;
@@ -603,6 +622,12 @@ function DomainsPage() {
             await client.invalidateQueries({ queryKey: ["rules"] });
         },
     });
+    let successMessage = "Domain allowed on all routes and methods.";
+    if (allow.variables?.dnsOnly) {
+        successMessage = "Domain allowed for DNS only.";
+    } else if (allow.variables?.includeSubdomains) {
+        successMessage = "Domain and its subdomains allowed on all routes and methods.";
+    }
     return (
         <section>
             <div className="flex items-center justify-between gap-4">
@@ -634,7 +659,7 @@ function DomainsPage() {
             )}
             {allow.isSuccess && (
                 <p role="status" className="mb-4 text-teal-400">
-                    Domain allowed on all routes and methods.
+                    {successMessage}
                 </p>
             )}
             {domains.data?.length === 0 && <p>No domains seen yet.</p>}
@@ -675,14 +700,48 @@ function DomainsPage() {
                                         </time>
                                     </td>
                                     <td className="p-3">
-                                        <button
-                                            className="button whitespace-nowrap"
-                                            aria-label={`Allow ${entry.domain} completely`}
-                                            disabled={allow.isPending}
-                                            onClick={() => allow.mutate(entry.domain)}
-                                        >
-                                            Allow completely
-                                        </button>
+                                        <div className="flex gap-2">
+                                            <button
+                                                className="button whitespace-nowrap"
+                                                aria-label={`Allow ${entry.domain} completely`}
+                                                disabled={allow.isPending}
+                                                onClick={() =>
+                                                    allow.mutate({
+                                                        domain: entry.domain,
+                                                        dnsOnly: false,
+                                                    })
+                                                }
+                                            >
+                                                Allow completely
+                                            </button>
+                                            <button
+                                                className="button whitespace-nowrap"
+                                                aria-label={`Allow ${entry.domain} DNS only`}
+                                                disabled={allow.isPending}
+                                                onClick={() =>
+                                                    allow.mutate({
+                                                        domain: entry.domain,
+                                                        dnsOnly: true,
+                                                    })
+                                                }
+                                            >
+                                                Allow DNS only
+                                            </button>
+                                            <button
+                                                className="button whitespace-nowrap"
+                                                aria-label={`Allow ${entry.domain} with subdomains`}
+                                                disabled={allow.isPending}
+                                                onClick={() =>
+                                                    allow.mutate({
+                                                        domain: entry.domain,
+                                                        dnsOnly: false,
+                                                        includeSubdomains: true,
+                                                    })
+                                                }
+                                            >
+                                                Allow with subdomains
+                                            </button>
+                                        </div>
                                     </td>
                                 </tr>
                             ))}

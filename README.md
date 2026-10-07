@@ -126,7 +126,10 @@ automatically. Each domain has separate DNS and HTTP allow/block totals;
 HTTP includes HTTPS. Only the counters and latest update timestamp are retained
 in memory, and they reset when exwall restarts. “Allow completely” saves an exact
 domain rule in `05-web.toml` with `methods = "ANY"` and no pathname restrictions,
-allowing DNS and every HTTP route and method.
+allowing DNS and every HTTP route and method. “Allow DNS only” instead saves
+`dns_only = true`, allowing DNS queries without authorizing HTTP, HTTPS, or CONNECT.
+“Allow with subdomains” saves `include_subdomains = true` and `methods = "ANY"`,
+authorizing the domain and its subdomains for DNS and all HTTP routes and methods.
 
 The rules page lists the allow tables in `05-web.toml` under the configured rules
 directory, with plain-text fields, boolean and method selectors, header rows, and add/remove controls.
@@ -229,6 +232,8 @@ include their preceding slash, so `/books/:id?` matches `/books` and
 `/books/123`. Trailing slashes remain strict unless explicitly optional.
 
 Methods default to `GET` and `HEAD`. `methods = "ANY"` allows all methods.
+Set `dns_only = true` on an allow rule to permit only DNS; it never matches
+HTTP requests or CONNECT tunnels. The default is `dns_only = false`.
 Injected headers require upstream HTTPS with certificate verification. Requests
 matching an injection rule over plaintext HTTP are denied, including non-secret
 headers. Forwarding resolves the authorized hostname through the proxy's system

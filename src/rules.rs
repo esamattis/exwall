@@ -42,6 +42,7 @@ struct RawRule {
     domain: Option<Strings>,
     domain_regex: Option<Strings>,
     include_subdomains: Option<bool>,
+    dns_only: Option<bool>,
     methods: Option<Strings>,
     pathname_pattern: Option<Strings>,
     pathname_regex: Option<Strings>,
@@ -65,6 +66,7 @@ pub struct Rule {
     domains: Vec<String>,
     domain_regexes: Vec<Regex>,
     include_subdomains: bool,
+    dns_only: bool,
     methods: Vec<String>,
     paths: Vec<Regex>,
     pub inject_headers: Vec<(HeaderName, HeaderValue)>,
@@ -109,7 +111,9 @@ impl Rule {
 
     /// Check the hostname, normalized method, and pathname filters together.
     fn matches_request(&self, host: &str, method: &str, path: &str) -> bool {
-        (self.methods.is_empty() || self.methods.iter().any(|m| m == &method.trim().to_uppercase()))
+        !self.dns_only
+            && (self.methods.is_empty()
+                || self.methods.iter().any(|m| m == &method.trim().to_uppercase()))
             && self.matches_host(host)
             && (self.paths.is_empty() || self.paths.iter().any(|re| matches(re, path)))
     }
@@ -189,6 +193,7 @@ impl RuleSet {
                     domains,
                     domain_regexes,
                     include_subdomains: raw.include_subdomains.unwrap_or(false),
+                    dns_only: raw.dns_only.unwrap_or(false),
                     methods,
                     paths,
                     inject_headers,
@@ -238,9 +243,14 @@ impl RuleSet {
         self.rules.iter().find(|rule| rule.matches_request(host, method, path))
     }
 
-    /// Return the first hostname match for DNS and CONNECT, ignoring HTTP constraints.
+    /// Return the first hostname match for DNS, ignoring HTTP constraints.
     pub fn dns_rule(&self, host: &str) -> Option<&Rule> {
         self.rules.iter().find(|rule| rule.matches_host(host))
+    }
+
+    /// Authorize CONNECT hostnames using HTTP-capable rules, ignoring method and path filters.
+    pub fn connect_rule(&self, host: &str) -> Option<&Rule> {
+        self.rules.iter().find(|rule| !rule.dns_only && rule.matches_host(host))
     }
 }
 
@@ -327,6 +337,27 @@ methods = 'ANY'
         assert!(rules.dns_rule("example.com.evil.test").is_none());
     }
 
+    /// Keep DNS-only rules out of HTTP and CONNECT without masking later HTTP rules.
+    #[test]
+    fn dns_only_rules_do_not_authorize_http_or_connect() {
+        let rules = RuleSet::parse(
+            "[[allow]]\ndomain='dns.test'\ndns_only=true\nmethods='ANY'\n\
+             [[allow]]\ndomain='both.test'\ndns_only=true\n\
+             [[allow]]\ndomain='both.test'\nmethods=['POST']\npathname_pattern='/api'",
+            "test",
+        )
+        .unwrap();
+        assert!(rules.dns_rule("DNS.TEST.").is_some());
+        assert!(rules.connect_rule("dns.test").is_none());
+        for method in ["GET", "HEAD", "POST", "DELETE"] {
+            assert!(rules.request("dns.test", method, "/").is_none());
+        }
+        assert_eq!(rules.dns_rule("both.test").unwrap().name, "test:allow#2");
+        assert_eq!(rules.connect_rule("both.test").unwrap().name, "test:allow#3");
+        assert_eq!(rules.request("both.test", "POST", "/api").unwrap().name, "test:allow#3");
+        assert!(rules.request("both.test", "GET", "/api").is_none());
+    }
+
     /// Reject malformed rule formats and accept the shipped example rules.
     #[test]
     fn rejects_invalid_rules() {
@@ -338,6 +369,7 @@ methods = 'ANY'
             "domain = 'x'\nmethods = 'GET'",
             "domain = 'x'\ninject_headers = []",
             "domain = 'x'\nstream = 1",
+            "domain = 'x'\ndns_only = 'true'",
             "domain = 'x'\nunknown = true",
             "domain_regex = '['",
             "domain = 'x'\ninject_headers = [{name='Bad Name', value='x'}]",

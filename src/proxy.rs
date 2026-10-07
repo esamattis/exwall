@@ -310,7 +310,7 @@ impl Proxy {
                         let policy = proxy.policy.load();
                         let Some(rule) = policy
                             .rules
-                            .dns_rule(authority.host().to_string().trim_matches(['[', ']']))
+                            .connect_rule(authority.host().to_string().trim_matches(['[', ']']))
                         else {
                             access.entry().decision(false);
                             access.entry().http_response(403);
