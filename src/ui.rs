@@ -159,7 +159,7 @@ mod tests {
         assert_eq!(index.headers()[header::CONTENT_TYPE], "text/html; charset=utf-8");
         assert_eq!(index.headers()[header::CACHE_CONTROL], "no-cache");
         let bytes = index.into_body().collect().await.unwrap().to_bytes();
-        assert!(String::from_utf8_lossy(&bytes).contains("<title>ramawall</title>"));
+        assert!(String::from_utf8_lossy(&bytes).contains("<title>exwall</title>"));
         let navigation = response(request(Method::GET, "/future/page?query=value")).await.unwrap();
         assert_eq!(navigation.into_body().collect().await.unwrap().to_bytes(), bytes);
         let (name, expected) = ASSETS.iter().find(|(name, _)| name.ends_with(".js")).unwrap();

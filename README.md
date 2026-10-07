@@ -1,13 +1,13 @@
 <img src="assets/icon.svg" width="64" height="64" alt="">
 
-# ramawall
+# exwall
 
 A Linux outbound HTTP(S) and DNS firewall implemented in Rust using
 [Rama](https://ramaproxy.org/). It reimplements mitmwall's TOML allow rules,
 transparent interception, and systemd/iptables integration. An embedded React UI
 provides a starting point for a control interface.
 
-The service runs as the dedicated `ramawall` user. Privileged systemd hooks redirect
+The service runs as the dedicated `exwall` user. Privileged systemd hooks redirect
 ordinary users' HTTP/HTTPS and UDP/TCP DNS traffic to local listeners and install a
 fail-closed output policy for other traffic. The proxy terminates TLS using its
 persistent local CA, checks every HTTP request, injects configured headers, and
@@ -109,24 +109,24 @@ server has separate settings in `ui/vite.config.ts`.
 ## Install on Ubuntu/systemd
 
 Build as your normal user, then install the resulting debug binary. `install.sh`
-uses `./target/debug/ramawall` by default and never builds it:
+uses `./target/debug/exwall` by default and never builds it:
 
 ```sh
 sudo apt-get install iptables openssl ca-certificates
 sudo ./install.sh
-sudo systemctl enable --now ramawall
-sudo journalctl -u ramawall -f
+sudo systemctl enable --now exwall
+sudo journalctl -u exwall -f
 ```
 
 The installer creates:
 
-- `/usr/local/bin/ramawall`
-- `/etc/ramawall/config.toml` and `/etc/ramawall/rules.d/*.toml`
-- `/var/lib/ramawall/ramawall-ca-cert.pem` and a private CA key
-- `/var/log/ramawall/`, owned by the service user, for `access.log`
-- `/etc/systemd/system/ramawall.service`
-- `/usr/local/share/ca-certificates/ramawall.crt`
-- Managed CA environment settings in `/etc/environment` and `/etc/profile.d/ramawall.sh`
+- `/usr/local/bin/exwall`
+- `/etc/exwall/config.toml` and `/etc/exwall/rules.d/*.toml`
+- `/var/lib/exwall/exwall-ca-cert.pem` and a private CA key
+- `/var/log/exwall/`, owned by the service user, for `access.log`
+- `/etc/systemd/system/exwall.service`
+- `/usr/local/share/ca-certificates/exwall.crt`
+- Managed CA environment settings in `/etc/environment` and `/etc/profile.d/exwall.sh`
 
 Fresh installs are left stopped. Reinstallation preserves local configuration,
 rules, and CA material and restarts the service only if it was previously active.
@@ -134,15 +134,15 @@ The shipped config exempts `root` and `_apt`; removing them subjects their traff
 to enforcement. The proxy and system resolver accounts are always exempt.
 
 When `/etc/mitmwall` exists, the installer copies its TOML config and any rule files
-that are absent from `/etc/ramawall`. Existing destination files are preserved.
+that are absent from `/etc/exwall`. Existing destination files are preserved.
 Stop `mitmwall.service` before switching; the two services use the same ports.
-The old installation, service, and CA are not removed or modified. ramawall uses a
-new CA; applications with custom trust stores must trust `ramawall.crt`.
+The old installation, service, and CA are not removed or modified. exwall uses a
+new CA; applications with custom trust stores must trust `exwall.crt`.
 
 To load the CA environment settings in an existing shell:
 
 ```sh
-. /etc/profile.d/ramawall.sh
+. /etc/profile.d/exwall.sh
 ```
 
 `sudo ./uninstall.sh` stops the service and removes managed system integration,
@@ -205,21 +205,21 @@ and TCP DNS are supported. Malformed or mismatched upstream replies fail closed.
 
 Unknown config/rule keys and malformed values are rejected. Legacy
 `flow_history_clear_interval` and `flow_history_keep_entries` are validated and
-accepted; ramawall does not retain mitmproxy flow history. There is no mitmweb
+accepted; exwall does not retain mitmproxy flow history. There is no mitmweb
 allow-all toggle, flow viewer, capture/replay facility, or WebSocket relay.
 WebSocket upgrade requests are rejected rather than forwarded as a raw tunnel.
 
 ## Operation and hooks
 
 ```sh
-ramawall check
-ramawall --config /etc/mitmwall/config.toml --rules-dir /etc/mitmwall/rules.d check
-sudo systemctl reload ramawall
-sudo systemctl restart ramawall
-sudo systemctl stop ramawall
-sudo ramawall hook stop       # intentionally remove enforcement and restore host state
-ramawall hook --dry-run start
-ramawall hook --dry-run stop
+exwall check
+exwall --config /etc/mitmwall/config.toml --rules-dir /etc/mitmwall/rules.d check
+sudo systemctl reload exwall
+sudo systemctl restart exwall
+sudo systemctl stop exwall
+sudo exwall hook stop       # intentionally remove enforcement and restore host state
+exwall hook --dry-run start
+exwall hook --dry-run stop
 ```
 
 Changes to `rules.d/*.toml` automatically reload the complete ruleset after a short
@@ -244,15 +244,15 @@ Explicit CONNECT requests have
 their own entry in addition to the HTTPS requests inside the tunnel. Traffic
 that bypasses the proxy is not visible to the access logger.
 
-The default destination is `/var/log/ramawall/access.log`. Each line has exactly
+The default destination is `/var/log/exwall/access.log`. Each line has exactly
 nine columns:
 
 ```text
 TIMESTAMP PROTOCOL RESULT RULE HTTP_METHOD URL HTTP_STATUS DNS_RCODE ERROR
-2026-10-07T12:34:56Z https ALLOW /etc/ramawall/rules.d/5-examples.toml:allow#1 GET https://github.com:443/api 200 - -
+2026-10-07T12:34:56Z https ALLOW /etc/exwall/rules.d/5-examples.toml:allow#1 GET https://github.com:443/api 200 - -
 2026-10-07T12:34:57Z http DENY - POST http://denied.test/upload 403 - -
 2026-10-07T12:34:58Z dns DENY - - dns://denied.test/A - REFUSED -
-2026-10-07T12:34:59Z https ALLOW /etc/ramawall/rules.d/5-examples.toml:allow#1 GET https://github.com:443/api 502 - UPSTREAM_TIMEOUT
+2026-10-07T12:34:59Z https ALLOW /etc/exwall/rules.d/5-examples.toml:allow#1 GET https://github.com:443/api 502 - UPSTREAM_TIMEOUT
 ```
 
 Timestamps are UTC arrival times; entries are written as request handlers finish.
@@ -295,7 +295,7 @@ discarding subsequent logs. The following settings are configurable in
 
 ```toml
 [access_log]
-path = "/var/log/ramawall/access.log"
+path = "/var/log/exwall/access.log"
 check_interval = 100
 max_size_bytes = 10485760 # 10 MiB
 keep_entries = 1000
@@ -305,7 +305,7 @@ Every 100 logged requests, the actor checks the actual file size. If it exceeds
 10 MiB, the actor atomically replaces it with the last 1,000 complete entries in
 their original order. These are periodic limits: the file can grow between
 checks, and the retained entries may themselves exceed the size threshold.
-Use `sudo tail -F /var/log/ramawall/access.log` to follow the file across trimming.
+Use `sudo tail -F /var/log/exwall/access.log` to follow the file across trimming.
 The installer and systemd create the default parent directory; for a custom path
 or a manual `serve` invocation, create a parent directory writable by the process
 user first. New log files are created with mode `0600`.
@@ -318,7 +318,7 @@ Upstream TLS negotiates HTTP/2 or HTTP/1.1; streaming bodies and HTTP/2 trailers
 are relayed, including gRPC trailers.
 
 The hooks call `iptables`/`ip6tables` with the xtables lock and argv arguments,
-using owned `RAMAWALL_OUTPUT`, `RAMAWALL_NAT`, and bootstrap `RAMAWALL_GUARD`
+using owned `EXWALL_OUTPUT`, `EXWALL_NAT`, and bootstrap `EXWALL_GUARD`
 chains. Custom TCP network/port
 bypasses precede redirects. The output policy preserves reply-direction
 established inbound connections, proxy/bypass users, systemd-resolved, installed
@@ -328,7 +328,7 @@ Startup uses a temporary guard while rebuilding the policy. Cleanup identifies
 owned chains, so changed or malformed config never prevents explicit cleanup.
 
 Original forwarding and redirect sysctls are stored privately in
-`/run/ramawall/forwarding.json` and restored exactly by `hook stop`. Forwarding newly
+`/run/exwall/forwarding.json` and restored exactly by `hook stop`. Forwarding newly
 enabled by the service is guarded against transit traffic. When
 `manage_resolv_conf = true` and `/etc/resolv.conf` uses external nameservers, the
 hook saves the original file or symlink and temporarily replaces it with
@@ -345,7 +345,7 @@ installs a minimal deny policy before parsing, preserving root, the proxy,
 resolver, DNS/NTP service exceptions, loopback, inbound replies, and ICMPv6.
 An incomplete installation retains guards and the original snapshots for retry.
 To intentionally disable enforcement, stop the service and run
-`sudo ramawall hook stop`; uninstall does both. Resolver and sysctl restoration
+`sudo exwall hook stop`; uninstall does both. Resolver and sysctl restoration
 occurs only on that explicit cleanup, which works with malformed TOML.
 As in mitmwall, it governs local processes and relies on unprivileged applications lacking firewall-changing
 capabilities. Container forwarding policy that was enabled before startup is
@@ -355,14 +355,14 @@ service with its own hooks when migrating.
 ## Local proxy development
 
 ```sh
-mkdir -p /tmp/ramawall-dev/rules
-cp example-rules.toml /tmp/ramawall-dev/rules/5-examples.toml
-cargo run -- init-ca --ca-dir /tmp/ramawall-dev/ca
-cargo run -- --rules-dir /tmp/ramawall-dev/rules serve \
+mkdir -p /tmp/exwall-dev/rules
+cp example-rules.toml /tmp/exwall-dev/rules/5-examples.toml
+cargo run -- init-ca --ca-dir /tmp/exwall-dev/ca
+cargo run -- --rules-dir /tmp/exwall-dev/rules serve \
   --listen 127.0.0.1:58080 --dns-listen 127.0.0.1:58053 \
-  --ca-dir /tmp/ramawall-dev/ca
+  --ca-dir /tmp/exwall-dev/ca
 curl --proxy http://127.0.0.1:58080 \
-  --cacert /tmp/ramawall-dev/ca/ramawall-ca-cert.pem https://github.com/
+  --cacert /tmp/exwall-dev/ca/exwall-ca-cert.pem https://github.com/
 ```
 
 Explicit HTTP proxy requests and HTTPS CONNECT are supported alongside

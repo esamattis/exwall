@@ -178,7 +178,7 @@ def wait_for_ready(process, port):
 
 def make_tls_context(root, ca, hostname, dns_names=None):
     """Generate a short-lived test-CA certificate for one or more upstream names."""
-    cert = ca / "ramawall-ca-cert.pem"
+    cert = ca / "exwall-ca-cert.pem"
     tls_key = root / "upstream.key"
     csr = root / "upstream.csr"
     tls_cert = root / "upstream.pem"
@@ -207,7 +207,7 @@ def make_tls_context(root, ca, hostname, dns_names=None):
                     "-CA",
                     str(cert),
                     "-CAkey",
-                    str(ca / "ramawall-ca-key.pem"),
+                    str(ca / "exwall-ca-key.pem"),
                     "-CAcreateserial",
                     "-out",
                     str(tls_cert),
@@ -225,7 +225,7 @@ def make_tls_context(root, ca, hostname, dns_names=None):
 def main():
     """Validate filtering, forwarding, TLS trust, streaming, DNS, and atomic reloads."""
     binary = Path(sys.argv[1]).resolve()
-    with tempfile.TemporaryDirectory(prefix="ramawall-integration-") as directory:
+    with tempfile.TemporaryDirectory(prefix="exwall-integration-") as directory:
         root = Path(directory)
         ca = root / "ca"
         rules = root / "rules"
@@ -251,7 +251,7 @@ methods = ['GET']
         rule_file.write_text(rule_text)
         subprocess.run([str(binary), "init-ca", "--ca-dir", str(ca)],
                        check=True, capture_output=True)
-        cert = ca / "ramawall-ca-cert.pem"
+        cert = ca / "exwall-ca-cert.pem"
 
         upstream = start_server(http.server.ThreadingHTTPServer(("127.0.0.1", 0), EchoHandler))
         secure_upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), EchoHandler)
@@ -312,7 +312,7 @@ methods = ['GET']
                     ui_response = connection.getresponse()
                     assert ui_response.status == 200
                     html = ui_response.read().decode()
-                    assert "<title>ramawall</title>" in html
+                    assert "<title>exwall</title>" in html
                     asset = re.search(r'src="([^"]+\.js)"', html).group(1)
                     connection.request("GET", asset)
                     ui_response = connection.getresponse()

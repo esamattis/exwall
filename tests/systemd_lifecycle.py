@@ -46,14 +46,14 @@ def check_systemd_lifecycle(test):
             "--proxy-port", str(proxy_port), "--dns-port", str(dns_port)]
     serve = [*config_args, "serve", "--listen", f"[::]:{proxy_port}",
              "--dns-listen", f"[::]:{dns_port}", "--ca-dir", str(test.ca)]
-    production = (Path(__file__).parent.parent / "systemd/ramawall.service").read_text()
+    production = (Path(__file__).parent.parent / "systemd/exwall.service").read_text()
     lines = []
     for line in production.splitlines():
         if line.startswith(("LogsDirectory=", "LogsDirectoryMode=")):
             continue
-        if line == "User=ramawall":
+        if line == "User=exwall":
             line = "User=root"
-        elif line == "Group=ramawall":
+        elif line == "Group=exwall":
             line = "Group=root"
         elif line.startswith("ExecStartPre=+"):
             operation = line.rsplit(" ", 1)[1]
@@ -66,7 +66,7 @@ def check_systemd_lifecycle(test):
         if line == "[Service]":
             lines.extend([f"StandardOutput=append:{directory / 'service.log'}",
                           "StandardError=inherit"])
-    (units / "ramawall.service").write_text("\n".join(lines) + "\n")
+    (units / "exwall.service").write_text("\n".join(lines) + "\n")
     environment = {**os.environ, "XDG_RUNTIME_DIR": str(runtime),
                    "SYSTEMD_UNIT_PATH": str(units)}
 
@@ -83,7 +83,7 @@ def check_systemd_lifecycle(test):
 
     def property_value(name):
         """Read one lifecycle property from the private production-unit instance."""
-        return control("show", "ramawall.service", f"--property={name}", "--value").stdout.strip()
+        return control("show", "exwall.service", f"--property={name}", "--value").stdout.strip()
 
     def restricted():
         """Require FTP denial for the ordinary UID and root connectivity as control."""
@@ -100,42 +100,42 @@ def check_systemd_lifecycle(test):
         try:
             wait_until(lambda: (runtime / "systemd/private").exists(), "private manager failed")
             control("start", "systemd-resolved.service")
-            control("start", "ramawall.service")
+            control("start", "exwall.service")
             wait_until(lambda: property_value("ActiveState") == "active", "proxy did not start")
             wait_for_ready(manager, proxy_port)
             saved = (test.state / "forwarding.json").read_bytes()
             for path in (service_config, rule):
                 previous = path.read_text()
                 path.write_text("not valid TOML")
-                control("restart", "ramawall.service", check=False)
+                control("restart", "exwall.service", check=False)
                 restricted()
                 wait_until(lambda: int(property_value("NRestarts")) >= 1,
                            "systemd did not automatically retry invalid policy")
                 restricted()
                 test.assertEqual((test.state / "forwarding.json").read_bytes(), saved)
                 path.write_text(previous)
-                control("reset-failed", "ramawall.service")
-                control("restart", "ramawall.service")
+                control("reset-failed", "exwall.service")
+                control("restart", "exwall.service")
                 wait_until(lambda: property_value("ActiveState") == "active", "repair failed")
                 wait_for_ready(manager, proxy_port)
             # SIGKILL exercises Restart=on-failure and the real unit's cleanup path.
             restarts = int(property_value("NRestarts"))
-            control("kill", "--signal=KILL", "--kill-whom=main", "ramawall.service")
+            control("kill", "--signal=KILL", "--kill-whom=main", "exwall.service")
             restricted()
             wait_until(lambda: int(property_value("NRestarts")) > restarts
                        and property_value("ActiveState") == "active", "crash was not restarted")
             wait_for_ready(manager, proxy_port)
             restricted()
             # Occupy the HTTP port to fail ExecStart after successful privileged hooks.
-            control("stop", "ramawall.service")
+            control("stop", "exwall.service")
             with socket.socket() as occupied:
                 occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 occupied.bind(("127.0.0.1", proxy_port))
                 occupied.listen()
-                control("start", "ramawall.service", check=False)
+                control("start", "exwall.service", check=False)
                 wait_until(lambda: property_value("ExecMainStatus") == "1", "startup failure missing")
                 restricted()
-            control("stop", "ramawall.service")
+            control("stop", "exwall.service")
             # Stopping the proxy is fail closed; explicit cleanup restores host state.
             restricted()
             subprocess.run([*hook, "stop"], check=True, capture_output=True, timeout=20)
@@ -149,7 +149,7 @@ def check_systemd_lifecycle(test):
         finally:
             test.config.write_text(test.config_text)
             rule.write_text(rule_text)
-            control("stop", "ramawall.service", "systemd-resolved.service", check=False)
+            control("stop", "exwall.service", "systemd-resolved.service", check=False)
             # A minimal unit path has no exit.target; reap the private manager directly.
             manager.kill()
             manager.wait(timeout=5)

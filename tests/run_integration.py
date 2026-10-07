@@ -41,9 +41,9 @@ def main():
     binary = str(Path(sys.argv[1]).resolve())
     tests = Path(__file__).resolve().parent
     environment = {**os.environ,
-                   "RAMAWALL_NAMESPACE_TEST": "1",
-                   "RAMAWALL_HOST_NET_NS": os.readlink("/proc/self/ns/net"),
-                   "RAMAWALL_HOST_MNT_NS": os.readlink("/proc/self/ns/mnt")}
+                   "EXWALL_NAMESPACE_TEST": "1",
+                   "EXWALL_HOST_NET_NS": os.readlink("/proc/self/ns/net"),
+                   "EXWALL_HOST_MNT_NS": os.readlink("/proc/self/ns/mnt")}
     # Ambient proxy/CA settings must not send local fixtures to a host service.
     for name in list(environment):
         if name.lower().endswith("_proxy") or name in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
@@ -60,7 +60,7 @@ def main():
         run([sys.executable, str(tests / "integration.py"), binary], env=environment)
         # sudo clears custom variables; pass the host namespace identities explicitly.
         identities = [f"{name}={environment[name]}"
-                      for name in ("RAMAWALL_HOST_NET_NS", "RAMAWALL_HOST_MNT_NS")]
+                      for name in ("EXWALL_HOST_NET_NS", "EXWALL_HOST_MNT_NS")]
         prefix = [*privilege, "env", *identities,
                   "unshare", "--net", "--mount", "--propagation", "private"]
         if not privileged:

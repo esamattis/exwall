@@ -198,7 +198,7 @@ impl Proxy {
         let policy = self.policy.load();
         let Some(rule) = policy.rules.request(&host, request.method().as_str(), &path) else {
             access.decision(false);
-            return Err((StatusCode::FORBIDDEN, "ramawall: no allow rule matched\n"));
+            return Err((StatusCode::FORBIDDEN, "exwall: no allow rule matched\n"));
         };
         access.decision(true);
         access.rule.clone_from(&rule.name);
@@ -215,7 +215,7 @@ impl Proxy {
         // original IP supplies only a port; it must never override hostname routing.
         if !rule.inject_headers.is_empty() && scheme != "https" {
             access.decision(false);
-            return Err((StatusCode::FORBIDDEN, "ramawall: header injection requires HTTPS\n"));
+            return Err((StatusCode::FORBIDDEN, "exwall: header injection requires HTTPS\n"));
         }
         let port = authority
             .port_u16()
@@ -316,7 +316,7 @@ impl Proxy {
                             access.entry().http_response(403);
                             return Err(response(
                                 StatusCode::FORBIDDEN,
-                                "ramawall: CONNECT hostname denied\n",
+                                "exwall: CONNECT hostname denied\n",
                             ));
                         };
                         access.entry().decision(true);

@@ -752,6 +752,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "exwall"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "clap",
+ "fancy-regex",
+ "hickory-proto",
+ "ipnet",
+ "jiff",
+ "libc",
+ "notify",
+ "rama",
+ "rcgen",
+ "regex",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fancy-regex"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2781,32 +2807,6 @@ dependencies = [
  "rama-utils",
  "rand 0.10.3",
  "tokio",
-]
-
-[[package]]
-name = "ramawall"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "clap",
- "fancy-regex",
- "hickory-proto",
- "ipnet",
- "jiff",
- "libc",
- "notify",
- "rama",
- "rcgen",
- "regex",
- "serde",
- "serde_json",
- "socket2",
- "tempfile",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

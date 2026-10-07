@@ -18,11 +18,11 @@ block_dns = true
 # The default is true.
 manage_resolv_conf = true
 
-# Compatibility setting: ramawall validates this but stores no flow history.
+# Compatibility setting: exwall validates this but stores no flow history.
 # The default is 1000.
 flow_history_clear_interval = 1000
 
-# Compatibility setting: ramawall validates this but stores no flow history.
+# Compatibility setting: exwall validates this but stores no flow history.
 # The default is 500. If trimming fails, mitmwall falls back to clearing all
 # flow history entries.
 flow_history_keep_entries = 500
@@ -44,7 +44,7 @@ bypass_users = ["root", "_apt"]
 # Access logs are independent of log_level. Restart to apply these settings.
 # Every check_interval entries, trim an oversized file to its last keep_entries.
 [access_log]
-path = "/var/log/ramawall/access.log"
+path = "/var/log/exwall/access.log"
 check_interval = 100
 max_size_bytes = 10485760
 keep_entries = 1000

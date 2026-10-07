@@ -10,14 +10,14 @@ import {
 } from "@tanstack/react-router";
 import "./style.css";
 
-/** Render the first page of the ramawall control UI. */
+/** Render the first page of the exwall control UI. */
 function HelloWorld() {
     return (
         <main className="flex min-h-screen items-center justify-center bg-slate-950 px-6 text-slate-100">
             <div className="w-full max-w-xl rounded-2xl border border-slate-800 bg-slate-900 p-10">
-                <p className="mb-8 text-sm font-semibold tracking-widest text-teal-400">ramawall</p>
+                <p className="mb-8 text-sm font-semibold tracking-widest text-teal-400">exwall</p>
                 <h1 className="text-4xl font-semibold tracking-tight">Hello world</h1>
-                <p className="mt-4 text-lg text-slate-400">Welcome to the ramawall UI.</p>
+                <p className="mt-4 text-lg text-slate-400">Welcome to the exwall UI.</p>
             </div>
         </main>
     );

@@ -60,7 +60,7 @@ def operate(options):
         return response[3] & 15
     if operation == "ping":
         sequence = 1
-        payload = b"ramawall-ipv6-control-plane"
+        payload = b"exwall-ipv6-control-plane"
         request = struct.pack("!BBHHH", 128, 0, 0, 0, sequence) + payload
         with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM, socket.IPPROTO_ICMPV6) as connection:
             connection.settimeout(3)

@@ -7,11 +7,11 @@ use std::{
     process::{Command, Output},
 };
 
-pub const OUTPUT: &str = "RAMAWALL_OUTPUT";
-pub const NAT: &str = "RAMAWALL_NAT";
-const GUARD: &str = "RAMAWALL_GUARD";
-const SETUP: &str = "ramawall-setup-guard";
-const FORWARD: &str = "ramawall-forwarding-guard";
+pub const OUTPUT: &str = "EXWALL_OUTPUT";
+pub const NAT: &str = "EXWALL_NAT";
+const GUARD: &str = "EXWALL_GUARD";
+const SETUP: &str = "exwall-setup-guard";
+const FORWARD: &str = "exwall-forwarding-guard";
 const ABSENT_RULE: &str = "Bad rule (does a matching rule exist in that chain?).";
 const ABSENT_CHAIN: &str = "No chain/target/match by that name.";
 
@@ -208,7 +208,7 @@ impl Firewall {
         )
     }
 
-    /// Remove only the temporary guard owned by ramawall.
+    /// Remove only the temporary guard owned by exwall.
     pub fn clear_setup_guard(&self) -> Result<()> {
         self.remove(
             "filter",
@@ -228,7 +228,7 @@ impl Firewall {
         )
     }
 
-    /// Install or remove the guard for forwarding newly enabled by ramawall.
+    /// Install or remove the guard for forwarding newly enabled by exwall.
     pub fn forward_guard(&self, install: bool) -> Result<()> {
         let rule = strings(&["-m", "comment", "--comment", FORWARD, "-j", "DROP"]);
         if install {
@@ -472,13 +472,13 @@ port = 22
 "#,
         )
         .unwrap();
-        let nat = nat_rules(&config, "ramawall", &["_chrony".into()], 58080, 58053, false);
+        let nat = nat_rules(&config, "exwall", &["_chrony".into()], 58080, 58053, false);
         let custom = nat.iter().position(|r| r.contains(&"192.168.1.0/24".into())).unwrap();
         let redirect = nat.iter().position(|r| r.contains(&"REDIRECT".into())).unwrap();
         assert!(custom < redirect);
         assert!(nat[..redirect].iter().any(|r| r.contains(&"systemd-resolve".into())));
         assert!(!nat.iter().any(|r| r.contains(&"2001:db8::/32".into())));
-        let output = output_rules(&config, "ramawall", &[], 58080, 58053, true);
+        let output = output_rules(&config, "exwall", &[], 58080, 58053, true);
         assert_eq!(output.last().unwrap(), &strings(&["-j", "DROP"]));
         assert!(output[0].contains(&"REPLY".into()));
         for rule in

@@ -8,7 +8,7 @@ import subprocess
 def assert_namespace():
     """Require a fresh namespace distinct from the integration launcher's host."""
     for kind in ("net", "mnt"):
-        original = os.environ.get(f"RAMAWALL_HOST_{kind.upper()}_NS")
+        original = os.environ.get(f"EXWALL_HOST_{kind.upper()}_NS")
         current = os.readlink(f"/proc/self/ns/{kind}")
         if not original or current == original:
             raise RuntimeError(f"refusing firewall tests without a disposable {kind} namespace")

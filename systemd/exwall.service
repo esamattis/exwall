@@ -7,17 +7,17 @@ PartOf=systemd-resolved.service
 
 [Service]
 Type=simple
-User=ramawall
-Group=ramawall
-LogsDirectory=ramawall
+User=exwall
+Group=exwall
+LogsDirectory=exwall
 LogsDirectoryMode=0700
-ExecStartPre=+/usr/local/bin/ramawall hook guard
-ExecStartPre=/usr/local/bin/ramawall check
-ExecStartPre=+/usr/local/bin/ramawall hook start
-ExecStart=/usr/local/bin/ramawall serve
+ExecStartPre=+/usr/local/bin/exwall hook guard
+ExecStartPre=/usr/local/bin/exwall check
+ExecStartPre=+/usr/local/bin/exwall hook start
+ExecStart=/usr/local/bin/exwall serve
 ExecReload=/bin/kill -HUP $MAINPID
 # Enforcement survives stop, restart, and failed starts.
-# To remove it intentionally: systemctl stop ramawall; ramawall hook stop
+# To remove it intentionally: systemctl stop exwall; exwall hook stop
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=30

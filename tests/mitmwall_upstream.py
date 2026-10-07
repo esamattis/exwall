@@ -18,7 +18,7 @@ class EchoHandler(http.server.BaseHTTPRequestHandler):
 
     def respond(self, body=True):
         """Write an identifiable successful response, suppressing the HEAD body."""
-        content = json.dumps({"fixture": "ramawall-local-upstream", "path": self.path,
+        content = json.dumps({"fixture": "exwall-local-upstream", "path": self.path,
                               "method": self.command, "headers": dict(self.headers)}).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(content)))

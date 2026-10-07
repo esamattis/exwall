@@ -61,14 +61,14 @@ def stop_process(process):
             process.wait(timeout=5)
 
 
-class RamawallNetworkTests(unittest.TestCase):
-    """Exercise mitmwall's allow rules and bypass/lifecycle contracts through ramawall."""
+class ExwallNetworkTests(unittest.TestCase):
+    """Exercise mitmwall's allow rules and bypass/lifecycle contracts through exwall."""
 
     @classmethod
     def setUpClass(cls):
         """Build private accounts/hosts, two networks, upstreams, and a live proxy policy."""
         assert_namespace()
-        cls.temporary = tempfile.TemporaryDirectory(prefix="ramawall-mitmwall-port-")
+        cls.temporary = tempfile.TemporaryDirectory(prefix="exwall-mitmwall-port-")
         cls.addClassCleanup(cls.temporary.cleanup)
         cls.root = Path(cls.temporary.name)
         cls.root.chmod(0o755)
@@ -82,7 +82,7 @@ class RamawallNetworkTests(unittest.TestCase):
         cls.ca = cls.root / "ca"
         command(cls.binary, "init-ca", "--ca-dir", str(cls.ca))
         cls.ca.chmod(0o755)
-        cls.cert = cls.ca / "ramawall-ca-cert.pem"
+        cls.cert = cls.ca / "exwall-ca-cert.pem"
         cls.cert.chmod(0o644)
         make_tls_context(cls.root, cls.ca, "github.com", HOSTS)
         cls.config = cls.root / "config.toml"
@@ -154,7 +154,7 @@ class RamawallNetworkTests(unittest.TestCase):
         for tool in ("iptables", "ip6tables"):
             for table in ("filter", "nat"):
                 command(tool, "-t", table, "-A", "OUTPUT", "-o", "lo", "-m", "comment",
-                        "--comment", "ramawall-integration-admin", "-j", "ACCEPT")
+                        "--comment", "exwall-integration-admin", "-j", "ACCEPT")
         cls.baseline = cls.firewall_snapshot()
         cls.original_sysctls = cls.sysctl_values()
         cls.addClassCleanup(command, *cls.hook_args, "stop")
@@ -199,7 +199,7 @@ class RamawallNetworkTests(unittest.TestCase):
                 self.assertEqual(result["result"]["status"], 200)
                 if method != "HEAD":
                     payload = json.loads(result["result"]["body"])
-                    self.assertEqual(payload["fixture"], "ramawall-local-upstream")
+                    self.assertEqual(payload["fixture"], "exwall-local-upstream")
                     self.assertEqual(payload["method"], method)
                     parsed = urlsplit(target)
                     self.assertEqual(payload["path"], (parsed.path or "/")
@@ -491,7 +491,7 @@ class RamawallNetworkTests(unittest.TestCase):
     def test_output_filter_only_accepts_conntrack_reply_direction(self):
         """Check that established original-direction flows receive no general exemption."""
         for tool in ("iptables", "ip6tables"):
-            rules = command(tool, "-S", "RAMAWALL_OUTPUT").stdout.splitlines()
+            rules = command(tool, "-S", "EXWALL_OUTPUT").stdout.splitlines()
             first = next(line for line in rules if line.startswith("-A ")).split()
             self.assertEqual(first[-2:], ["-j", "ACCEPT"])
             self.assertEqual(set(first[first.index("--ctstate") + 1].split(",")),
@@ -501,20 +501,20 @@ class RamawallNetworkTests(unittest.TestCase):
     def test_managed_output_jump_is_first(self):
         """Ensure both filter and NAT jumps precede unrelated administrator rules."""
         for tool in ("iptables", "ip6tables"):
-            for table, chain in (("filter", "RAMAWALL_OUTPUT"), ("nat", "RAMAWALL_NAT")):
+            for table, chain in (("filter", "EXWALL_OUTPUT"), ("nat", "EXWALL_NAT")):
                 rules = command(tool, "-t", table, "-S", "OUTPUT").stdout.splitlines()
                 first = next(line for line in rules if line.startswith("-A "))
                 self.assertEqual(first, f"-A OUTPUT -j {chain}")
 
     def test_only_ipv6_filter_allows_control_protocol(self):
         """Require the ICMPv6 exemption before DROP without broad IPv4 allowances."""
-        ipv6 = command("ip6tables", "-S", "RAMAWALL_OUTPUT").stdout.splitlines()
-        allow = "-A RAMAWALL_OUTPUT -p ipv6-icmp -j ACCEPT"
+        ipv6 = command("ip6tables", "-S", "EXWALL_OUTPUT").stdout.splitlines()
+        allow = "-A EXWALL_OUTPUT -p ipv6-icmp -j ACCEPT"
         self.assertEqual(ipv6.count(allow), 1)
-        self.assertLess(ipv6.index(allow), ipv6.index("-A RAMAWALL_OUTPUT -j DROP"))
-        ipv4 = command("iptables", "-S", "RAMAWALL_OUTPUT").stdout
+        self.assertLess(ipv6.index(allow), ipv6.index("-A EXWALL_OUTPUT -j DROP"))
+        ipv4 = command("iptables", "-S", "EXWALL_OUTPUT").stdout
         for protocol in ("icmp", "tcp", "udp"):
-            self.assertNotIn(f"-A RAMAWALL_OUTPUT -p {protocol} -j ACCEPT", ipv4)
+            self.assertNotIn(f"-A EXWALL_OUTPUT -p {protocol} -j ACCEPT", ipv4)
 
     def test_unprivileged_ipv6_echo_on_loopback(self):
         """Exercise live ICMPv6 locally and over veth under the ordinary client UID."""
@@ -546,7 +546,7 @@ class RamawallNetworkTests(unittest.TestCase):
         self.assertNotIn("error", proxied)
         self.assertNotEqual(proxied, direct)
         for tool in ("iptables", "ip6tables"):
-            for table, chain in (("filter", "RAMAWALL_OUTPUT"), ("nat", "RAMAWALL_NAT")):
+            for table, chain in (("filter", "EXWALL_OUTPUT"), ("nat", "EXWALL_NAT")):
                 self.assertIn("--uid-owner 1 -j ACCEPT", command(tool, "-t", table, "-S", chain).stdout)
 
     def test_direct_dns_queries_to_public_resolver_are_proxied(self):
@@ -603,11 +603,11 @@ class RamawallNetworkTests(unittest.TestCase):
             command(*self.hook_args, "start")
             self.assertEqual(self.firewall_snapshot(), first)
             for tool in ("iptables", "ip6tables"):
-                for table, chain in (("filter", "RAMAWALL_OUTPUT"), ("nat", "RAMAWALL_NAT")):
+                for table, chain in (("filter", "EXWALL_OUTPUT"), ("nat", "EXWALL_NAT")):
                     managed = command(tool, "-t", table, "-S", chain).stdout
                     for network in ("8.8.8.8", "172.64.155.209", "2001:db8::/32", "192.168.5.0/24"):
                         self.assertNotIn(network, managed)
-                    self.assertIn("ramawall-integration-admin", command(tool, "-t", table, "-S").stdout)
+                    self.assertIn("exwall-integration-admin", command(tool, "-t", table, "-S").stdout)
             proxied = self.client("certificate", host="8.8.8.8", port=443, hostname="dns.google")
             self.assertNotIn("error", proxied)
             self.assertNotEqual(proxied, direct)
@@ -629,7 +629,7 @@ class RamawallNetworkTests(unittest.TestCase):
         self.assertEqual(self.firewall_snapshot(), snapshot)
         self.assertEqual(self.sysctl_values(), ["1", "1", "0"])
         for tool, original in zip(("iptables", "ip6tables"), self.original_sysctls):
-            self.assertEqual("ramawall-forwarding-guard" in command(tool, "-S", "FORWARD").stdout,
+            self.assertEqual("exwall-forwarding-guard" in command(tool, "-S", "FORWARD").stdout,
                              original == "0")
         try:
             command(*self.hook_args, "stop")
@@ -684,7 +684,7 @@ class RamawallNetworkTests(unittest.TestCase):
                 for _ in range(2):
                     self.assertNotEqual(command(*self.hook_args, "start", check=False).returncode, 0)
                     for tool in ("iptables", "ip6tables"):
-                        self.assertIn("RAMAWALL_GUARD", command(tool, "-S", "OUTPUT").stdout)
+                        self.assertIn("EXWALL_GUARD", command(tool, "-S", "OUTPUT").stdout)
                     # Root remains an administrative bypass with unparseable policy.
                     self.assertEqual(self.client("tcp", user="root", host="ftp.ubuntu-tw.org", port=21),
                                      {"result": True})
@@ -724,7 +724,7 @@ class RamawallNetworkTests(unittest.TestCase):
 
 def main():
     """Run all named ported cases and exit unsuccessfully on any failed assertion."""
-    suite = unittest.defaultTestLoader.loadTestsFromTestCase(RamawallNetworkTests)
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(ExwallNetworkTests)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if not result.wasSuccessful():
         raise SystemExit(1)

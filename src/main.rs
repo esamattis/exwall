@@ -24,9 +24,9 @@ use tokio::net::{TcpListener, UdpSocket};
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
-    #[arg(long, global = true, default_value = "/etc/ramawall/config.toml")]
+    #[arg(long, global = true, default_value = "/etc/exwall/config.toml")]
     config: PathBuf,
-    #[arg(long, global = true, default_value = "/etc/ramawall/rules.d")]
+    #[arg(long, global = true, default_value = "/etc/exwall/rules.d")]
     rules_dir: PathBuf,
     #[command(subcommand)]
     command: Option<Action>,
@@ -43,14 +43,14 @@ enum Action {
         dns_listen: SocketAddr,
         #[arg(long, default_value = "127.0.0.53:53")]
         dns_upstream: SocketAddr,
-        #[arg(long, default_value = "/var/lib/ramawall")]
+        #[arg(long, default_value = "/var/lib/exwall")]
         ca_dir: PathBuf,
     },
     /// Validate all configuration and rule files without starting listeners.
     Check,
     /// Generate a local CA once, preserving an existing CA.
     InitCa {
-        #[arg(long, default_value = "/var/lib/ramawall")]
+        #[arg(long, default_value = "/var/lib/exwall")]
         ca_dir: PathBuf,
     },
     /// Run a privileged systemd lifecycle hook.
@@ -59,9 +59,9 @@ enum Action {
         action: HookAction,
         #[arg(long)]
         dry_run: bool,
-        #[arg(long, default_value = "ramawall")]
+        #[arg(long, default_value = "exwall")]
         proxy_user: String,
-        #[arg(long, default_value = "/run/ramawall")]
+        #[arg(long, default_value = "/run/exwall")]
         state_dir: PathBuf,
         #[arg(long, default_value_t = 58080)]
         proxy_port: u16,
@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
         listen: "[::]:58080".parse()?,
         dns_listen: "[::]:58053".parse()?,
         dns_upstream: "127.0.0.53:53".parse()?,
-        ca_dir: "/var/lib/ramawall".into(),
+        ca_dir: "/var/lib/exwall".into(),
     });
     // Configuration failures must never prevent guarding or stopping the firewall.
     match action {
@@ -219,7 +219,7 @@ async fn serve(
         rules: rules::RuleSet::load(&rules_dir)?,
     }));
     let authority =
-        Arc::new(ca::Authority::load(&ca_dir).context("load CA; run ramawall init-ca first")?);
+        Arc::new(ca::Authority::load(&ca_dir).context("load CA; run exwall init-ca first")?);
     let http = tcp_listener(listen).context("bind HTTP proxy")?;
     let dns_tcp = tcp_listener(dns_listen).context("bind DNS TCP")?;
     let dns_udp = udp_listener(dns_listen).context("bind DNS UDP")?;
@@ -245,7 +245,7 @@ async fn serve(
         tokio::spawn(ui::serve(ui_listeners, rama::rt::Executor::graceful(shutdown.guard())));
     let mut access_finished = false;
     tracing::info!(hosts = ?ui_config.hosts, port = ui_config.port, "UI listeners configured");
-    tracing::info!(%listen, %dns_listen, rules = policy.load().rules.rules.len(), "ramawall ready");
+    tracing::info!(%listen, %dns_listen, rules = policy.load().rules.rules.len(), "exwall ready");
     let result = loop {
         tokio::select! {
             result = &mut access_task => {

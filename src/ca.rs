@@ -14,8 +14,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub const CERT_FILE: &str = "ramawall-ca-cert.pem";
-pub const KEY_FILE: &str = "ramawall-ca-key.pem";
+pub const CERT_FILE: &str = "exwall-ca-cert.pem";
+pub const KEY_FILE: &str = "exwall-ca-key.pem";
 
 /// Create CA material once and validate existing material without rotating it.
 pub fn init(directory: &Path) -> Result<()> {
@@ -38,8 +38,8 @@ pub fn init(directory: &Path) -> Result<()> {
         KeyUsagePurpose::CrlSign,
         KeyUsagePurpose::DigitalSignature,
     ];
-    params.distinguished_name.push(DnType::CommonName, "ramawall local CA");
-    params.distinguished_name.push(DnType::OrganizationName, "ramawall");
+    params.distinguished_name.push(DnType::CommonName, "exwall local CA");
+    params.distinguished_name.push(DnType::OrganizationName, "exwall");
     let key = KeyPair::generate()?;
     let cert = params.self_signed(&key)?;
     for (path, contents) in [(key_path, key.serialize_pem()), (cert_path, cert.pem())] {

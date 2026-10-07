@@ -36,7 +36,7 @@ def main():
     assert_namespace()
     command("ip", "link", "set", "lo", "up")
     original_sysctls = [command("sysctl", "-n", name) for name in SYSCTLS]
-    # Give ramawall an unrelated rule it must preserve across repeated start/stop.
+    # Give exwall an unrelated rule it must preserve across repeated start/stop.
     command(
         "iptables",
         "-A",
@@ -49,7 +49,7 @@ def main():
         "ACCEPT")
     baseline = firewall_snapshot()
     binary = str(Path(sys.argv[1]).resolve())
-    with tempfile.TemporaryDirectory(prefix="ramawall-namespace-") as directory:
+    with tempfile.TemporaryDirectory(prefix="exwall-namespace-") as directory:
         root = Path(directory)
         # A single-user namespace cannot use owner matches for unmapped service
         # UIDs. Bind a private passwd view so those account names map to root.
@@ -93,7 +93,7 @@ def main():
             first = firewall_snapshot()
             saved = (state / "forwarding.json").read_bytes()
             assert [command("sysctl", "-n", name).strip() for name in SYSCTLS] == ["1", "1", "0"]
-            assert "RAMAWALL_OUTPUT" in first[0] and "RAMAWALL_OUTPUT" in first[1]
+            assert "EXWALL_OUTPUT" in first[0] and "EXWALL_OUTPUT" in first[1]
             config.write_text(config.read_text().replace("log_level = 'debug'", "log_level = 'info'"))
             logs = command("env", "RUST_LOG=debug", *args, "start")
             assert "executing command" not in logs, logs
@@ -101,12 +101,12 @@ def main():
             assert (state / "forwarding.json").read_bytes() == saved, "repeated start replaced original state"
             for tool in ("iptables", "ip6tables"):
                 output = command(tool, "-S", "OUTPUT").splitlines()
-                assert output[1] == "-A OUTPUT -j RAMAWALL_OUTPUT", output
-                nat = command(tool, "-t", "nat", "-S", "RAMAWALL_NAT")
+                assert output[1] == "-A OUTPUT -j EXWALL_OUTPUT", output
+                nat = command(tool, "-t", "nat", "-S", "EXWALL_NAT")
                 assert nat.index("--uid-owner 0") < nat.index("REDIRECT"), nat
-            nat4 = command("iptables", "-t", "nat", "-S", "RAMAWALL_NAT")
+            nat4 = command("iptables", "-t", "nat", "-S", "EXWALL_NAT")
             assert nat4.index("192.0.2.0/24") < nat4.index("REDIRECT")
-            assert "ramawall-forwarding-guard" in command("iptables", "-S", "FORWARD")
+            assert "exwall-forwarding-guard" in command("iptables", "-S", "FORWARD")
 
             # Stop must work even when the operator leaves malformed TOML on disk.
             config.write_text("not valid TOML")

@@ -52,10 +52,10 @@ impl Default for Hooks {
     /// Return the installed service paths and mitmwall-compatible ports.
     fn default() -> Self {
         Self {
-            state_dir: "/run/ramawall".into(),
+            state_dir: "/run/exwall".into(),
             resolv_conf: "/etc/resolv.conf".into(),
             resolved_stub: "/run/systemd/resolve/stub-resolv.conf".into(),
-            proxy_user: "ramawall".into(),
+            proxy_user: "exwall".into(),
             proxy_port: 58080,
             dns_port: 58053,
             dry_run: false,

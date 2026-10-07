@@ -6,29 +6,29 @@ case "${1:-}" in
     ""|--purge) ;;
     *) echo "usage: $0 [--purge]" >&2; exit 2 ;;
 esac
-if systemctl cat ramawall.service >/dev/null 2>&1; then
-    systemctl disable --now ramawall.service
+if systemctl cat exwall.service >/dev/null 2>&1; then
+    systemctl disable --now exwall.service
 fi
 # Cleanup is independent of TOML parsing and can also remove a failed start.
-if [ -x /usr/local/bin/ramawall ]; then
-    /usr/local/bin/ramawall hook stop
+if [ -x /usr/local/bin/exwall ]; then
+    /usr/local/bin/exwall hook stop
 fi
-rm -f /etc/systemd/system/ramawall.service /usr/local/bin/ramawall
-rm -f /usr/local/share/ca-certificates/ramawall.crt /etc/profile.d/ramawall.sh
+rm -f /etc/systemd/system/exwall.service /usr/local/bin/exwall
+rm -f /usr/local/share/ca-certificates/exwall.crt /etc/profile.d/exwall.sh
 if [ -f /etc/environment ]; then
     tmpfile=$(mktemp)
     trap 'rm -f "$tmpfile"' EXIT
-    sed '/^# ramawall-start$/,/^# ramawall-end$/d' /etc/environment > "$tmpfile"
+    sed '/^# exwall-start$/,/^# exwall-end$/d' /etc/environment > "$tmpfile"
     install -m 0644 "$tmpfile" /etc/environment
 fi
 update-ca-certificates
 systemctl daemon-reload
 if [ "${1:-}" = --purge ]; then
-    rm -rf /etc/ramawall /var/lib/ramawall /var/log/ramawall /run/ramawall
-    if id ramawall >/dev/null 2>&1; then
-        userdel ramawall
+    rm -rf /etc/exwall /var/lib/exwall /var/log/exwall /run/exwall
+    if id exwall >/dev/null 2>&1; then
+        userdel exwall
     fi
-    if getent group ramawall >/dev/null 2>&1; then
-        groupdel ramawall
+    if getent group exwall >/dev/null 2>&1; then
+        groupdel exwall
     fi
 fi

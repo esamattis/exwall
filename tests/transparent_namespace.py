@@ -77,11 +77,11 @@ def main():
     assert_namespace()
     command("ip", "link", "set", "lo", "up")
     binary = str(Path(sys.argv[1]).resolve())
-    with tempfile.TemporaryDirectory(prefix="ramawall-transparent-") as directory:
+    with tempfile.TemporaryDirectory(prefix="exwall-transparent-") as directory:
         root = Path(directory)
         ca = root / "ca"
         command(binary, "init-ca", "--ca-dir", str(ca))
-        cert = ca / "ramawall-ca-cert.pem"
+        cert = ca / "exwall-ca-cert.pem"
         hosts = root / "hosts"
         hosts.write_text("127.0.0.2 allowed.test\n::1 allowed-v6.test\n")
         command("mount", "--bind", str(hosts), "/etc/hosts")

@@ -75,7 +75,7 @@ impl Default for AccessLogConfig {
     /// Log to the service directory and check every 100 entries against a 10 MiB limit.
     fn default() -> Self {
         Self {
-            path: "/var/log/ramawall/access.log".into(),
+            path: "/var/log/exwall/access.log".into(),
             check_interval: 100,
             max_size_bytes: 10 * 1024 * 1024,
             keep_entries: 1000,
