@@ -14,7 +14,9 @@ import type { Options, ProcessPromise } from "zx/core";
 
 /** Start an argument-vector command through zx, retaining its actual process PID. */
 export function startProcess(args: string[], options: Partial<Options> = {}): ProcessPromise {
-    if (!args.length) throw new Error("Cannot start an empty command");
+    if (!args.length) {
+        throw new Error("Cannot start an empty command");
+    }
     return $({ quiet: true, nothrow: true, ...options, prefix: "exec ", postfix: "" })`${args}`;
 }
 
@@ -57,8 +59,9 @@ export function processMessages(child: ProcessPromise) {
         /** Read one message or fail promptly when the child exits before readiness. */
         async next<T>(): Promise<T> {
             const message = await bounded(messages.next(), 30_000, "Child readiness");
-            if (message.done)
+            if (message.done) {
                 throw new Error(`Child exited before readiness: ${child.output?.stderr}`);
+            }
             return JSON.parse(message.value);
         },
         /** Release the reader after the child has been reaped. */
@@ -70,19 +73,28 @@ export function processMessages(child: ProcessPromise) {
 
 /** Signal a zx-owned process using a quoted command rather than an unescaped shell invocation. */
 async function signalProcess(child: ProcessPromise, signal: NodeJS.Signals): Promise<void> {
-    if (child.output || !child.pid) return;
+    if (child.output || !child.pid) {
+        return;
+    }
     try {
         await runCommand(["kill", "-s", signal, String(child.pid)]);
     } catch (error) {
-        if (!child.output) throw error;
+        if (!child.output) {
+            throw error;
+        }
     }
 }
 
 /** Stop a service by signal or a fixture by control EOF, escalating only after bounded waits. */
 export async function stopProcess(child: ProcessPromise, controlPipe = false): Promise<void> {
-    if (child.output) return;
-    if (controlPipe) child.stdin.end();
-    else await signalProcess(child, "SIGTERM");
+    if (child.output) {
+        return;
+    }
+    if (controlPipe) {
+        child.stdin.end();
+    } else {
+        await signalProcess(child, "SIGTERM");
+    }
     try {
         await bounded(
             child.then(() => undefined),
@@ -124,7 +136,9 @@ export async function waitForPort(port: number, child: ProcessPromise): Promise<
                         resolveListening(false);
                     });
                 });
-                if (listening) return;
+                if (listening) {
+                    return;
+                }
                 await delay(50);
             }
             throw new Error(`Service exited before readiness: ${child.output?.stderr}`);

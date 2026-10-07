@@ -5,6 +5,8 @@
         "correctness": "error"
     },
     "rules": {
+        "curly": ["error", "all"],
+        "no-nested-ternary": "error",
         "typescript/consistent-type-assertions": [
             "error",
             {

@@ -30,8 +30,9 @@ async function main(): Promise<void> {
         if (
             name.toLowerCase().endsWith("_proxy") ||
             ["SSL_CERT_FILE", "SSL_CERT_DIR"].includes(name)
-        )
+        ) {
             delete environment[name];
+        }
     }
     if (!process.argv.includes("--no-build")) {
         await runCommand(["pnpm", "build:ui"], {
@@ -48,7 +49,9 @@ async function main(): Promise<void> {
         });
     }
     const privilege = process.getuid?.() === 0 ? [] : ["sudo", "-n"];
-    if (privilege.length) await runCommand([...privilege, "true"]);
+    if (privilege.length) {
+        await runCommand([...privilege, "true"]);
+    }
     const browser = chromium.executablePath();
     try {
         await access(browser);
@@ -102,8 +105,9 @@ async function main(): Promise<void> {
             const ready = await messages.next<FixtureReady>();
             bridge = await startUiBridge({ host: "127.0.0.1", port: 0 }, { path: ready.uiSocket });
             const address = bridge.server.address();
-            if (!address || typeof address === "string")
+            if (!address || typeof address === "string") {
                 throw new Error("UI forwarder has no TCP address");
+            }
             await runCommand(
                 [
                     process.execPath,
@@ -143,8 +147,9 @@ async function main(): Promise<void> {
                     30_000,
                     "Namespace fixture shutdown",
                 );
-                if (finished.exitCode !== 0)
+                if (finished.exitCode !== 0) {
                     failures.push(new Error(`Namespace fixture exited with ${finished.exitCode}`));
+                }
             } catch (error) {
                 failures.push(error);
             }
@@ -165,14 +170,19 @@ async function main(): Promise<void> {
         }
         console.log(`Playwright artifacts: ${output}`);
         try {
-            if ((await hostSnapshot(privilege)) !== before)
+            if ((await hostSnapshot(privilege)) !== before) {
                 failures.push(new Error("Browser E2E changed host system state"));
+            }
         } catch (error) {
             failures.push(error);
         }
     }
-    if (failures.length) throw new AggregateError(failures, "Playwright E2E failed");
+    if (failures.length) {
+        throw new AggregateError(failures, "Playwright E2E failed");
+    }
     console.log("PASS: host Playwright, isolated client/hooks, and unchanged host state");
 }
 
-if (isMain(import.meta.url)) await main();
+if (isMain(import.meta.url)) {
+    await main();
+}

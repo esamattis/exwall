@@ -46,14 +46,17 @@ async function requestHttp(operation: HttpOperation, certificate: string): Promi
 /** Drop all bypass privileges before opening sockets and return one JSON network result. */
 async function main(): Promise<void> {
     const [input, certificate, hostNet, fixtureNet] = process.argv.slice(2);
-    if (!input || !certificate || !hostNet || !fixtureNet)
+    if (!input || !certificate || !hostNet || !fixtureNet) {
         throw new Error("Missing restricted client arguments");
+    }
     const actualNet = readlinkSync("/proc/self/ns/net");
-    if (actualNet === hostNet || actualNet !== fixtureNet)
+    if (actualNet === hostNet || actualNet !== fixtureNet) {
         throw new Error("Refusing network operations outside the fixture namespace");
+    }
     const operation = parseOperation(JSON.parse(input));
-    if (!process.setgroups || !process.setgid || !process.setuid)
+    if (!process.setgroups || !process.setgid || !process.setuid) {
         throw new Error("Linux client identities are required");
+    }
     process.setgroups([]);
     process.setgid(65534);
     process.setuid(65534);
@@ -82,4 +85,6 @@ async function main(): Promise<void> {
     process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
-if (isMain(import.meta.url)) await main();
+if (isMain(import.meta.url)) {
+    await main();
+}

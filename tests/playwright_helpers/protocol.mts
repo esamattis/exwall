@@ -42,29 +42,45 @@ export interface FixtureReady {
 
 /** Check untrusted socket JSON before passing arguments to the restricted client. */
 export function parseOperation(value: unknown): NetworkOperation {
-    if (!value || typeof value !== "object") throw new Error("Expected a network operation object");
-    if ("user" in value || "cert" in value) throw new Error("The fixture controls identity and CA");
-    if (!("operation" in value)) throw new Error("Missing network operation");
+    if (!value || typeof value !== "object") {
+        throw new Error("Expected a network operation object");
+    }
+    if ("user" in value || "cert" in value) {
+        throw new Error("The fixture controls identity and CA");
+    }
+    if (!("operation" in value)) {
+        throw new Error("Missing network operation");
+    }
     if (value.operation === "http") {
-        if (!("url" in value) || typeof value.url !== "string")
+        if (!("url" in value) || typeof value.url !== "string") {
             throw new Error("Missing request URL");
+        }
         const url = new URL(value.url);
-        if (!["http:", "https:"].includes(url.protocol)) throw new Error("Expected HTTP or HTTPS");
+        if (!["http:", "https:"].includes(url.protocol)) {
+            throw new Error("Expected HTTP or HTTPS");
+        }
         const operation: HttpOperation = { operation: "http", url: value.url };
         if ("method" in value) {
-            if (typeof value.method !== "string") throw new Error("Invalid HTTP method");
+            if (typeof value.method !== "string") {
+                throw new Error("Invalid HTTP method");
+            }
             operation.method = value.method;
         }
         if ("body" in value) {
-            if (typeof value.body !== "string") throw new Error("Invalid request body");
+            if (typeof value.body !== "string") {
+                throw new Error("Invalid request body");
+            }
             operation.body = value.body;
         }
         if ("headers" in value) {
-            if (!value.headers || typeof value.headers !== "object")
+            if (!value.headers || typeof value.headers !== "object") {
                 throw new Error("Invalid headers");
+            }
             const headers: Record<string, string> = {};
             for (const [name, content] of Object.entries(value.headers)) {
-                if (typeof content !== "string") throw new Error("Header values must be strings");
+                if (typeof content !== "string") {
+                    throw new Error("Header values must be strings");
+                }
                 headers[name] = content;
             }
             operation.headers = headers;

@@ -16,8 +16,9 @@ export const forwardingSysctls = [
 
 /** Reject hook execution unless fresh network and mount namespaces are verified. */
 export async function assertIsolated(): Promise<void> {
-    if (process.getuid?.() !== 0)
+    if (process.getuid?.() !== 0) {
         throw new Error("Namespace fixtures require namespace-local root");
+    }
     for (const kind of ["net", "mnt"]) {
         const original = process.env[`EXWALL_HOST_${kind.toUpperCase()}_NS`];
         if (!original || (await readlink(`/proc/self/ns/${kind}`)) === original) {
@@ -36,8 +37,9 @@ export async function assertIsolated(): Promise<void> {
 export async function firewallSnapshot(): Promise<string[]> {
     const result: string[] = [];
     for (const tool of ["iptables", "ip6tables"]) {
-        for (const table of ["filter", "nat"])
+        for (const table of ["filter", "nat"]) {
             result.push(await runCommand([tool, "-t", table, "-S"]));
+        }
     }
     return result;
 }

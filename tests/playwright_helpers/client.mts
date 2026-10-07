@@ -64,7 +64,9 @@ export async function requestUnixJson<T>(
 /** Resolve the private broker configured by the host E2E launcher. */
 function clientSocket(): string {
     const path = process.env.EXWALL_E2E_CLIENT_SOCKET;
-    if (!path) throw new Error("Run ./e2e_tests.sh to create the namespace fixture first");
+    if (!path) {
+        throw new Error("Run ./e2e_tests.sh to create the namespace fixture first");
+    }
     return path;
 }
 

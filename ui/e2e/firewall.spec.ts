@@ -17,13 +17,17 @@ async function expectTraffic(url: string, status: number, header?: string, metho
                 url,
                 method,
             });
-            if (response.error || typeof response.result === "boolean") return response;
+            if (response.error || typeof response.result === "boolean") {
+                return response;
+            }
             const result: Record<string, unknown> = { status: response.result?.status };
             if (status === 200 && response.result?.status === 200) {
                 const payload = JSON.parse(response.result.body);
                 result.fixture = payload.fixture;
                 result.method = payload.method;
-                if (url.startsWith("https:")) result.httpVersion = payload.httpVersion;
+                if (url.startsWith("https:")) {
+                    result.httpVersion = payload.httpVersion;
+                }
                 if (header) {
                     result.header = Object.entries(payload.headers).find(
                         ([name]) => name.toLowerCase() === "x-browser-e2e",
@@ -182,8 +186,9 @@ test("pathname patterns, regexes, query strings, and POST bodies reach an HTTP/2
         body: "test-payload",
         headers: { "Content-Type": "text/plain" },
     });
-    if (exchange.error || typeof exchange.result === "boolean" || !exchange.result)
+    if (exchange.error || typeof exchange.result === "boolean" || !exchange.result) {
         throw new Error(JSON.stringify(exchange));
+    }
     expect(exchange.result.status).toBe(200);
     const payload = JSON.parse(exchange.result.body);
     expect(payload).toMatchObject({
@@ -195,8 +200,9 @@ test("pathname patterns, regexes, query strings, and POST bodies reach an HTTP/2
         httpVersion: "2.0",
     });
     const deniedPaths = ["/api/acme/items", "/api/acme/items/42/extra", "/other"];
-    for (const path of deniedPaths)
+    for (const path of deniedPaths) {
         await expectTraffic(`https://pathname.test${path}`, 403, undefined, "POST");
+    }
     await expectTraffic("https://pathname.test/api/acme/items/42", 403);
     const reached = await upstreamRequests();
     expect(reached.some((request) => deniedPaths.includes(request.pathname))).toBe(false);

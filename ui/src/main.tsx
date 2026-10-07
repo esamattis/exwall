@@ -59,10 +59,14 @@ async function api<T>(
         credentials: "same-origin",
         headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     };
-    if (method !== "GET" && body !== undefined) options.body = JSON.stringify(body);
+    if (method !== "GET" && body !== undefined) {
+        options.body = JSON.stringify(body);
+    }
     const response = await fetch(`/api/${path}`, options);
     const result: T & { error?: string } = await response.json();
-    if (!response.ok) throw new ApiError(response.status, result.error ?? "Request failed");
+    if (!response.ok) {
+        throw new ApiError(response.status, result.error ?? "Request failed");
+    }
     return result;
 }
 
@@ -174,13 +178,15 @@ function RuleField({
     value: FieldValue | undefined;
     onChange: (value: FieldValue | undefined) => void;
 }) {
-    const [text, setText] = useState(
-        typeof value === "string"
-            ? value
-            : Array.isArray(value)
-              ? value.filter((item) => typeof item === "string").join("\n")
-              : "",
-    );
+    const [text, setText] = useState(() => {
+        if (typeof value === "string") {
+            return value;
+        }
+        if (Array.isArray(value)) {
+            return value.filter((item) => typeof item === "string").join("\n");
+        }
+        return "";
+    });
     if (field === "include_subdomains" || field === "stream") {
         return (
             <select
@@ -198,7 +204,12 @@ function RuleField({
         );
     }
     if (field === "methods") {
-        const mode = value === undefined ? "default" : typeof value === "string" ? "any" : "custom";
+        let mode = "custom";
+        if (value === undefined) {
+            mode = "default";
+        } else if (typeof value === "string") {
+            mode = "any";
+        }
         return (
             <div className="mt-2 space-y-2">
                 <select
@@ -207,13 +218,13 @@ function RuleField({
                     value={mode}
                     onChange={(event) => {
                         const next = event.target.value;
-                        onChange(
-                            next === "default"
-                                ? undefined
-                                : next === "any"
-                                  ? "ANY"
-                                  : ["GET", "HEAD"],
-                        );
+                        if (next === "default") {
+                            onChange(undefined);
+                        } else if (next === "any") {
+                            onChange("ANY");
+                        } else {
+                            onChange(["GET", "HEAD"]);
+                        }
                         setText("GET\nHEAD");
                     }}
                 >
@@ -321,13 +332,13 @@ function RuleField({
                     const next = event.target.value;
                     setText(next);
                     const items = next.split("\n").filter((item) => item.trim());
-                    onChange(
-                        items.length === 0
-                            ? undefined
-                            : items.length === 1 && !Array.isArray(value)
-                              ? items[0]
-                              : items,
-                    );
+                    if (items.length === 0) {
+                        onChange(undefined);
+                    } else if (items.length === 1 && !Array.isArray(value)) {
+                        onChange(items[0]);
+                    } else {
+                        onChange(items);
+                    }
                 }}
             />
             <p className="mt-1 text-xs text-slate-400">One value per line.</p>
@@ -360,10 +371,15 @@ function Editor({
         onEdit();
         setRules((previous) =>
             previous.map((rule, position) => {
-                if (position !== index) return rule;
+                if (position !== index) {
+                    return rule;
+                }
                 const next = { ...rule.fields };
-                if (value !== undefined) next[key] = value;
-                else delete next[key];
+                if (value !== undefined) {
+                    next[key] = value;
+                } else {
+                    delete next[key];
+                }
                 return { ...rule, fields: next };
             }),
         );
@@ -472,13 +488,14 @@ function RulesPage() {
             await navigate({ to: "/login" });
         },
     });
-    if (rules.isPending)
+    if (rules.isPending) {
         return (
             <p role="status" className="text-slate-400">
                 Loading rules…
             </p>
         );
-    if (rules.error instanceof ApiError && rules.error.status === 401)
+    }
+    if (rules.error instanceof ApiError && rules.error.status === 401) {
         return (
             <section>
                 <h1 className="text-3xl font-semibold">Sign in to edit rules</h1>
@@ -490,12 +507,14 @@ function RulesPage() {
                 </Link>
             </section>
         );
-    if (rules.error)
+    }
+    if (rules.error) {
         return (
             <p role="alert" className="text-red-400">
                 {rules.error.message}
             </p>
         );
+    }
     return (
         <>
             <div className="mb-6 flex justify-end gap-5 text-sm">
@@ -562,7 +581,9 @@ declare module "@tanstack/react-router" {
 }
 
 const root = document.getElementById("root");
-if (!root) throw new Error("Missing React root element");
+if (!root) {
+    throw new Error("Missing React root element");
+}
 createRoot(root).render(
     <StrictMode>
         <QueryClientProvider client={queryClient}>

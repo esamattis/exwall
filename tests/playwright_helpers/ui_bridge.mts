@@ -51,7 +51,9 @@ export async function startUiBridge(
             const closed = new Promise<void>((resolve, reject) =>
                 server.close((error) => (error ? reject(error) : resolve())),
             );
-            for (const socket of sockets) socket.destroy();
+            for (const socket of sockets) {
+                socket.destroy();
+            }
             await closed;
         },
     };

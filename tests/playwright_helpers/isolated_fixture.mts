@@ -43,8 +43,9 @@ import { startClientBroker, closeClientBroker } from "#playwright_helpers/client
 async function main(): Promise<void> {
     await assertIsolated();
     const [binary, sockets, output, ownerUid, ownerGid] = process.argv.slice(2);
-    if (!binary || !sockets || !output || !ownerUid || !ownerGid)
+    if (!binary || !sockets || !output || !ownerUid || !ownerGid) {
         throw new Error("Missing fixture arguments");
+    }
     const uid = Number(ownerUid);
     const gid = Number(ownerGid);
     const root = await mkdtemp(join(tmpdir(), "exwall-playwright-"));
@@ -156,7 +157,9 @@ async function main(): Promise<void> {
         const messages = processMessages(upstream);
         cleanup.push(async () => messages.close());
         const isolated = await messages.next<{ phase: string; pid: number }>();
-        if (isolated.phase !== "isolated") throw new Error("Upstream did not verify isolation");
+        if (isolated.phase !== "isolated") {
+            throw new Error("Upstream did not verify isolation");
+        }
         await runCommand([
             "ip",
             "link",
@@ -197,8 +200,9 @@ async function main(): Promise<void> {
         ]);
         await runCommand([...peer, "ip", "link", "set", "pw-server", "up"]);
         upstream.stdin.write("start\n");
-        if ((await messages.next<{ phase: string }>()).phase !== "ready")
+        if ((await messages.next<{ phase: string }>()).phase !== "ready") {
             throw new Error("Upstream failed to start");
+        }
         const proxyLog = await open(join(root, "proxy.log"), "w");
         cleanup.push(() => proxyLog.close());
         const proxy: ProcessPromise = startProcess(
@@ -263,10 +267,12 @@ async function main(): Promise<void> {
         if (hooksStarted) {
             try {
                 await runCommand([...hook, "stop"]);
-                if (JSON.stringify(await firewallSnapshot()) !== JSON.stringify(baseline))
+                if (JSON.stringify(await firewallSnapshot()) !== JSON.stringify(baseline)) {
                     failures.push(new Error("Hooks did not restore namespace firewall"));
-                if ((await forwardingSnapshot()) !== sysctls)
+                }
+                if ((await forwardingSnapshot()) !== sysctls) {
                     failures.push(new Error("Hooks did not restore namespace sysctls"));
+                }
             } catch (error) {
                 failures.push(error);
             }
@@ -284,12 +290,18 @@ async function main(): Promise<void> {
                 await copyFile(join(root, name), target);
                 await chown(target, uid, gid);
             } catch (error) {
-                if (hooksStarted) failures.push(error);
+                if (hooksStarted) {
+                    failures.push(error);
+                }
             }
         }
         await rm(root, { recursive: true, force: true });
     }
-    if (failures.length) throw new AggregateError(failures, "Isolated fixture failed");
+    if (failures.length) {
+        throw new AggregateError(failures, "Isolated fixture failed");
+    }
 }
 
-if (isMain(import.meta.url)) await main();
+if (isMain(import.meta.url)) {
+    await main();
+}

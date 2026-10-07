@@ -40,7 +40,9 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
     for await (const chunk of request) {
         const buffer: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         length += buffer.length;
-        if (length > 65536) throw new Error("Client request is too large");
+        if (length > 65536) {
+            throw new Error("Client request is too large");
+        }
         chunks.push(buffer);
     }
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -50,8 +52,9 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
 export async function startClientBroker(options: BrokerOptions): Promise<Server> {
     const hostNet = process.env.EXWALL_HOST_NET_NS;
     const fixtureNet = await readlink("/proc/self/ns/net");
-    if (!hostNet || fixtureNet === hostNet)
+    if (!hostNet || fixtureNet === hostNet) {
         throw new Error("Broker requires an isolated network namespace");
+    }
     const script = fileURLToPath(import.meta.resolve("#playwright_helpers/network_client.mts"));
     /** Route fixture requests without accepting arbitrary commands, users, or CA paths. */
     async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -79,12 +82,17 @@ export async function startClientBroker(options: BrokerOptions): Promise<Server>
                 { cwd: options.cwd, timeout: "8s" },
             );
             sendJson(response, 200, JSON.parse(output));
-        } else sendJson(response, 404, { error: "Unknown fixture endpoint" });
+        } else {
+            sendJson(response, 404, { error: "Unknown fixture endpoint" });
+        }
     }
     const server = createServer((request, response) => {
         void handle(request, response).catch((error: unknown) => {
-            if (!response.headersSent) sendJson(response, 500, { error: String(error) });
-            else response.destroy(error instanceof Error ? error : new Error(String(error)));
+            if (!response.headersSent) {
+                sendJson(response, 500, { error: String(error) });
+            } else {
+                response.destroy(error instanceof Error ? error : new Error(String(error)));
+            }
         });
     });
     server.requestTimeout = 10_000;

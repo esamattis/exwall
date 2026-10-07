@@ -103,10 +103,14 @@ export async function startMockServer(options: MockServerOptions): Promise<MockS
             "content-type": "application/json",
             "content-length": Buffer.byteLength(payload),
             ...route?.headers,
-        }))
+        })) {
             response.setHeader(name, value);
-        if (record.method === "HEAD") response.end();
-        else response.end(payload);
+        }
+        if (record.method === "HEAD") {
+            response.end();
+        } else {
+            response.end(payload);
+        }
     }
     /** Contain malformed upstream requests without crashing other fixture connections. */
     function handle(
@@ -138,8 +142,9 @@ export async function startMockServer(options: MockServerOptions): Promise<MockS
         );
     });
     const address = server.address();
-    if (!address || typeof address === "string")
+    if (!address || typeof address === "string") {
         throw new Error("Mock upstream has no TCP address");
+    }
     return {
         port: address.port,
         requests,
@@ -148,7 +153,9 @@ export async function startMockServer(options: MockServerOptions): Promise<MockS
             const closed = new Promise<void>((resolve, reject) =>
                 server.close((error) => (error ? reject(error) : resolve())),
             );
-            for (const socket of sockets) socket.destroy();
+            for (const socket of sockets) {
+                socket.destroy();
+            }
             await closed;
         },
     };
@@ -158,14 +165,16 @@ export async function startMockServer(options: MockServerOptions): Promise<MockS
 async function main(): Promise<void> {
     await assertIsolated();
     const [certificate, privateKey, requestSocket] = process.argv.slice(2);
-    if (!certificate || !privateKey || !requestSocket)
+    if (!certificate || !privateKey || !requestSocket) {
         throw new Error("Missing upstream fixture arguments");
+    }
     const controls = createInterface({ input: process.stdin });
     const messages = controls[Symbol.asyncIterator]();
     process.stdout.write(`${JSON.stringify({ phase: "isolated", pid: process.pid })}\n`);
     const configure = await messages.next();
-    if (configure.done || configure.value !== "start")
+    if (configure.done || configure.value !== "start") {
         throw new Error("Upstream setup was not completed");
+    }
     const servers: MockServer[] = [];
     const recorder = createHttpServer((request, response) => {
         if (request.url !== "/requests") {
@@ -193,10 +202,15 @@ async function main(): Promise<void> {
         }
     } finally {
         controls.close();
-        if (recorder.listening)
+        if (recorder.listening) {
             await new Promise<void>((resolve) => recorder.close(() => resolve()));
-        for (const server of servers.reverse()) await server.close();
+        }
+        for (const server of servers.reverse()) {
+            await server.close();
+        }
     }
 }
 
-if (isMain(import.meta.url)) await main();
+if (isMain(import.meta.url)) {
+    await main();
+}
