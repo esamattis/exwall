@@ -1,6 +1,6 @@
 /**
  * Provides the host-side API imported by Playwright tests to request restricted
- * network checks and read fixture rules or upstream observations over a private Unix socket.
+ * network checks, rule-file edits, observations, and lifecycle assertions over a private socket.
  * @module
  */
 
@@ -8,7 +8,10 @@ import { request } from "node:http";
 import type {
     ClientResponse,
     HttpResult,
+    HttpOperation,
+    TcpOperation,
     NetworkOperation,
+    NetworkResult,
 } from "#playwright_helpers/protocol.mts";
 import type { MockRequest } from "#playwright_helpers/mock_server.mts";
 
@@ -54,7 +57,7 @@ export async function requestUnixJson<T>(
             },
         );
         call.on("error", reject);
-        call.setTimeout(10_000, () =>
+        call.setTimeout(120_000, () =>
             call.destroy(new Error("Namespace broker request timed out")),
         );
         call.end(content);
@@ -72,7 +75,7 @@ function clientSocket(): string {
 
 /** Ask the broker to make an HTTP exchange or TCP check under the restricted UID. */
 export async function networkRequest(
-    operation: NetworkOperation,
+    operation: HttpOperation | TcpOperation,
 ): Promise<ClientResponse<HttpResult | boolean>> {
     return requestUnixJson(clientSocket(), "/client", operation);
 }
@@ -85,4 +88,23 @@ export async function fixtureRules(): Promise<string> {
 /** List requests observed by the upstream to distinguish denial from accidental forwarding. */
 export async function upstreamRequests(): Promise<MockRequest[]> {
     return requestUnixJson(clientSocket(), "/requests");
+}
+
+/** Edit only the fixture's dedicated policy file; the production watcher performs the reload. */
+export async function writeFixtureRules(toml: string | null): Promise<void> {
+    await requestUnixJson(clientSocket(), "/rules", toml);
+}
+
+/** Run a fixed namespace lifecycle assertion without exposing arbitrary privileged commands. */
+export async function fixtureCheck(name: string): Promise<void> {
+    await requestUnixJson(clientSocket(), "/check", name);
+}
+
+/** Exercise DNS, certificates, ICMPv6, or HTTP under one of the fixture's fixed identities. */
+export async function fixtureOperation(
+    operation: NetworkOperation,
+    role: "restricted" | "bypass" | "admin" = "restricted",
+): Promise<ClientResponse<NetworkResult>> {
+    const path = role === "restricted" ? "/client" : `/client/${role}`;
+    return requestUnixJson(clientSocket(), path, operation);
 }

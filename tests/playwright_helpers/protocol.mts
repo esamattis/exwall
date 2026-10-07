@@ -32,7 +32,38 @@ export type ClientResponse<T> =
     | { error: string; error_type: string; result?: never };
 
 /** Network operations accepted by the private test broker. */
-export type NetworkOperation = HttpOperation | TcpOperation;
+export type NetworkOperation =
+    | HttpOperation
+    | TcpOperation
+    | DnsOperation
+    | CertificateOperation
+    | PingOperation;
+
+/** DNS query executed through the real UDP or TCP redirect. */
+export interface DnsOperation {
+    operation: "dns";
+    host: string;
+    name: string;
+    port?: number;
+    tcp?: boolean;
+}
+
+/** Verified peer certificate used to distinguish bypasses from interception. */
+export interface CertificateOperation {
+    operation: "certificate";
+    host: string;
+    port: number;
+    hostname: string;
+}
+
+/** ICMPv6 echo check under the ordinary UID. */
+export interface PingOperation {
+    operation: "ping";
+    host: string;
+}
+
+/** Results returned by all supported restricted network operations. */
+export type NetworkResult = HttpResult | boolean | number | string;
 
 /** Paths announced after both private fixture transports are ready. */
 export interface FixtureReady {
@@ -86,6 +117,53 @@ export function parseOperation(value: unknown): NetworkOperation {
             operation.headers = headers;
         }
         return operation;
+    }
+    if (
+        value.operation === "dns" &&
+        "host" in value &&
+        typeof value.host === "string" &&
+        "name" in value &&
+        typeof value.name === "string"
+    ) {
+        if (
+            ("tcp" in value && typeof value.tcp !== "boolean") ||
+            ("port" in value &&
+                (typeof value.port !== "number" ||
+                    !Number.isInteger(value.port) ||
+                    value.port < 1 ||
+                    value.port > 65535))
+        ) {
+            throw new Error("Invalid DNS options");
+        }
+        return {
+            operation: "dns",
+            host: value.host,
+            name: value.name,
+            tcp: "tcp" in value ? value.tcp === true : false,
+            port: "port" in value && typeof value.port === "number" ? value.port : 53,
+        };
+    }
+    if (value.operation === "ping" && "host" in value && typeof value.host === "string") {
+        return { operation: "ping", host: value.host };
+    }
+    if (
+        value.operation === "certificate" &&
+        "host" in value &&
+        typeof value.host === "string" &&
+        "port" in value &&
+        typeof value.port === "number" &&
+        Number.isInteger(value.port) &&
+        value.port > 0 &&
+        value.port <= 65535 &&
+        "hostname" in value &&
+        typeof value.hostname === "string"
+    ) {
+        return {
+            operation: "certificate",
+            host: value.host,
+            port: value.port,
+            hostname: value.hostname,
+        };
     }
     if (value.operation === "tcp" && "host" in value && "port" in value) {
         if (

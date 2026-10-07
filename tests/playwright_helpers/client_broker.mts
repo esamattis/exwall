@@ -1,10 +1,10 @@
 /**
  * Runs inside the disposable namespace and serves private Unix-socket requests
- * for persisted rules, upstream observations, and network checks by restricted clients.
+ * for rules-file edits, upstream observations, fixed-identity clients, and named lifecycle checks.
  * @module
  */
 
-import { chmod, chown, readFile, readlink } from "node:fs/promises";
+import { chmod, chown, readFile, readlink, writeFile, unlink } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { ServerResponse, IncomingMessage, Server } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,9 @@ export interface BrokerOptions {
     uid: number;
     gid: number;
     cwd: string;
+    policyRules: string;
+    /** Run only named namespace lifecycle checks selected by the fixture. */
+    check(name: string): Promise<void>;
 }
 
 /** Return JSON fixture results while keeping broker failures separate from firewall responses. */
@@ -48,7 +51,7 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-/** Expose only fixture reads and fixed-identity network operations over a private Unix socket. */
+/** Expose fixture-owned files, fixed client identities, and named checks over a private socket. */
 export async function startClientBroker(options: BrokerOptions): Promise<Server> {
     const hostNet = process.env.EXWALL_HOST_NET_NS;
     const fixtureNet = await readlink("/proc/self/ns/net");
@@ -60,9 +63,34 @@ export async function startClientBroker(options: BrokerOptions): Promise<Server>
     async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
         if (request.method === "GET" && request.url === "/rules") {
             sendJson(response, 200, { rules: await readFile(options.rules, "utf8") });
+        } else if (request.method === "POST" && request.url === "/rules") {
+            const value = await readJson(request);
+            if (typeof value !== "string" && value !== null) {
+                throw new Error("Expected TOML text or null to remove the test policy");
+            }
+            if (value === null) {
+                await unlink(options.policyRules).catch((error: NodeJS.ErrnoException) => {
+                    if (error.code !== "ENOENT") {
+                        throw error;
+                    }
+                });
+            } else {
+                await writeFile(options.policyRules, value);
+            }
+            sendJson(response, 200, { ok: true });
+        } else if (request.method === "POST" && request.url === "/check") {
+            const name = await readJson(request);
+            if (typeof name !== "string") {
+                throw new Error("Expected a named fixture check");
+            }
+            await options.check(name);
+            sendJson(response, 200, { ok: true });
         } else if (request.method === "GET" && request.url === "/requests") {
             sendJson(response, 200, await requestUnixJson(options.requestSocket, "/requests"));
-        } else if (request.method === "POST" && request.url === "/client") {
+        } else if (
+            request.method === "POST" &&
+            ["/client", "/client/bypass", "/client/admin"].includes(request.url ?? "")
+        ) {
             let operation;
             try {
                 operation = parseOperation(await readJson(request));
@@ -78,6 +106,7 @@ export async function startClientBroker(options: BrokerOptions): Promise<Server>
                     options.certificate,
                     hostNet ?? "",
                     fixtureNet,
+                    request.url?.split("/")[2] ?? "restricted",
                 ],
                 { cwd: options.cwd, timeout: "8s" },
             );

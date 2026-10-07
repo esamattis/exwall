@@ -1,16 +1,24 @@
 /**
- * Executes one real HTTP, HTTPS, or TCP check inside the fixture network namespace.
- * Drops to nobody before opening sockets and reports responses or transport errors as JSON.
+ * Executes real HTTP, TCP, DNS, certificate, and ICMPv6 checks in the fixture network.
+ * Selects fixed ordinary or bypass identities and reports results or transport errors as JSON.
  * @module
  */
 
 import { readFileSync, readlinkSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { connect as tlsConnect } from "node:tls";
+import { queryDns } from "#playwright_helpers/dns.mts";
+import { runCommand } from "#playwright_helpers/processes.mts";
 import { createConnection } from "node:net";
 import { isMain } from "#playwright_helpers/processes.mts";
 import { parseOperation } from "#playwright_helpers/protocol.mts";
-import type { ClientResponse, HttpOperation, HttpResult } from "#playwright_helpers/protocol.mts";
+import type {
+    ClientResponse,
+    HttpOperation,
+    HttpResult,
+    NetworkResult,
+} from "#playwright_helpers/protocol.mts";
 
 /** Make a real HTTP/HTTPS exchange with explicit fixture CA verification and bounded I/O. */
 async function requestHttp(operation: HttpOperation, certificate: string): Promise<HttpResult> {
@@ -43,9 +51,9 @@ async function requestHttp(operation: HttpOperation, certificate: string): Promi
     });
 }
 
-/** Drop all bypass privileges before opening sockets and return one JSON network result. */
+/** Select a fixture identity before opening sockets and return one JSON network result. */
 async function main(): Promise<void> {
-    const [input, certificate, hostNet, fixtureNet] = process.argv.slice(2);
+    const [input, certificate, hostNet, fixtureNet, role = "restricted"] = process.argv.slice(2);
     if (!input || !certificate || !hostNet || !fixtureNet) {
         throw new Error("Missing restricted client arguments");
     }
@@ -58,12 +66,46 @@ async function main(): Promise<void> {
         throw new Error("Linux client identities are required");
     }
     process.setgroups([]);
-    process.setgid(65534);
-    process.setuid(65534);
-    let result: ClientResponse<HttpResult | boolean>;
+    const uid = role === "bypass" ? 1 : 65534;
+    if (role !== "admin") {
+        process.setgid(uid);
+        process.setuid(uid);
+    }
+    let result: ClientResponse<NetworkResult>;
     try {
         if (operation.operation === "http") {
             result = { result: await requestHttp(operation, certificate) };
+        } else if (operation.operation === "dns") {
+            result = {
+                result: await queryDns(
+                    operation.host,
+                    operation.port ?? 53,
+                    operation.name,
+                    operation.tcp,
+                ),
+            };
+        } else if (operation.operation === "ping") {
+            await runCommand(["ping", "-6", "-c", "1", "-W", "3", operation.host]);
+            result = { result: true };
+        } else if (operation.operation === "certificate") {
+            result = {
+                result: await new Promise<string>((resolve, reject) => {
+                    const socket = tlsConnect(
+                        {
+                            host: operation.host,
+                            port: operation.port,
+                            servername: operation.hostname,
+                            ca: readFileSync(certificate),
+                        },
+                        () => {
+                            resolve(socket.getPeerCertificate().raw.toString("hex"));
+                            socket.destroy();
+                        },
+                    );
+                    socket.once("error", reject);
+                    socket.setTimeout(3000, () => socket.destroy(new Error("TLS timeout")));
+                }),
+            };
         } else {
             await new Promise<void>((resolve, reject) => {
                 const socket = createConnection({ host: operation.host, port: operation.port });
@@ -72,7 +114,13 @@ async function main(): Promise<void> {
                     resolve();
                 });
                 socket.once("error", reject);
-                socket.setTimeout(500, () => socket.destroy(new Error("TCP connection timed out")));
+                socket.setTimeout(500, () =>
+                    socket.destroy(
+                        Object.assign(new Error("TCP connection timed out"), {
+                            name: "TimeoutError",
+                        }),
+                    ),
+                );
             });
             result = { result: true };
         }

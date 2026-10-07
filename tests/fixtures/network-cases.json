@@ -1,0 +1,146 @@
+[
+    {
+        "name": "exact domain rule is allowed",
+        "url": "https://github.com/",
+        "method": "GET",
+        "status": 200
+    },
+    {
+        "name": "domain regex rule is allowed",
+        "url": "https://ipinfo.io/",
+        "method": "GET",
+        "status": 200
+    },
+    {
+        "name": "include subdomains rule is allowed",
+        "url": "https://raw.githubusercontent.com/",
+        "method": "GET",
+        "status": 200
+    },
+    {
+        "name": "subdomain without include subdomains is blocked",
+        "url": "https://www.esamatti.fi/",
+        "method": "GET",
+        "status": 403
+    },
+    {
+        "name": "unlisted domain is blocked",
+        "url": "https://example.com/",
+        "method": "GET",
+        "status": 403
+    },
+    {
+        "name": "methods rule allows get",
+        "url": "https://pie.dev/get",
+        "method": "GET",
+        "status": 200
+    },
+    {
+        "name": "methods rule blocks post",
+        "url": "https://pie.dev/post",
+        "method": "POST",
+        "status": 403
+    },
+    {
+        "name": "default methods rule allows head",
+        "url": "https://github.com/",
+        "method": "HEAD",
+        "status": 200
+    },
+    {
+        "name": "pathname pattern rule allows matching post",
+        "url": "https://pie.dev/pathname-pattern/mitmwall/action",
+        "method": "POST",
+        "status": 200
+    },
+    {
+        "name": "pathname pattern rule blocks wrong static segment",
+        "url": "https://pie.dev/other/mitmwall/action",
+        "method": "POST",
+        "status": 403
+    },
+    {
+        "name": "pathname pattern rule blocks extra path segment",
+        "url": "https://pie.dev/pathname-pattern/nested/mitmwall/action",
+        "method": "POST",
+        "status": 403
+    },
+    {
+        "name": "pathname pattern rule blocks nonmatching pathname",
+        "url": "https://pie.dev/pathname-pattern/mitmwall/other",
+        "method": "POST",
+        "status": 403
+    },
+    {
+        "name": "pathname pattern array allows first pattern",
+        "url": "https://pie.dev/anything/mitmwall/foo",
+        "method": "POST",
+        "status": 200
+    },
+    {
+        "name": "pathname pattern array allows second pattern",
+        "url": "https://pie.dev/anything/mitmwall/bar",
+        "method": "POST",
+        "status": 200
+    },
+    {
+        "name": "pathname pattern array blocks nonmatching path",
+        "url": "https://pie.dev/anything/mitmwall/baz",
+        "method": "POST",
+        "status": 403
+    },
+    {
+        "name": "pathname regex rule allows matching post",
+        "url": "https://pie.dev/pathname-regex/mitmwall/info",
+        "method": "POST",
+        "status": 200
+    },
+    {
+        "name": "pathname regex rule blocks wrong static segment",
+        "url": "https://pie.dev/other/mitmwall/info",
+        "method": "POST",
+        "status": 403
+    },
+    {
+        "name": "pathname regex rule blocks nonmatching pathname",
+        "url": "https://pie.dev/pathname-regex/mitmwall/info/extra",
+        "method": "POST",
+        "status": 403
+    },
+    {
+        "name": "pathname regex array allows first pattern",
+        "url": "https://pie.dev/regex-array/mitmwall/alpha",
+        "method": "POST",
+        "status": 200
+    },
+    {
+        "name": "pathname regex array allows second pattern",
+        "url": "https://pie.dev/regex-array/mitmwall/beta",
+        "method": "POST",
+        "status": 200
+    },
+    {
+        "name": "pathname regex array blocks nonmatching path",
+        "url": "https://pie.dev/regex-array/mitmwall/gamma",
+        "method": "POST",
+        "status": 403
+    },
+    {
+        "name": "pathname regex and pattern allows regex match",
+        "url": "https://pie.dev/both/regex/mitmwall",
+        "method": "POST",
+        "status": 200
+    },
+    {
+        "name": "pathname regex and pattern allows pattern match",
+        "url": "https://pie.dev/both/pattern/mitmwall",
+        "method": "POST",
+        "status": 200
+    },
+    {
+        "name": "pathname regex and pattern blocks nonmatching path",
+        "url": "https://pie.dev/both/other/mitmwall",
+        "method": "POST",
+        "status": 403
+    }
+]

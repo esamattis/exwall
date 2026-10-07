@@ -11,6 +11,8 @@ import { createSecureServer } from "node:http2";
 import type { IncomingMessage, ServerResponse, IncomingHttpHeaders } from "node:http";
 import type { Http2ServerRequest, Http2ServerResponse } from "node:http2";
 import type { Socket } from "node:net";
+import { createServer as createTcpServer } from "node:net";
+import { startDns } from "#playwright_helpers/dns.mts";
 import { createInterface } from "node:readline";
 import { isMain } from "#playwright_helpers/processes.mts";
 import { assertIsolated } from "#playwright_helpers/namespace_safety.mts";
@@ -176,6 +178,7 @@ async function main(): Promise<void> {
         throw new Error("Upstream setup was not completed");
     }
     const servers: MockServer[] = [];
+    const extraCleanup: (() => Promise<void>)[] = [];
     const recorder = createHttpServer((request, response) => {
         if (request.url !== "/requests") {
             response.writeHead(404);
@@ -192,6 +195,28 @@ async function main(): Promise<void> {
             servers.push(await startMockServer({ host, port: 80 }));
             servers.push(await startMockServer({ host, port: 443, tls: { cert, key } }));
         }
+        for (const host of ["192.0.2.2", "fd00:7261::2"]) {
+            const dns = await startDns(host, 53);
+            extraCleanup.push(() => dns.close());
+            for (const port of [21, 22]) {
+                const tcp = createTcpServer((socket) => socket.end());
+                await new Promise<void>((resolve, reject) => {
+                    tcp.once("error", reject);
+                    tcp.listen({ host, port, ipv6Only: host.includes(":") }, resolve);
+                });
+                extraCleanup.push(
+                    () =>
+                        new Promise<void>((resolve, reject) =>
+                            tcp.close((error) => (error ? reject(error) : resolve())),
+                        ),
+                );
+            }
+        }
+        for (const host of ["8.8.8.8", "172.64.155.209", "1.1.1.1"]) {
+            servers.push(
+                await startMockServer({ host, port: 443, tls: { cert, key, allowHTTP1: true } }),
+            );
+        }
         await new Promise<void>((resolve, reject) => {
             recorder.once("error", reject);
             recorder.listen(requestSocket, resolve);
@@ -204,6 +229,9 @@ async function main(): Promise<void> {
         controls.close();
         if (recorder.listening) {
             await new Promise<void>((resolve) => recorder.close(() => resolve()));
+        }
+        for (const close of extraCleanup.reverse()) {
+            await close();
         }
         for (const server of servers.reverse()) {
             await server.close();

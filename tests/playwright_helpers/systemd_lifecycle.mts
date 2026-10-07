@@ -1,0 +1,214 @@
+/** Exercise the production unit with a private systemd manager inside disposable namespaces. */
+import assert from "node:assert/strict";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { createServer } from "node:net";
+import { setTimeout as delay } from "node:timers/promises";
+import { freePort } from "#playwright_helpers/proxy_fixture.mts";
+import { runCommand, startProcess, bounded, waitForPort } from "#playwright_helpers/processes.mts";
+import { firewallSnapshot, forwardingSnapshot } from "#playwright_helpers/namespace_safety.mts";
+import { restricted } from "#playwright_helpers/lifecycle.mts";
+import type { LifecycleFixture } from "#playwright_helpers/lifecycle.mts";
+
+/** Poll private manager properties with a deadline rather than waiting indefinitely. */
+async function waitUntil(predicate: () => Promise<boolean>, message: string): Promise<void> {
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+        if (await predicate()) {
+            return;
+        }
+        await delay(50);
+    }
+    throw new Error(message);
+}
+
+/** Verify failed starts, retries, crashes, explicit stops, and exact hook cleanup. */
+export async function checkSystemd(fixture: LifecycleFixture): Promise<void> {
+    const directory = join(fixture.root, "systemd");
+    const runtime = join(directory, "runtime");
+    const units = join(directory, "units");
+    await mkdir(runtime, { recursive: true, mode: 0o700 });
+    await mkdir(units);
+    for (const target of ["default", "basic", "shutdown", "network-online"]) {
+        await writeFile(
+            join(units, `${target}.target`),
+            "[Unit]\nDescription=Private test target\nDefaultDependencies=no\n",
+        );
+    }
+    await writeFile(
+        join(units, "systemd-resolved.service"),
+        "[Service]\nExecStart=/bin/sleep infinity\n",
+    );
+    const proxyPort = await freePort();
+    const dnsPort = await freePort();
+    const config = join(directory, "config.toml");
+    const sourceConfig = await readFile(fixture.config, "utf8");
+    // The service needs a separate UI-free configuration while the browser fixture stays alive.
+    const configText = `${await readFile(new URL("../fixtures/mitmwall-integration-config.toml", import.meta.url), "utf8")}\n[ui]\nhosts = []\n`;
+    await writeFile(config, configText);
+    const args = [fixture.binary, "--config", config, "--rules-dir", fixture.rules];
+    const hook = [
+        ...args,
+        "hook",
+        "--proxy-user",
+        "root",
+        "--state-dir",
+        join(fixture.root, "state"),
+        "--proxy-port",
+        String(proxyPort),
+        "--dns-port",
+        String(dnsPort),
+    ];
+    const serve = [
+        ...args,
+        "serve",
+        "--listen",
+        `[::]:${proxyPort}`,
+        "--dns-listen",
+        `[::]:${dnsPort}`,
+        "--ca-dir",
+        fixture.ca,
+    ];
+    const production = await readFile(
+        new URL("../../systemd/exwall.service", import.meta.url),
+        "utf8",
+    );
+    const lines: string[] = [];
+    for (let line of production.split("\n")) {
+        if (line.startsWith("LogsDirectory=") || line.startsWith("LogsDirectoryMode=")) {
+            continue;
+        }
+        if (line === "User=exwall") {
+            line = "User=root";
+        } else if (line === "Group=exwall") {
+            line = "Group=root";
+        } else if (line.startsWith("ExecStartPre=+")) {
+            line = `ExecStartPre=+${[...hook, line.split(" ").at(-1)!].map((argument) => JSON.stringify(argument)).join(" ")}`;
+        } else if (line.startsWith("ExecStartPre=")) {
+            line = `ExecStartPre=${[...args, "check"].map((argument) => JSON.stringify(argument)).join(" ")}`;
+        } else if (line.startsWith("ExecStart=")) {
+            line = `ExecStart=${serve.map((argument) => JSON.stringify(argument)).join(" ")}`;
+        }
+        lines.push(line);
+        if (line === "[Service]") {
+            lines.push(
+                `StandardOutput=append:${join(directory, "service.log")}`,
+                "StandardError=inherit",
+            );
+        }
+    }
+    await writeFile(join(units, "exwall.service"), lines.join("\n"));
+    const environment: NodeJS.ProcessEnv = {
+        ...process.env,
+        XDG_RUNTIME_DIR: runtime,
+        SYSTEMD_UNIT_PATH: units,
+    };
+    delete environment.DBUS_SESSION_BUS_ADDRESS;
+    delete environment.DBUS_SESSION_BUS_PID;
+    /** Address only the private manager, retaining failed-start status for assertions. */
+    const control = (args: string[]) =>
+        startProcess(["systemctl", "--user", ...args], { env: environment, timeout: "20s" });
+    /** Require successful control operations with their diagnostic stderr. */
+    async function checked(...args: string[]) {
+        const output = await control(args);
+        assert.equal(output.exitCode, 0, output.stderr);
+    }
+    /** Read a single property from the production service instance. */
+    async function property(name: string) {
+        return (
+            await control(["show", "exwall.service", `--property=${name}`, "--value"])
+        ).stdout.trim();
+    }
+    const rule = join(fixture.rules, "20-network.toml");
+    const ruleText = await readFile(rule, "utf8");
+    const manager = startProcess(["/usr/lib/systemd/systemd", "--user"], { env: environment });
+    try {
+        await waitUntil(
+            () =>
+                access(join(runtime, "systemd/private")).then(
+                    () => true,
+                    () => false,
+                ),
+            "Private manager failed",
+        );
+        await checked("start", "systemd-resolved.service");
+        await checked("start", "exwall.service");
+        await waitUntil(
+            async () => (await property("ActiveState")) === "active",
+            "Proxy did not start",
+        );
+        await waitForPort(proxyPort, manager);
+        const saved = await readFile(join(fixture.root, "state/forwarding.json"));
+        for (const path of [config, rule]) {
+            const text = await readFile(path, "utf8");
+            await writeFile(path, "not valid TOML");
+            await control(["restart", "exwall.service"]);
+            await restricted(fixture);
+            await waitUntil(
+                async () => Number(await property("NRestarts")) >= 1,
+                "Invalid policy was not retried",
+            );
+            await restricted(fixture);
+            assert.deepEqual(await readFile(join(fixture.root, "state/forwarding.json")), saved);
+            await writeFile(path, text);
+            await checked("reset-failed", "exwall.service");
+            await checked("restart", "exwall.service");
+            await waitUntil(
+                async () => (await property("ActiveState")) === "active",
+                "Policy repair failed",
+            );
+            await waitForPort(proxyPort, manager);
+        }
+        const restarts = Number(await property("NRestarts"));
+        await checked("kill", "--signal=KILL", "--kill-whom=main", "exwall.service");
+        await restricted(fixture);
+        await waitUntil(
+            async () =>
+                Number(await property("NRestarts")) > restarts &&
+                (await property("ActiveState")) === "active",
+            "Crash was not restarted",
+        );
+        await waitForPort(proxyPort, manager);
+        await restricted(fixture);
+        await checked("stop", "exwall.service");
+        const occupied = createServer();
+        await new Promise<void>((resolve, reject) => {
+            occupied.once("error", reject);
+            occupied.listen(proxyPort, "127.0.0.1", resolve);
+        });
+        try {
+            await control(["start", "exwall.service"]);
+            await waitUntil(
+                async () => (await property("ExecMainStatus")) === "1",
+                "Startup failure missing",
+            );
+            await restricted(fixture);
+        } finally {
+            await new Promise<void>((resolve) => occupied.close(() => resolve()));
+        }
+        await checked("stop", "exwall.service");
+        await restricted(fixture);
+        await runCommand([...hook, "stop"]);
+        assert.deepEqual(await firewallSnapshot(), fixture.baseline);
+        assert.equal(await forwardingSnapshot(), fixture.sysctls);
+    } catch (error) {
+        console.error(manager.output?.stderr ?? "Private manager still running");
+        console.error(
+            await readFile(join(directory, "service.log"), "utf8").catch(() => "No service log"),
+        );
+        throw error;
+    } finally {
+        await writeFile(fixture.config, sourceConfig);
+        await writeFile(rule, ruleText);
+        await control(["stop", "exwall.service", "systemd-resolved.service"]);
+        if (!manager.output && manager.pid) {
+            await runCommand(["kill", "-KILL", String(manager.pid)]);
+        }
+        await bounded(
+            manager.then(() => undefined),
+            5000,
+            "Private manager shutdown",
+        );
+        await runCommand([...fixture.hook, "start"]);
+    }
+}

@@ -40,9 +40,8 @@ embedded UI assets over both IPv4 and IPv6.
 
 `integration_tests.sh` also exercises real IPv4/IPv6 firewall startup, repeated
 startup/stop, bypass ordering, authorized-host routing, and exact sysctl
-restoration in disposable network/mount namespaces. With root or passwordless
-sudo, it runs all 37 network cases ported from mitmwall, plus seven additional
-cases covering control-service access, full IPv6 interception, private hook
+restoration in disposable network/mount namespaces. Through Playwright it runs
+the network cases ported from mitmwall, plus cases covering control-service access, full IPv6 interception, private hook
 state/restoration, corrupt-state rejection, invalid policies, startup failures,
 and real automatic restarts under a private systemd manager. These lifecycle
 tests require `/usr/lib/systemd/systemd`; unit overrides select temporary paths
@@ -61,11 +60,11 @@ deny-all and failed-start tests. The ported rules also allow all methods and
 subdomains for those services. The launcher verifies unchanged host firewall,
 forwarding sysctls, resolver, and trust bundle after testing.
 
-Python 3, curl with HTTP/2, and openssl are needed for protocol tests; `ip`,
-`mount`, `unshare`, `nsenter`, iptables, and ip6tables are needed for namespace
-tests. Without root/passwordless sudo, the original namespace cases can use
-unprivileged user namespaces, while the full mitmwall port reports a skip. Missing
-namespace support is also reported explicitly.
+The unified Playwright suite requires the pinned Node runtime, Chromium, curl
+with HTTP/2, openssl, `ip`, `mount`, `unshare`, `nsenter`, iptables, ip6tables,
+`ping`, and `/usr/lib/systemd/systemd`. Root or passwordless sudo and disposable
+namespace support are required; missing prerequisites fail the run. Python is
+not required.
 
 ## Web UI development
 
@@ -414,6 +413,11 @@ disposable namespaces, with host Chromium and a restricted TypeScript network
 client. The HTTP/2 upstream and all Playwright helpers are `.mts` files under
 `tests/playwright_helpers/`, imported through `#playwright_helpers/*`.
 Root/passwordless sudo and installed Chromium are required.
-`./integration_tests.sh` runs the existing Python suites followed by this suite.
+`./integration_tests.sh` runs the same unified Playwright suite, including
+protocol, rule-file reload, firewall, systemd lifecycle, and browser coverage.
+Network tests write a dedicated temporary rules file directly and poll traffic
+until the production watcher applies it; browser tests continue to exercise UI
+saves. Pass Playwright filters through either script, for example
+`./integration_tests.sh --no-build network.spec.ts`.
 See [PLAYWRIGHT.md](PLAYWRIGHT.md) for script roles, the namespace flowchart,
 helper imports, mock-server usage, assertions, and cleanup.

@@ -113,10 +113,11 @@ async function main(): Promise<void> {
                     "test",
                     "--config",
                     "playwright.e2e.config.ts",
+                    ...process.argv.slice(2).filter((argument) => argument !== "--no-build"),
                 ],
                 {
                     cwd: repository,
-                    timeout: "180s",
+                    timeout: "600s",
                     stdio: "inherit",
                     env: {
                         ...environment,
