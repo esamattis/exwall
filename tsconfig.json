@@ -1,11 +1,17 @@
 {
-    "include": ["ui/**/*.ts", "ui/**/*.tsx", "playwright.config.ts"],
+    "include": [
+        "ui/**/*.ts",
+        "ui/**/*.tsx",
+        "playwright.config.ts",
+        "playwright.e2e.config.ts",
+        "tests/playwright_helpers/**/*.mts"
+    ],
     "compilerOptions": {
         "target": "ES2022",
         "jsx": "react-jsx",
         "module": "ESNext",
         "lib": ["ES2022", "DOM", "DOM.Iterable"],
-        "types": ["vite/client"],
+        "types": ["vite/client", "node"],
         "moduleResolution": "bundler",
         "allowImportingTsExtensions": true,
         "verbatimModuleSyntax": true,

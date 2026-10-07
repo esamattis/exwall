@@ -6,3 +6,4 @@ cd "$scriptdir"
 mise exec -- pnpm build:ui
 cargo build --locked
 python3 tests/run_integration.py "$scriptdir/target/debug/exwall"
+./e2e_tests.sh --no-build

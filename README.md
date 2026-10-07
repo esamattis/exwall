@@ -409,3 +409,13 @@ Run UI browser tests with `mise exec -- pnpm test:ui`. Install Chromium once wit
 `mise exec -- pnpm exec playwright install --with-deps chromium`. These tests start only Vite
 and use Playwright's built-in `page.route()` mocking for all REST API requests;
 they do not start exwall or invoke firewall hooks.
+
+Run full browser E2E tests with `mise exec -- pnpm test:e2e` (or
+`./e2e_tests.sh`). They run the production exwall binary and real hooks in
+disposable namespaces, with host Chromium and a restricted TypeScript network
+client. The HTTP/2 upstream and all Playwright helpers are `.mts` files under
+`tests/playwright_helpers/`, imported through `#playwright_helpers/*`.
+Root/passwordless sudo and installed Chromium are required.
+`./integration_tests.sh` runs the existing Python suites followed by this suite.
+See [PLAYWRIGHT.md](PLAYWRIGHT.md) for script roles, the namespace flowchart,
+helper imports, mock-server usage, assertions, and cleanup.
