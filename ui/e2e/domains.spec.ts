@@ -194,6 +194,7 @@ firewallTest(
         await page.getByRole("link", { name: "Domains", exact: true }).click();
 
         await allow("Allow openai.com completely", "Domain allowed on all routes and methods.");
+        expect(await fixtureRules()).not.toContain("dns_only");
         await expect.poll(() => http("openai.com")).toBe(200);
         expect(await http("api.openai.com")).toBe(403);
         await allow(
@@ -329,4 +330,101 @@ test("last 100 HTTP denials refresh manually and allow only an exact method and 
     await page.reload();
     await expect(rows).toHaveCount(100);
     expect((await http(pathname)).status).toBe(200);
+});
+
+test("HTTP allow actions remove only fully covered DNS-only rules, including duplicate allowances", async ({
+    page,
+    protocolProxy: fixture,
+}) => {
+    const ui = `http://127.0.0.1:${fixture.uiPort}`;
+    expect(
+        (
+            await page.request.post(`${ui}/api/login`, {
+                data: { username: "admin", password: "integration-password" },
+            })
+        ).status(),
+    ).toBe(200);
+    await page.route("**/api/domains", (route) =>
+        route.fulfill({
+            json: [
+                {
+                    domain: "example.com",
+                    dns: { allow: 0, block: 1 },
+                    http: { allow: 0, block: 1 },
+                    last_updated: new Date().toISOString(),
+                },
+            ],
+        }),
+    );
+    await page.route("**/api/http-denials", (route) =>
+        route.fulfill({
+            json: [
+                {
+                    domain: "example.com",
+                    method: "POST",
+                    pathname: "/blocked",
+                    timestamp: new Date().toISOString(),
+                },
+            ],
+        }),
+    );
+    const exact = "Allow example.com completely";
+    const subdomains = "Allow example.com with subdomains";
+    const denial = "Allow example.com POST /blocked";
+    const cases: {
+        fields: RulesDocument["rules"][number]["fields"];
+        button: string;
+        retained: boolean;
+        existingHttp?: boolean;
+    }[] = [
+        { fields: { domain: " EXAMPLE.COM. " }, button: exact, retained: false },
+        {
+            fields: { domain: "example.com", include_subdomains: true },
+            button: exact,
+            retained: true,
+        },
+        { fields: { domain: ["example.com", "other.test"] }, button: exact, retained: true },
+        {
+            fields: { domain: ["example.com", "api.example.com"], include_subdomains: true },
+            button: subdomains,
+            retained: false,
+        },
+        { fields: { domain: "otherexample.com" }, button: subdomains, retained: true },
+        { fields: { domain_regex: "example" }, button: subdomains, retained: true },
+        { fields: { domain: "example.com" }, button: denial, retained: false },
+        {
+            fields: { domain: "example.com", include_subdomains: true },
+            button: denial,
+            retained: true,
+        },
+        { fields: { domain: "example.com" }, button: exact, retained: false, existingHttp: true },
+    ];
+    for (const entry of cases) {
+        const current: RulesDocument = await (await page.request.get(`${ui}/api/rules`)).json();
+        current.rules = [{ index: null, fields: { ...entry.fields, dns_only: true } }];
+        if (entry.existingHttp) {
+            current.rules.push({ index: null, fields: { domain: "example.com", methods: "ANY" } });
+        }
+        expect((await page.request.put(`${ui}/api/rules`, { data: current })).status()).toBe(200);
+        await page.goto(`${ui}/domains`);
+        await page.getByRole("button", { name: entry.button, exact: true }).click();
+        let message = "Domain allowed on all routes and methods.";
+        if (entry.button === denial) {
+            message = "Method and pathname allowed.";
+        } else if (entry.button === subdomains) {
+            message = "Domain and its subdomains allowed on all routes and methods.";
+        }
+        await expect(page.getByRole("status")).toHaveText(message);
+        const saved: RulesDocument = await (await page.request.get(`${ui}/api/rules`)).json();
+        expect(saved.rules.filter((rule) => rule.fields.dns_only === true)).toEqual(
+            entry.retained
+                ? [{ index: expect.any(Number), fields: { ...entry.fields, dns_only: true } }]
+                : [],
+        );
+        expect(saved.rules.filter((rule) => rule.fields.dns_only !== true)).toHaveLength(1);
+        const persisted = await readFile(join(fixture.rules, "05-web.toml"), "utf8");
+        await page.getByRole("button", { name: entry.button, exact: true }).click();
+        await expect(page.getByRole("button", { name: entry.button, exact: true })).toBeEnabled();
+        expect(await readFile(join(fixture.rules, "05-web.toml"), "utf8")).toBe(persisted);
+    }
 });

@@ -130,6 +130,9 @@ allowing DNS and every HTTP route and method. “Allow DNS only” instead saves
 `dns_only = true`, allowing DNS queries without authorizing HTTP, HTTPS, or CONNECT.
 “Allow with subdomains” saves `include_subdomains = true` and `methods = "ANY"`,
 authorizing the domain and its subdomains for DNS and all HTTP routes and methods.
+Adding an HTTP allowance from the Domains page also removes DNS-only rules in
+`05-web.toml` whose entire domain and subdomain scope it covers. Broader DNS-only
+rules, multi-domain rules with uncovered domains, and regex rules are retained.
 
 The rules page lists the allow tables in `05-web.toml` under the configured rules
 directory, with plain-text fields, boolean and method selectors, header rows, and add/remove controls.

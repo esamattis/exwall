@@ -585,6 +585,46 @@ function exactPathRegex(pathname: string): string {
     return `\\A${pathname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\z`;
 }
 
+/** Normalize domain fields the same way as the proxy's hostname matcher. */
+function normalizeDomain(domain: string): string {
+    return domain.trim().replace(/\.+$/, "").toLowerCase();
+}
+
+/** Remove DNS-only tables whose entire hostname scope is covered by an HTTP allowance. */
+function removeCoveredDnsRules(
+    document: RulesDocument,
+    domain: string,
+    includeSubdomains = false,
+): boolean {
+    const allowedDomain = normalizeDomain(domain);
+    const previousCount = document.rules.length;
+    document.rules = document.rules.filter((rule) => {
+        if (
+            rule.fields.dns_only !== true ||
+            rule.fields.domain_regex !== undefined ||
+            (!includeSubdomains && rule.fields.include_subdomains === true)
+        ) {
+            return true;
+        }
+        const domains = rule.fields.domain;
+        const names = typeof domains === "string" ? [domains] : domains;
+        if (!Array.isArray(names) || names.length === 0) {
+            return true;
+        }
+        return !names.every((name) => {
+            if (typeof name !== "string") {
+                return false;
+            }
+            const normalized = normalizeDomain(name);
+            return (
+                normalized === allowedDomain ||
+                (includeSubdomains && normalized.endsWith(`.${allowedDomain}`))
+            );
+        });
+    });
+    return document.rules.length !== previousCount;
+}
+
 /** Manually refresh the latest HTTP denials and allow their exact method and pathname. */
 function HttpDenialsTable() {
     const client = useQueryClient();
@@ -599,6 +639,7 @@ function HttpDenialsTable() {
         mutationFn: async (denial: HttpDenial) => {
             const document = await api<RulesDocument>("rules");
             const pathnameRegex = exactPathRegex(denial.pathname);
+            let changed = removeCoveredDnsRules(document, denial.domain);
             if (
                 !document.rules.some(
                     (rule) =>
@@ -619,9 +660,9 @@ function HttpDenialsTable() {
                         pathname_regex: pathnameRegex,
                     },
                 });
-                return api<RulesDocument>("rules", "PUT", document);
+                changed = true;
             }
-            return document;
+            return changed ? api<RulesDocument>("rules", "PUT", document) : document;
         },
         onSuccess: async () => {
             await client.invalidateQueries({ queryKey: ["rules"] });
@@ -736,6 +777,7 @@ function DomainsPage() {
             includeSubdomains?: boolean;
         }) => {
             const document = await api<RulesDocument>("rules");
+            let changed = !dnsOnly && removeCoveredDnsRules(document, domain, includeSubdomains);
             if (
                 !document.rules.some(
                     (rule) =>
@@ -757,9 +799,9 @@ function DomainsPage() {
                         ...(includeSubdomains ? { include_subdomains: true } : {}),
                     },
                 });
-                return api<RulesDocument>("rules", "PUT", document);
+                changed = true;
             }
-            return document;
+            return changed ? api<RulesDocument>("rules", "PUT", document) : document;
         },
         onSuccess: async () => {
             await client.invalidateQueries({ queryKey: ["rules"] });
