@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
         dns_upstream: "127.0.0.53:53".parse()?,
         ca_dir: "/var/lib/ramawall".into(),
     });
-    // Cleanup does not parse config/rules: invalid files must never prevent stopping.
+    // Configuration failures must never prevent guarding or stopping the firewall.
     match action {
         Action::Hook {
             action,
@@ -99,6 +99,9 @@ async fn main() -> Result<()> {
             proxy_port,
             dns_port,
         } => {
+            let hook_config = config::Config::load(&cli.config);
+            let log_level = hook_config.as_ref().map_or("info", |config| config.tracing_level());
+            init_logging(log_level);
             let hooks = hooks::Hooks {
                 dry_run,
                 proxy_user,
@@ -115,7 +118,7 @@ async fn main() -> Result<()> {
             }
             let start = matches!(action, HookAction::Start);
             let config = if start {
-                let config = config::Config::load(&cli.config)?;
+                let config = hook_config?;
                 rules::RuleSet::load(&cli.rules_dir)?;
                 Some(config)
             } else {
@@ -144,6 +147,12 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Initialize application logging at the level selected by the TOML configuration.
+fn init_logging(log_level: &str) {
+    let filter = tracing_subscriber::EnvFilter::new(log_level);
+    tracing_subscriber::fmt().with_env_filter(filter).with_target(false).init();
 }
 
 /// Bind TCP with explicit dual-stack behavior for IPv6 wildcard addresses.
@@ -197,9 +206,7 @@ async fn serve(
     let config = config::Config::load(&config_path)?;
     let access_log_config = config.access_log.clone();
     let ui_config = config.ui.clone();
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(config.tracing_level()));
-    tracing_subscriber::fmt().with_env_filter(filter).with_target(false).init();
+    init_logging(config.tracing_level());
     let policy = Arc::new(arc_swap::ArcSwap::from_pointee(state::Policy {
         config,
         rules: rules::RuleSet::load(&rules_dir)?,

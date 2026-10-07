@@ -66,7 +66,7 @@ def main():
         command("mount", "--bind", str(hosts), "/etc/hosts")
         config = root / "config.toml"
         config.write_text(
-            "manage_resolv_conf = false\nbypass_users = []\n[[iptables.bypass]]\nnetwork = '192.0.2.19/24'\nport = 443\n")
+            "log_level = 'debug'\nmanage_resolv_conf = false\nbypass_users = []\n[[iptables.bypass]]\nnetwork = '192.0.2.19/24'\nport = 443\n")
         rules = root / "rules"
         rules.mkdir()
         rules_file = rules / "test.toml"
@@ -84,12 +84,18 @@ def main():
             "--state-dir",
             str(state)]
         try:
-            command(*args, "start")
+            logs = command("env", "RUST_LOG=error", *args, "start")
+            for program in ("iptables", "ip6tables", "id", "sysctl"):
+                assert any("DEBUG" in line and "executing command" in line
+                           and f'"{program}"' in line for line in logs.splitlines()), logs
+            assert '"-w" "10"' in logs, logs
             first = firewall_snapshot()
             saved = (state / "forwarding.json").read_bytes()
             assert [command("sysctl", "-n", name).strip() for name in SYSCTLS] == ["1", "1", "0"]
             assert "RAMAWALL_OUTPUT" in first[0] and "RAMAWALL_OUTPUT" in first[1]
-            command(*args, "start")
+            config.write_text(config.read_text().replace("log_level = 'debug'", "log_level = 'info'"))
+            logs = command("env", "RUST_LOG=debug", *args, "start")
+            assert "executing command" not in logs, logs
             assert firewall_snapshot() == first, "repeated start changed the policy"
             assert (state / "forwarding.json").read_bytes() == saved, "repeated start replaced original state"
             for tool in ("iptables", "ip6tables"):

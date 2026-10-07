@@ -70,6 +70,7 @@ fn sysctl(name: &str, value: Option<u8>) -> Result<u8> {
     } else {
         command.args(["-n", name]);
     }
+    tracing::debug!(command = ?command, "executing command");
     let output = command.output()?;
     ensure!(output.status.success(), "sysctl {name}: {}", String::from_utf8_lossy(&output.stderr));
     if let Some(value) = value {
@@ -197,11 +198,11 @@ impl Hooks {
         if !enabled || !external_nameservers(&self.resolv_conf)? {
             return Ok(());
         }
+        let mut command = Command::new("systemctl");
+        command.args(["is-active", "--quiet", "systemd-resolved.service"]);
+        tracing::debug!(command = ?command, "executing command");
         ensure!(
-            Command::new("systemctl")
-                .args(["is-active", "--quiet", "systemd-resolved.service"])
-                .status()?
-                .success(),
+            command.status()?.success(),
             "systemd-resolved must be active before replacing resolv.conf"
         );
         ensure!(
@@ -291,7 +292,7 @@ impl Hooks {
         Ok(lock)
     }
 
-    /// Establish fail-closed enforcement before any fallible configuration parsing.
+    /// Establish fail-closed enforcement before configuration failures can abort startup.
     pub fn guard(&self) -> Result<()> {
         let _lock = if self.dry_run {
             None

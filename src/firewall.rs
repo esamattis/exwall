@@ -31,14 +31,10 @@ impl Firewall {
             println!("{} -w 10 {}", self.command, args.join(" "));
             return Ok(None);
         }
-        Ok(Some(
-            Command::new(self.command)
-                .args(["-w", "10"])
-                .args(args)
-                .env("LC_ALL", "C")
-                .output()
-                .with_context(|| self.command.to_owned())?,
-        ))
+        let mut command = Command::new(self.command);
+        command.args(["-w", "10"]).args(args).env("LC_ALL", "C");
+        tracing::debug!(command = ?command, "executing command");
+        Ok(Some(command.output().with_context(|| self.command.to_owned())?))
     }
 
     /// Require a mutating firewall command to complete successfully.
@@ -446,7 +442,10 @@ fn nat_rules(
 
 /// Check an account using id without interpolating its name into a shell.
 pub fn user_exists(user: &str) -> Result<bool> {
-    let output = Command::new("id").args(["-u", "--", user]).env("LC_ALL", "C").output()?;
+    let mut command = Command::new("id");
+    command.args(["-u", "--", user]).env("LC_ALL", "C");
+    tracing::debug!(command = ?command, "executing command");
+    let output = command.output()?;
     if output.status.success() {
         return Ok(true);
     }

@@ -224,8 +224,11 @@ ramawall hook --dry-run stop
 
 SIGHUP reloads the config and complete ruleset atomically. Invalid reloads keep the
 previous policy. Restart to apply changes to firewall bypasses, resolver
-management, application log level, or access-log settings. `RUST_LOG` can override
-application logging at process startup.
+management, application log level, or access-log settings. Set `log_level = "debug"`
+in the TOML config to log all executed firewall and related hook commands with
+their arguments. Both the service and hooks use the configured level; `RUST_LOG`
+does not override it. Hooks fall back to `info` if configuration cannot be loaded,
+so invalid configuration never prevents guarding or cleanup.
 
 Application logs still go to stdout and the systemd journal. Independently of
 `log_level`, access logs record every HTTP(S) request handled by the proxy and
