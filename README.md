@@ -140,8 +140,14 @@ reload the file before retrying. Other TOML rule files are unaffected. The watch
 picks up saves automatically; when `watch_rules = false`, the API explicitly reloads
 all rule files into the active policy.
 
+A separate HTTP denials table keeps the latest 100 denied HTTP/HTTPS requests
+in memory, newest first, including repeated requests. Refresh it manually.
+Each row can allow the exact domain, method, and pathname; query strings are
+excluded and pathname metacharacters are matched literally. This list resets
+on restart and excludes DNS denials and CONNECT setup.
+
 REST endpoints accept either the session cookie or HTTP Basic credentials:
-`POST /api/login`, `GET /api/session`, `POST /api/logout`, `GET /api/domains`, and `GET`/`PUT /api/rules`.
+`POST /api/login`, `GET /api/session`, `POST /api/logout`, `GET /api/domains`, `GET /api/http-denials`, and `GET`/`PUT /api/rules`.
 Writes require `Content-Type: application/json`. `GET /api/rules` returns a
 `revision` and `rules` array; send that revision with edited rule fields to `PUT`. Field values are ordinary JSON
 strings, arrays, booleans, or header objects, rather than TOML literals.

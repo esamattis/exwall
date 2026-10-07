@@ -572,6 +572,149 @@ interface DomainStats {
     last_updated: string;
 }
 
+/** One retained policy denial, with the exact pathname and no query string. */
+interface HttpDenial {
+    domain: string;
+    method: string;
+    pathname: string;
+    timestamp: string;
+}
+
+/** Escape pathname characters so an allow rule matches exactly one literal path. */
+function exactPathRegex(pathname: string): string {
+    return `\\A${pathname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\z`;
+}
+
+/** Manually refresh the latest HTTP denials and allow their exact method and pathname. */
+function HttpDenialsTable() {
+    const client = useQueryClient();
+    const denials = useQuery({
+        queryKey: ["http-denials"],
+        queryFn: () => api<HttpDenial[]>("http-denials"),
+        refetchOnWindowFocus: false,
+        refetchOnReconnect: false,
+        retry: false,
+    });
+    const allow = useMutation({
+        mutationFn: async (denial: HttpDenial) => {
+            const document = await api<RulesDocument>("rules");
+            const pathnameRegex = exactPathRegex(denial.pathname);
+            if (
+                !document.rules.some(
+                    (rule) =>
+                        rule.fields.domain === denial.domain &&
+                        rule.fields.dns_only !== true &&
+                        Array.isArray(rule.fields.methods) &&
+                        rule.fields.methods.some((method) => method === denial.method) &&
+                        rule.fields.pathname_regex === pathnameRegex &&
+                        rule.fields.pathname_pattern === undefined &&
+                        rule.fields.inject_headers === undefined,
+                )
+            ) {
+                document.rules.unshift({
+                    index: null,
+                    fields: {
+                        domain: denial.domain,
+                        methods: [denial.method],
+                        pathname_regex: pathnameRegex,
+                    },
+                });
+                return api<RulesDocument>("rules", "PUT", document);
+            }
+            return document;
+        },
+        onSuccess: async () => {
+            await client.invalidateQueries({ queryKey: ["rules"] });
+        },
+    });
+    if (denials.error instanceof ApiError && denials.error.status === 401) {
+        return null;
+    }
+    return (
+        <section aria-labelledby="http-denials-heading" className="mt-10">
+            <div className="flex items-center justify-between gap-4">
+                <h2 id="http-denials-heading" className="text-2xl font-semibold">
+                    HTTP denials
+                </h2>
+                <button
+                    className="button"
+                    aria-label="Refresh HTTP denials"
+                    disabled={denials.isFetching}
+                    onClick={() => void denials.refetch()}
+                >
+                    {denials.isFetching ? "Refreshing…" : "Refresh"}
+                </button>
+            </div>
+            <p className="my-4 text-slate-400">
+                The latest 100 denied HTTP and HTTPS requests, newest first. Kept in memory until
+                restart.
+            </p>
+            {denials.isPending && <p role="status">Loading HTTP denials…</p>}
+            {denials.error && (
+                <p role="alert" className="text-red-400">
+                    {denials.error.message}
+                </p>
+            )}
+            {allow.error && (
+                <p role="alert" className="mb-4 text-red-400">
+                    {allow.error.message}
+                </p>
+            )}
+            {allow.isSuccess && (
+                <p role="status" className="mb-4 text-teal-400">
+                    Method and pathname allowed.
+                </p>
+            )}
+            {denials.data?.length === 0 && <p>No HTTP denials yet.</p>}
+            {denials.data && denials.data.length > 0 && (
+                <div className="overflow-x-auto rounded-xl border border-slate-800">
+                    <table className="w-full text-left text-sm">
+                        <caption className="sr-only">Latest HTTP denials</caption>
+                        <thead className="bg-slate-900 text-slate-400">
+                            <tr>
+                                {["Domain", "Method", "Pathname", "Denied at", "Action"].map(
+                                    (label) => (
+                                        <th key={label} className="p-3">
+                                            {label}
+                                        </th>
+                                    ),
+                                )}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {denials.data.map((denial, index) => (
+                                <tr
+                                    key={`${denial.timestamp}:${index}`}
+                                    className="border-t border-slate-800"
+                                >
+                                    <th scope="row" className="p-3 font-medium">
+                                        {denial.domain}
+                                    </th>
+                                    <td className="p-3">{denial.method}</td>
+                                    <td className="p-3 font-mono">{denial.pathname}</td>
+                                    <td className="p-3">
+                                        <time dateTime={denial.timestamp}>{denial.timestamp}</time>
+                                    </td>
+                                    <td className="p-3">
+                                        <button
+                                            className="button whitespace-nowrap"
+                                            aria-label={`Allow ${denial.domain} ${denial.method} ${denial.pathname}`}
+                                            disabled={allow.isPending}
+                                            onClick={() => allow.mutate(denial)}
+                                        >
+                                            Allow method and pathname
+                                        </button>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+        </section>
+    );
+}
+
 /** Show seen domains and allow an exact domain, DNS only, or a domain with subdomains. */
 function DomainsPage() {
     const client = useQueryClient();
@@ -749,6 +892,7 @@ function DomainsPage() {
                     </table>
                 </div>
             )}
+            <HttpDenialsTable />
         </section>
     );
 }

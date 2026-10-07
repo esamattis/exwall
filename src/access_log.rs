@@ -220,7 +220,14 @@ impl AccessLog {
                 if let Ok(uri) = rama::net::uri::Uri::parse(url)
                     && let Some(authority) = uri.authority()
                 {
-                    self.domains.record(&authority.host().to_string(), entry.protocol, allowed);
+                    let host = authority.host().to_string();
+                    self.domains.record(&host, entry.protocol, allowed);
+                    if !allowed
+                        && matches!(entry.protocol, Protocol::Http | Protocol::Https)
+                        && entry.method != "CONNECT"
+                    {
+                        self.domains.record_denial(&host, &entry.method, &uri.path_or_root());
+                    }
                 }
             }
         }
@@ -345,6 +352,42 @@ fn open_append(path: &Path) -> std::io::Result<File> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// Retain only evaluated HTTP denials, with normalized hosts and query-free pathnames.
+    #[tokio::test]
+    async fn tracks_http_denials_without_dns_connect_or_upstream_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let (log, task) = AccessLog::start(AccessLogConfig {
+            path: directory.path().join("access.log"),
+            ..AccessLogConfig::default()
+        })
+        .await
+        .unwrap();
+        for (protocol, method, url, decision) in [
+            (Protocol::Dns, "-", "dns://denied.test/A", Some(false)),
+            (Protocol::Http, "GET", "http://test/allowed", Some(true)),
+            (Protocol::Https, "POST", "https://Test:443/a?secret=value", Some(false)),
+            (Protocol::Https, "CONNECT", "https://test/", Some(false)),
+            (Protocol::Http, "GET", "http://test/invalid", None),
+            (Protocol::Http, "GET", "http://[::1]:80/denied", Some(false)),
+        ] {
+            let mut entry = Entry::new(protocol, method, url);
+            if let Some(allowed) = decision {
+                entry.decision(allowed);
+            }
+            entry.http_response(403);
+            log.record(entry);
+        }
+        let denials = log.domains.denials_snapshot();
+        assert_eq!(denials.len(), 2);
+        assert_eq!(denials[0].domain, "::1");
+        assert_eq!(denials[0].pathname, "/denied");
+        assert_eq!(denials[1].domain, "test");
+        assert_eq!(denials[1].method, "POST");
+        assert_eq!(denials[1].pathname, "/a");
+        drop(log);
+        task.await.unwrap().unwrap();
+    }
 
     /// Build a log item with deterministic contents for format and retention assertions.
     fn entry(index: usize) -> Entry {

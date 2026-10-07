@@ -100,7 +100,9 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
         await expect(page.getByText("No domains seen yet.")).toBeVisible();
         expect(domainRequests).toBe(1);
         await page.getByRole("button", { name: "Refresh domains", exact: true }).click();
-        const rows = page.getByRole("table").locator("tbody tr");
+        const rows = page
+            .getByRole("table", { name: "Seen domains, latest update first" })
+            .locator("tbody tr");
         await expect(rows).toHaveCount(3);
         await expect(rows.nth(0).getByRole("rowheader")).toHaveText("denied.test");
         const denied = rows.filter({
@@ -253,5 +255,114 @@ test("DNS-only allowance stays out of HTTP and can expand to all methods and sub
         });
         expect(restored.status()).toBe(200);
         await expect.poll(() => http("openai.com")).toBe(403);
+    }
+});
+
+/** Current metadata for one retained HTTP policy denial. */
+interface HttpDenial {
+    domain: string;
+    method: string;
+    pathname: string;
+    timestamp: string;
+}
+
+test("last 100 HTTP denials refresh manually and allow only an exact method and pathname", async ({
+    page,
+}) => {
+    const fixture = await startProtocolFixture();
+    const ui = `http://127.0.0.1:${fixture.uiPort}`;
+    const pathname = "/denied/:item*+(x)";
+    /** Exercise real proxy decisions with a query string that must never enter the allow rule. */
+    const http = (path: string, method = "POST") =>
+        exchange({
+            hostname: "127.0.0.1",
+            port: fixture.proxyPort,
+            path: `http://127.0.0.1:${fixture.upstreamPort}${path}`,
+            method,
+            headers: { Host: `127.0.0.1:${fixture.upstreamPort}` },
+        });
+    /** Read the authenticated denial API without changing the manually refreshed table. */
+    const snapshot = async (): Promise<HttpDenial[]> => {
+        const response = await page.request.get(`${ui}/api/http-denials`);
+        expect(response.status()).toBe(200);
+        return response.json();
+    };
+    try {
+        expect((await page.request.get(`${ui}/api/http-denials`)).status()).toBe(401);
+        expect(
+            (
+                await page.request.post(`${ui}/api/login`, {
+                    data: { username: "admin", password: "integration-password" },
+                })
+            ).status(),
+        ).toBe(200);
+        await page.goto(`${ui}/domains`);
+        const section = page.getByRole("region", { name: "HTTP denials", exact: true });
+        await expect(section.getByText("No HTTP denials yet.")).toBeVisible();
+        expect(await queryDns("127.0.0.1", fixture.dnsPort, "denied.test")).toBe(5);
+        expect((await http("/allowed?upstream_status=502", "GET")).status).toBe(502);
+        for (let index = 0; index < 104; index += 1) {
+            expect((await http(`/denied/${index}`)).status).toBe(403);
+        }
+        expect((await http(`${pathname}?secret=hidden`)).status).toBe(403);
+        expect(
+            (await tlsExchange(fixture.proxyPort, fixture.securePort, fixture.cert, "/denied"))
+                .status,
+        ).toBe(403);
+        await expect.poll(async () => (await snapshot()).length).toBe(100);
+        const before = await snapshot();
+        expect(before[0]).toMatchObject({
+            domain: "localhost",
+            method: "GET",
+            pathname: "/denied",
+        });
+        expect(before[1]).toMatchObject({ domain: "127.0.0.1", method: "POST", pathname });
+        expect(before[99]!.pathname).toBe("/denied/6");
+        expect(JSON.stringify(before)).not.toContain("secret");
+        await expect(section.getByText("No HTTP denials yet.")).toBeVisible();
+        await section.getByRole("button", { name: "Refresh HTTP denials", exact: true }).click();
+        const rows = section
+            .getByRole("table", { name: "Latest HTTP denials" })
+            .locator("tbody tr");
+        await expect(rows).toHaveCount(100);
+        await expect(rows.nth(0).getByRole("rowheader")).toHaveText("localhost");
+        await expect(rows.nth(1).getByRole("cell").nth(1)).toHaveText(pathname);
+        const button = section.getByRole("button", {
+            name: `Allow 127.0.0.1 POST ${pathname}`,
+            exact: true,
+        });
+        await button.click();
+        await expect(section.getByRole("status")).toHaveText("Method and pathname allowed.");
+        const document: RulesDocument = await (await page.request.get(`${ui}/api/rules`)).json();
+        expect(document.rules).toHaveLength(1);
+        expect(document.rules[0]!.fields).toEqual({
+            domain: "127.0.0.1",
+            methods: ["POST"],
+            pathname_regex: "\\A/denied/:item\\*\\+\\(x\\)\\z",
+        });
+        await expect.poll(async () => (await http(`${pathname}?another=query`)).status).toBe(200);
+        for (const [path, method] of [
+            [pathname, "GET"],
+            [pathname, "DELETE"],
+            [`${pathname}/extra`, "POST"],
+            ["/denied/:itemmmmmx", "POST"],
+            ["/denied/103", "POST"],
+        ]) {
+            expect((await http(path!, method!)).status).toBe(403);
+        }
+        await button.click();
+        await expect(button).toBeEnabled();
+        expect((await (await page.request.get(`${ui}/api/rules`)).json()).rules).toHaveLength(1);
+        const after = await snapshot();
+        expect(after).toHaveLength(100);
+        expect(after[0]).toMatchObject({ method: "POST", pathname: "/denied/103" });
+        await expect(rows.nth(0).getByRole("rowheader")).toHaveText("localhost");
+        await section.getByRole("button", { name: "Refresh HTTP denials", exact: true }).click();
+        await expect(rows.nth(0).getByRole("cell").nth(1)).toHaveText("/denied/103");
+        await page.reload();
+        await expect(rows).toHaveCount(100);
+        expect((await http(pathname)).status).toBe(200);
+    } finally {
+        await fixture.close();
     }
 });

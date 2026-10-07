@@ -175,6 +175,9 @@ impl Api {
                 );
                 Ok(response)
             }
+            (Method::GET, "/api/http-denials") => {
+                Ok(json(StatusCode::OK, &self.domains.denials_snapshot()))
+            }
             (Method::GET, "/api/domains") => Ok(json(StatusCode::OK, &self.domains.snapshot())),
             (Method::GET, "/api/rules") => Ok(json(StatusCode::OK, &self.read_rules()?)),
             (Method::PUT, "/api/rules") => {

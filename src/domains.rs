@@ -1,8 +1,8 @@
-//! Current per-domain policy counters, without retaining individual requests.
+//! Current domain counters and a bounded, process-local list of HTTP denials.
 use crate::{access_log::Protocol, rules::normalize_host};
 use serde::Serialize;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -23,10 +23,21 @@ pub struct Domain {
     pub last_updated: jiff::Timestamp,
 }
 
-/// Shared process-lifetime counters independent of rule reloads and log retention.
+/// One denied HTTP or HTTPS request, excluding query strings and CONNECT setup.
+#[derive(Clone, Serialize)]
+pub struct HttpDenial {
+    pub domain: String,
+    pub method: String,
+    pub pathname: String,
+    #[serde(serialize_with = "serialize_timestamp")]
+    pub timestamp: jiff::Timestamp,
+}
+
+/// Shared process-lifetime counters and bounded denials, independent of log retention.
 #[derive(Clone, Default)]
 pub struct Domains {
     entries: Arc<Mutex<BTreeMap<String, Domain>>>,
+    denials: Arc<Mutex<VecDeque<HttpDenial>>>,
 }
 
 impl Domains {
@@ -55,6 +66,25 @@ impl Domains {
         entry.last_updated = jiff::Timestamp::now();
     }
 
+    /// Retain the latest 100 denied requests without writing request history to disk.
+    pub fn record_denial(&self, host: &str, method: &str, pathname: &str) {
+        let mut denials = self.denials.lock().expect("HTTP denial lock poisoned");
+        if denials.len() == 100 {
+            denials.pop_front();
+        }
+        denials.push_back(HttpDenial {
+            domain: normalize_host(host.trim_matches(['[', ']'])),
+            method: method.to_owned(),
+            pathname: pathname.to_owned(),
+            timestamp: jiff::Timestamp::now(),
+        });
+    }
+
+    /// Return denied HTTP requests newest first, including repeated requests.
+    pub fn denials_snapshot(&self) -> Vec<HttpDenial> {
+        self.denials.lock().expect("HTTP denial lock poisoned").iter().rev().cloned().collect()
+    }
+
     /// Return independent snapshots with the most recently updated domain first.
     pub fn snapshot(&self) -> Vec<Domain> {
         let mut domains: Vec<_> =
@@ -77,6 +107,25 @@ fn serialize_timestamp<S: serde::Serializer>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Evict only the oldest denials while retaining repeats and immutable snapshots.
+    #[test]
+    fn retains_only_the_latest_hundred_http_denials() {
+        let domains = Domains::default();
+        for index in 0..105 {
+            domains.record_denial("Example.COM.", "POST", &format!("/request/{index}"));
+        }
+        let snapshot = domains.denials_snapshot();
+        assert_eq!(snapshot.len(), 100);
+        assert_eq!(snapshot[0].pathname, "/request/104");
+        assert_eq!(snapshot[99].pathname, "/request/5");
+        assert_eq!(snapshot[0].domain, "example.com");
+        domains.record_denial("example.com", "POST", "/request/104");
+        let latest = domains.denials_snapshot();
+        assert_eq!(latest.len(), 100);
+        assert_eq!(latest[0].pathname, latest[1].pathname);
+        assert_eq!(snapshot[99].pathname, "/request/5");
+    }
 
     /// Aggregate normalized hosts, combine HTTP/TLS, and retain only the latest state.
     #[test]
