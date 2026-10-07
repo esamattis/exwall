@@ -1,6 +1,7 @@
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { networkTest as test } from "#playwright_helpers/test_fixtures.mts";
 import { readFile } from "node:fs/promises";
-import { fixtureCheck, fixtureOperation, writeFixtureRules } from "#playwright_helpers/client.mts";
+import { fixtureCheck, fixtureOperation } from "#playwright_helpers/client.mts";
 import type { HttpResult, NetworkOperation } from "#playwright_helpers/protocol.mts";
 
 /** Retained mitmwall HTTP case names and expected outcomes, checked through both protocols. */
@@ -13,11 +14,6 @@ interface NetworkCase {
 const cases: NetworkCase[] = JSON.parse(
     await readFile(new URL("../../tests/fixtures/network-cases.json", import.meta.url), "utf8"),
 );
-const rules = await readFile(
-    new URL("../../tests/fixtures/mitmwall-integration-rules.toml", import.meta.url),
-    "utf8",
-);
-
 /** Require an HTTP response rather than treating a transport error as a policy denial. */
 async function http(
     url: string,
@@ -30,15 +26,6 @@ async function http(
     }
     return response.result;
 }
-
-test.beforeEach(async () => {
-    await writeFixtureRules(rules);
-    await expect.poll(async () => (await http("https://pie.dev/get")).status).toBe(200);
-});
-test.afterEach(async () => {
-    await writeFixtureRules(null);
-    await expect.poll(async () => (await http("https://pie.dev/get")).status).toBe(403);
-});
 
 for (const { name, url, method, status } of cases) {
     test(name, async () => {

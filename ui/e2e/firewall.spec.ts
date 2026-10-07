@@ -1,5 +1,6 @@
 import { fixtureRules, networkRequest, upstreamRequests } from "#playwright_helpers/client.mts";
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { firewallTest as test } from "#playwright_helpers/test_fixtures.mts";
 import type { Page } from "@playwright/test";
 
 /** Save through the production API and wait for the editor's success feedback. */
@@ -156,12 +157,9 @@ test("real login, edits, validation, persistence, and HTTP/TLS interception", as
 });
 
 test("pathname patterns, regexes, query strings, and POST bodies reach an HTTP/2 upstream", async ({
-    page,
+    authenticatedPage: page,
 }) => {
-    await page.goto("/login");
-    await page.getByRole("textbox", { name: "Username" }).fill("admin");
-    await page.getByLabel("Password", { exact: true }).fill("browser-password");
-    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await page.goto("/");
     await expect(page.getByRole("heading", { name: "Rules", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Add rule", exact: true }).click();
     await page.getByRole("textbox", { name: "Rule 1 domain", exact: true }).fill("pathname.test");

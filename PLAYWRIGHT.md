@@ -70,6 +70,7 @@ import { startMockServer } from "#playwright_helpers/mock_server.mts";
 | [mock_server.mts](tests/playwright_helpers/mock_server.mts) | Reusable HTTP/HTTP2 upstream and executable peer-namespace server. Records requests and supports custom pathname/method routes. |
 | [client_broker.mts](tests/playwright_helpers/client_broker.mts) | Receives private Unix-socket requests, reads persisted rules/upstream records, and launches the fixed-identity client. |
 | [network_client.mts](tests/playwright_helpers/network_client.mts) | Verifies its network namespace, clears supplementary groups, drops to UID/GID 65534 (`nobody`), and performs HTTP/HTTPS, TCP, DNS, certificate, or ICMPv6 checks. Fixed bypass/admin roles support positive controls. |
+| [test_fixtures.mts](tests/playwright_helpers/test_fixtures.mts) | Shared Playwright test exports: local proxy ownership, optional browser authentication, failure artifacts, and UI/network policy isolation. |
 | [client.mts](tests/playwright_helpers/client.mts) | Importable test API: `networkRequest()`, `fixtureRules()`, `upstreamRequests()`, `writeFixtureRules()`, `fixtureOperation()`, and `fixtureCheck()`. |
 | [ui_bridge.mts](tests/playwright_helpers/ui_bridge.mts) | Relays host loopback TCP through a Unix socket to exwall's namespace-local UI. |
 | [namespace_safety.mts](tests/playwright_helpers/namespace_safety.mts) | Isolation guards and host/firewall/sysctl snapshots. |
@@ -204,7 +205,10 @@ The migrated coverage is organized as follows:
 
 Privileged assertions run through a fixed list of `fixtureCheck` names. The
 broker cannot execute caller-supplied shell commands. Failures propagate to the
-owning Playwright test; hooks and temporary policies are restored in `finally`.
+owning Playwright test. Shared test fixtures in
+`tests/playwright_helpers/test_fixtures.mts` own local proxies, optional browser
+authentication, failure artifacts, and shared UI/network policy restoration.
+Namespace lifecycle helpers retain their own hook and resource cleanup.
 
 The suite also covers login/logout, saved rules, failed validation preserving active
 policy, conflicting saves, HTTP/HTTPS allow/deny changes, IPv6, HTTPS header
