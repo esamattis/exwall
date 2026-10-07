@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install a previously built release binary and its systemd integration.
+# Install a previously built debug binary and its systemd integration.
 set -eu
 
 # Explain a failed installation prerequisite and stop before further mutations.
@@ -11,8 +11,8 @@ die() {
 [ "$(uname -s)" = Linux ] || die "Linux is required"
 [ "$(id -u)" -eq 0 ] || die "run as root"
 scriptdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-binary=${1:-"$scriptdir/target/release/ramawall"}
-[ -x "$binary" ] || die "build first with cargo build --release (or pass the binary path)"
+binary=${1:-"$scriptdir/target/debug/ramawall"}
+[ -x "$binary" ] || die "missing executable: $binary; install.sh requires an existing binary and never builds it"
 for command in systemctl iptables ip6tables sysctl openssl update-ca-certificates runuser; do
     command -v "$command" >/dev/null 2>&1 || die "missing dependency: $command"
 done

@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 from integration import EchoHandler, free_port, make_tls_context, start_server, wait_for_ready
+from namespace_support import assert_namespace
 
 
 class IPv6Server(http.server.ThreadingHTTPServer):
@@ -64,7 +65,7 @@ def intercepted_request(proxy_port, server, ca_cert, ipv6, tls, path):
 
 def main():
     """Check both address families through the default dual-stack interception listener."""
-    assert os.geteuid() == 0 and os.environ.get("RAMAWALL_NAMESPACE_TEST") == "1"
+    assert_namespace()
     command("ip", "link", "set", "lo", "up")
     binary = str(Path(sys.argv[1]).resolve())
     with tempfile.TemporaryDirectory(prefix="ramawall-transparent-") as directory:

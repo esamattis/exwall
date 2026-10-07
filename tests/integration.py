@@ -170,14 +170,15 @@ def wait_for_ready(process, port):
     raise AssertionError("proxy did not become ready")
 
 
-def make_tls_context(root, ca, hostname):
-    """Generate a short-lived upstream certificate signed by the test CA."""
+def make_tls_context(root, ca, hostname, dns_names=None):
+    """Generate a short-lived test-CA certificate for one or more upstream names."""
     cert = ca / "ramawall-ca-cert.pem"
     tls_key = root / "upstream.key"
     csr = root / "upstream.csr"
     tls_cert = root / "upstream.pem"
     extensions = root / "extensions.cnf"
-    extensions.write_text(f"subjectAltName=DNS:{hostname}\nextendedKeyUsage=serverAuth\n")
+    names = ",".join(f"DNS:{name}" for name in (dns_names or [hostname]))
+    extensions.write_text(f"subjectAltName={names}\nextendedKeyUsage=serverAuth\n")
     subprocess.run(["openssl",
                     "req",
                     "-new",

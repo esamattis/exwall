@@ -1,0 +1,109 @@
+# Ported from mitmwall/tests/integration/integration-test-rules.toml.
+# All upstream domains resolve to disposable local fixture servers.
+
+[[allow]]
+domain = "github.com"
+[[allow]]
+domain = "api.github.com"
+
+[[allow]]
+domain = "github.com"
+methods = ["POST"]
+pathname_pattern = "/esamattis/:repo.git/git-upload-pack"
+
+[[allow]]
+domain = "githubusercontent.com"
+include_subdomains = true
+
+[[allow]]
+domain = "esamatti.fi"
+
+[[allow]]
+domain = "pie.dev"
+pathname_pattern = "/pathname-pattern/:slug/action"
+methods = ["POST"]
+
+[[allow]]
+domain = "pie.dev"
+pathname_pattern = ["/anything/:slug/foo", "/anything/:slug/bar"]
+methods = ["POST"]
+
+[[allow]]
+domain = "pie.dev"
+pathname_regex = '^/pathname-regex/[^/]+/info$'
+methods = ["POST"]
+
+[[allow]]
+domain = "pie.dev"
+pathname_regex = ['^/regex-array/[^/]+/alpha$', '^/regex-array/[^/]+/beta$']
+methods = ["POST"]
+
+[[allow]]
+domain = "pie.dev"
+pathname_regex = '^/both/regex/[^/]+$'
+pathname_pattern = "/both/pattern/:slug"
+methods = ["POST"]
+
+[[allow]]
+domain = "pie.dev"
+pathname_pattern = "/headers"
+methods = ["GET"]
+inject_headers = [
+    { name = "Authorization", value = "Secret" },
+    { name = "X-Mitmwall-Test", value = "enabled" },
+]
+
+[[allow]]
+domain = "pie.dev"
+methods = ["GET"]
+
+[[allow]]
+domain = ["httpbin.org", "pie.dev"]
+methods = ["GET"]
+pathname_pattern = "/get"
+
+[[allow]]
+domain_regex = ['(^|\.)ipinfo\.io$', '(^|\.)httpbin\.org$']
+
+## APT repositories
+[[allow]]
+domain = "ports.ubuntu.com"
+
+[[allow]]
+domain = "download.docker.com"
+
+## Rust
+[[allow]]
+domain = "index.crates.io"
+
+[[allow]]
+domain = "registry.npmjs.org"
+
+## PyPI
+[[allow]]
+domain = "pypi.org"
+[[allow]]
+domain = "files.pythonhosted.org"
+
+## Opencode
+[[allow]]
+domain = "api.githubcopilot.com"
+methods = "ANY"
+[[allow]]
+domain = "models.dev"
+[[allow]]
+domain = "opencode.ai"
+methods = "ANY"
+[[allow]]
+domain = "cdn.agentclientprotocol.com"
+pathname_pattern = "/registry/v1/latest/registry.json"
+
+## Allow dns requests to these domains, which are used in some tests.
+[[allow]]
+domain = "ftp.ubuntu-tw.org"
+
+# Keep unrestricted HTTP and DNS access to the development control services.
+[[allow]]
+domain = ["chatgpt.com", "openai.com"]
+include_subdomains = true
+methods = "ANY"

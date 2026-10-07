@@ -3,15 +3,13 @@
 import http.client
 import http.server
 import json
-import os
 from pathlib import Path
-import socket
 import subprocess
 import sys
 import tempfile
-import time
 
 from integration import EchoHandler, free_port, start_server, wait_for_ready
+from namespace_support import assert_namespace
 
 
 SYSCTLS = [
@@ -35,8 +33,7 @@ def firewall_snapshot():
 
 def main():
     """Verify idempotent hook ordering, state restoration, and REDIRECT destination recovery."""
-    assert os.geteuid() == 0, "run this test via unshare -Urnm"
-    assert os.environ.get("RAMAWALL_NAMESPACE_TEST") == "1", "requires the isolated test wrapper"
+    assert_namespace()
     command("ip", "link", "set", "lo", "up")
     original_sysctls = [command("sysctl", "-n", name) for name in SYSCTLS]
     # Give ramawall an unrelated rule it must preserve across repeated start/stop.

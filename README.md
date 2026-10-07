@@ -37,14 +37,31 @@ material to exercise HTTP filtering, header injection, TLS interception, CONNECT
 HTTP/2, streaming, UDP/TCP DNS, IPv6 listeners, successful/rejected reloads, and
 embedded UI assets over both IPv4 and IPv6.
 
-Where unprivileged user/network/mount namespaces and iptables are available,
 `integration_tests.sh` also exercises real IPv4/IPv6 firewall startup, repeated
 startup/stop, bypass ordering, original-destination recovery, and exact sysctl
-restoration in a disposable namespace. It reports a skip if those prerequisites
-are unavailable. Tests never install the service or alter the development host's
-firewall, resolver, or trust store. Python 3, curl with HTTP/2, and openssl are
-needed for protocol tests; `ip`, `mount`, `unshare`, iptables, and ip6tables are
-needed for namespace tests.
+restoration in disposable network/mount namespaces. With root or passwordless
+sudo, it runs all 37 network cases ported from mitmwall, plus four additional
+cases covering control-service access, full IPv6 interception, private hook
+state/restoration, and corrupt-state rejection. The original TOML fixtures and
+HTTP case names are retained. Public upstreams are replaced by local HTTP(S),
+DNS, SSH, and FTP servers in a second namespace, connected through a veth pair.
+Distinct client UIDs verify user bypasses; certificate comparisons verify network
+bypasses and their removal. Allowed requests must reach the upstream, and denied
+web requests must receive 403.
+
+Tests never install the service or alter the development host's firewall,
+resolver, accounts, or trust store. Namespace tests refuse to run in the launcher's
+host network/mount namespaces. Their isolated networks have no internet route, so
+host access to **chatgpt.com** and **openai.com** remains available even during
+deny-all and failed-start tests. The ported rules also allow all methods and
+subdomains for those services. The launcher verifies unchanged host firewall,
+forwarding sysctls, resolver, and trust bundle after testing.
+
+Python 3, curl with HTTP/2, and openssl are needed for protocol tests; `ip`,
+`mount`, `unshare`, `nsenter`, iptables, and ip6tables are needed for namespace
+tests. Without root/passwordless sudo, the original namespace cases can use
+unprivileged user namespaces, while the full mitmwall port reports a skip. Missing
+namespace support is also reported explicitly.
 
 ## Web UI development
 
@@ -87,7 +104,8 @@ server has separate settings in `ui/vite.config.ts`.
 
 ## Install on Ubuntu/systemd
 
-Build as your normal user, then install the resulting binary:
+Build as your normal user, then install the resulting debug binary. `install.sh`
+uses `./target/debug/ramawall` by default and never builds it:
 
 ```sh
 sudo apt-get install iptables openssl ca-certificates

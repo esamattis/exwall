@@ -1,0 +1,26 @@
+# Ported mitmwall bypass fixtures, used only in a disposable namespace.
+manage_resolv_conf = false
+
+bypass_users = ["daemon"]
+
+# Allow direct TCP connections to Google Public DNS on port 443 for integration
+# testing of custom iptables rule support.
+[[iptables.bypass]]
+network = "8.8.8.8"
+port = 443
+
+# Test that /32 CIDR notation works for port 443 bypass rules.
+[[iptables.bypass]]
+network = "172.64.155.209/32"
+port = 443
+
+# Install an IPv6 bypass so empty-config refreshes exercise both rule families.
+[[iptables.bypass]]
+network = "2001:db8::/32"
+port = 443
+
+
+# hostcmd with lima https://github.com/esamattis/hostcmd
+[[iptables.bypass]]
+network = "192.168.5.0/24"
+port = 48483
