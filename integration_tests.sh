@@ -3,6 +3,7 @@
 set -eu
 scriptdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$scriptdir"
+mise exec -- pnpm build:ui
 cargo build --locked
 python3 tests/integration.py "$scriptdir/target/debug/ramawall"
 if command -v unshare >/dev/null 2>&1 && unshare -Urn sh -c 'iptables -S >/dev/null && ip6tables -S >/dev/null' 2>/dev/null; then

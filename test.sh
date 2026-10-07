@@ -3,6 +3,8 @@
 set -eu
 scriptdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$scriptdir"
+mise exec -- pnpm check
+mise exec -- pnpm build:ui
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked

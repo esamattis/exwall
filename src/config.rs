@@ -11,6 +11,7 @@ use std::{
 pub struct Config {
     pub log_level: String,
     pub access_log: AccessLogConfig,
+    pub ui: UiConfig,
     pub block_dns: bool,
     pub manage_resolv_conf: bool,
     pub flow_history_clear_interval: u64,
@@ -25,6 +26,7 @@ impl Default for Config {
         Self {
             log_level: "info".into(),
             access_log: AccessLogConfig::default(),
+            ui: UiConfig::default(),
             block_dns: true,
             manage_resolv_conf: true,
             flow_history_clear_interval: 1000,
@@ -32,6 +34,26 @@ impl Default for Config {
             // The Python hook defaults to no bypass users; the shipped config includes root/_apt.
             bypass_users: Vec::new(),
             iptables: Iptables::default(),
+        }
+    }
+}
+
+/// HTTP UI bind addresses and port, applied when the service starts.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiConfig {
+    /// Literal IPv4/IPv6 bind addresses; an empty list disables the UI.
+    pub hosts: Vec<std::net::IpAddr>,
+    /// Shared TCP port for every configured interface.
+    pub port: u16,
+}
+
+impl Default for UiConfig {
+    /// Restrict the UI to IPv4 loopback on port 58000 by default.
+    fn default() -> Self {
+        Self {
+            hosts: vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)],
+            port: 58000,
         }
     }
 }
@@ -125,6 +147,13 @@ impl Config {
             config.bypass_users.iter().all(|s| !s.is_empty()),
             "bypass_users must contain nonempty names"
         );
+        ensure!(config.ui.port > 0, "ui.port must be 1..65535");
+        for (index, host) in config.ui.hosts.iter().enumerate() {
+            ensure!(
+                !config.ui.hosts[..index].contains(host),
+                "ui.hosts must not contain duplicate addresses"
+            );
+        }
         for bypass in &mut config.iptables.bypass {
             ensure!(bypass.port > 0, "bypass port must be 1..65535");
             bypass.network = bypass.network.trunc();
@@ -151,6 +180,7 @@ mod tests {
         let config = Config::parse(include_str!("../config-default.toml")).unwrap();
         assert_eq!(config.bypass_users, ["root", "_apt"]);
         assert_eq!(config.access_log, AccessLogConfig::default());
+        assert_eq!(config.ui, UiConfig::default());
         let config =
             Config::parse("[[iptables.bypass]]\nnetwork = '192.168.5.19/24'\nport = 1234").unwrap();
         assert_eq!(config.iptables.bypass[0].network.to_string(), "192.168.5.0/24");
@@ -158,6 +188,11 @@ mod tests {
         assert_eq!(config.iptables.bypass[0].network.to_string(), "::1/128");
         for text in [
             "block_dns = 1",
+            "[ui]\nport = 0",
+            "[ui]\nport = 65536",
+            "[ui]\nhosts = ['localhost']",
+            "[ui]\nhosts = ['127.0.0.1', '127.0.0.1']",
+            "[ui]\ntypo = true",
             "flow_history_keep_entries = 0",
             "typo = true",
             "[access_log]\npath = ''",
@@ -185,5 +220,14 @@ mod tests {
                 keep_entries: 20,
             }
         );
+    }
+    /// Accept multiple literal bind interfaces, partial overrides, and disabled UI.
+    #[test]
+    fn ui_configuration() {
+        let config = Config::parse("[ui]\nhosts = ['127.0.0.1', '::1']\nport = 8080").unwrap();
+        assert_eq!(config.ui.port, 8080);
+        assert_eq!(config.ui.hosts.len(), 2);
+        assert!(Config::parse("[ui]\nhosts = []").unwrap().ui.hosts.is_empty());
+        assert_eq!(Config::parse("[ui]\nport = 8081").unwrap().ui.hosts, UiConfig::default().hosts);
     }
 }

@@ -11,6 +11,7 @@ mod proxy;
 mod rules;
 mod state;
 mod udp;
+mod ui;
 
 use crate::error::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
@@ -188,6 +189,7 @@ async fn serve(
     );
     let config = config::Config::load(&config_path)?;
     let access_log_config = config.access_log.clone();
+    let ui_config = config.ui.clone();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(config.tracing_level()));
     tracing_subscriber::fmt().with_env_filter(filter).with_target(false).init();
@@ -200,6 +202,7 @@ async fn serve(
     let http = tcp_listener(listen).context("bind HTTP proxy")?;
     let dns_tcp = tcp_listener(dns_listen).context("bind DNS TCP")?;
     let dns_udp = udp_listener(dns_listen).context("bind DNS UDP")?;
+    let ui_listeners = ui::bind(&ui_config)?;
     let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel::<()>();
     let shutdown = rama::graceful::Shutdown::new(async move {
         let _ = shutdown_receiver.await;
@@ -217,7 +220,10 @@ async fn serve(
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut http_task = tokio::spawn(proxy.serve(http));
     let mut dns_task = tokio::spawn(dns.serve(dns_udp, dns_tcp));
+    let mut ui_task =
+        tokio::spawn(ui::serve(ui_listeners, rama::rt::Executor::graceful(shutdown.guard())));
     let mut access_finished = false;
+    tracing::info!(hosts = ?ui_config.hosts, port = ui_config.port, "UI listeners configured");
     tracing::info!(%listen, %dns_listen, rules = policy.load().rules.rules.len(), "ramawall ready");
     let result = loop {
         tokio::select! {
@@ -230,6 +236,9 @@ async fn serve(
             result = &mut http_task => {
                 break result.context("HTTP listener task failed").and_then(|result| result);
             }
+            result = &mut ui_task => {
+                break result.context("UI task failed").and_then(|result| result);
+            }
             result = &mut dns_task => {
                 break result.context("DNS listener task failed").and_then(|result| result);
             }
@@ -241,7 +250,7 @@ async fn serve(
                     Ok(new_policy) => {
                         tracing::info!(
                             rules = new_policy.rules.rules.len(),
-                            "reloaded policy; restart service to apply firewall/resolver/log-level/access-log changes"
+                            "reloaded policy; restart service to apply firewall/resolver/log-level/access-log/UI changes"
                         );
                         policy.store(Arc::new(new_policy));
                     }
@@ -258,6 +267,10 @@ async fn serve(
     if !dns_task.is_finished() {
         dns_task.abort();
         let _ = dns_task.await;
+    }
+    if !ui_task.is_finished() {
+        ui_task.abort();
+        let _ = ui_task.await;
     }
     let graceful_result = shutdown
         .shutdown_with_limit(std::time::Duration::from_secs(10))

@@ -43,3 +43,10 @@ path = "/var/log/ramawall/access.log"
 check_interval = 100
 max_size_bytes = 10485760
 keep_entries = 1000
+
+# Embedded web UI. Restart to apply changes. Hosts are literal bind addresses.
+# Use ["127.0.0.1", "::1"] for both loopback families, ["0.0.0.0", "::"] for
+# all interfaces, or [] to disable the UI listener.
+[ui]
+hosts = ["127.0.0.1"]
+port = 58000

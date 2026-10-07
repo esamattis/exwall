@@ -1,0 +1,20 @@
+{
+    "$schema": "./node_modules/oxlint/configuration_schema.json",
+    "plugins": ["typescript", "unicorn", "oxc", "react"],
+    "categories": {
+        "correctness": "error"
+    },
+    "rules": {
+        "typescript/consistent-type-assertions": [
+            "error",
+            {
+                "assertionStyle": "never"
+            }
+        ],
+        "typescript/no-floating-promises": "error"
+    },
+    "env": {
+        "builtin": true,
+        "browser": true
+    }
+}

@@ -4,7 +4,8 @@
 
 A Linux outbound HTTP(S) and DNS firewall implemented in Rust using
 [Rama](https://ramaproxy.org/). It reimplements mitmwall's TOML allow rules,
-transparent interception, and systemd/iptables integration. There is no web UI.
+transparent interception, and systemd/iptables integration. An embedded React UI
+provides a starting point for a control interface.
 
 The service runs as the dedicated `ramawall` user. Privileged systemd hooks redirect
 ordinary users' HTTP/HTTPS and UDP/TCP DNS traffic to local listeners and install a
@@ -20,16 +21,21 @@ install build prerequisites (Rama's Linux DNS dependency runs bindgen):
 
 ```sh
 sudo apt-get install build-essential pkg-config clang libclang-dev
-cargo build --release --locked
+mise trust
+mise install
+mise exec -- pnpm install --frozen-lockfile
+mise exec -- pnpm build
 ./test.sh
 ./integration_tests.sh
 ```
 
-`test.sh` runs formatting checks, Clippy, and unit tests. The rule tests include
+`test.sh` builds and checks the frontend, then runs Rust formatting checks,
+Clippy, and unit tests. The rule tests include
 8,160 HTTP and 170 DNS decisions recorded from the original mitmwall Python
 implementation. Protocol integration tests use local upstreams and temporary CA
 material to exercise HTTP filtering, header injection, TLS interception, CONNECT,
-HTTP/2, streaming, UDP/TCP DNS, IPv6 listeners, and successful/rejected reloads.
+HTTP/2, streaming, UDP/TCP DNS, IPv6 listeners, successful/rejected reloads, and
+embedded UI assets over both IPv4 and IPv6.
 
 Where unprivileged user/network/mount namespaces and iptables are available,
 `integration_tests.sh` also exercises real IPv4/IPv6 firewall startup, repeated
@@ -39,6 +45,45 @@ are unavailable. Tests never install the service or alter the development host's
 firewall, resolver, or trust store. Python 3, curl with HTTP/2, and openssl are
 needed for protocol tests; `ip`, `mount`, `unshare`, iptables, and ip6tables are
 needed for namespace tests.
+
+## Web UI development
+
+The Hello world page uses React, TypeScript, TanStack Router and Query, Tailwind
+CSS, and Vite. TypeScript is strict with `noUncheckedIndexedAccess`. Oxlint runs
+with type-aware checks, and oxfmt formats the frontend. Package versions are
+pinned in `package.json` and `pnpm-lock.yaml`. Node and pnpm versions are defined
+in `package.json`; `mise.toml` enables mise to read those declarations.
+Install [mise](https://mise.jdx.dev/getting-started.html) before the build
+commands above, then activate it in your shell or run the test scripts with
+`mise exec -- ./test.sh` and `mise exec -- ./integration_tests.sh`.
+
+```sh
+mise exec -- pnpm dev          # Vite development server at http://127.0.0.1:5173
+mise exec -- pnpm check        # TypeScript, oxlint, and oxfmt checks
+mise exec -- pnpm format       # Format frontend files
+mise exec -- pnpm build:ui     # Rebuild ui/dist before a direct Cargo command
+mise exec -- pnpm build        # Build UI and embed it in the debug Rust binary
+```
+
+For release builds, run `mise exec -- pnpm build:ui` followed by
+`cargo build --release --locked`. Every build profile embeds all `ui/dist` assets
+as bytes; the deployed binary needs neither Node nor external UI files. Cargo
+tracks bundle changes and requires a built `ui/dist/index.html` rather than
+shipping a placeholder. Rebuild the frontend after changing its source.
+
+The Rust `serve` command also serves the UI at `http://127.0.0.1:58000`.
+Configure literal IPv4/IPv6 bind addresses and a shared TCP port in `config.toml`:
+
+```toml
+[ui]
+hosts = ["127.0.0.1", "::1"]
+port = 58000
+```
+
+Use `hosts = ["0.0.0.0", "::"]` to bind all interfaces, or `hosts = []` to disable
+UI serving. Port zero and duplicate addresses are rejected. UI settings take
+effect after restarting; SIGHUP continues to reload policy. The Vite development
+server has separate settings in `ui/vite.config.ts`.
 
 ## Install on Ubuntu/systemd
 

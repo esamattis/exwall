@@ -4,6 +4,7 @@ import http.client
 import http.server
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import socket
@@ -224,7 +225,9 @@ def main():
         rules.mkdir()
         config = root / "config.toml"
         access_log = root / "access.log"
-        access_config = f"[access_log]\npath = {json.dumps(str(access_log))}\n"
+        ui_port = free_port()
+        access_config = (f"[access_log]\npath = {json.dumps(str(access_log))}\n"
+                         f"[ui]\nhosts = ['127.0.0.1', '::1']\nport = {ui_port}\n")
         config.write_text("block_dns = true\nmanage_resolv_conf = false\n" + access_config)
         rule_file = rules / "1-test.toml"
         rule_text = '''[[allow]]
@@ -290,6 +293,25 @@ stream = true
                         "empty-trust-dir")})
             try:
                 wait_for_ready(process, proxy_port)
+                wait_for_ready(process, ui_port)
+                for address in ("127.0.0.1", "::1"):
+                    connection = http.client.HTTPConnection(address, ui_port, timeout=3)
+                    connection.request("GET", "/")
+                    ui_response = connection.getresponse()
+                    assert ui_response.status == 200
+                    html = ui_response.read().decode()
+                    assert "<title>ramawall</title>" in html
+                    asset = re.search(r'src="([^"]+\.js)"', html).group(1)
+                    connection.request("GET", asset)
+                    ui_response = connection.getresponse()
+                    assert ui_response.status == 200
+                    assert ui_response.getheader("Content-Type").startswith("text/javascript")
+                    assert b"Hello world" in ui_response.read()
+                    connection.request("GET", "/assets/missing.js")
+                    ui_response = connection.getresponse()
+                    assert ui_response.status == 404
+                    ui_response.read()
+                    connection.close()
                 port = upstream.server_port
                 status, body = request_http(proxy_port, port, "/allowed?query=retained")
                 assert status == 200, (status, body)
