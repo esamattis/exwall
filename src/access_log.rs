@@ -189,6 +189,7 @@ fn field(value: &str) -> String {
 /// Cloneable mailbox used by handlers without awaiting filesystem operations.
 #[derive(Clone)]
 pub struct AccessLog {
+    pub domains: crate::domains::Domains,
     sender: mpsc::UnboundedSender<Entry>,
 }
 
@@ -200,14 +201,29 @@ impl AccessLog {
         let task = tokio::task::spawn_blocking(move || writer.run(receiver));
         Ok((
             Self {
+                domains: crate::domains::Domains::default(),
                 sender,
             },
             task,
         ))
     }
 
-    /// Queue every entry without disk access, backpressure waits, or capacity drops.
+    /// Update domain totals and queue every entry without disk access or capacity drops.
     pub fn record(&self, entry: Entry) {
+        if !matches!(entry.decision, Decision::Unevaluated) {
+            let allowed = matches!(entry.decision, Decision::Allow);
+            let urls: Vec<_> = match entry.protocol {
+                Protocol::Dns => entry.url.split(',').collect(),
+                Protocol::Http | Protocol::Https => vec![entry.url.as_str()],
+            };
+            for url in urls {
+                if let Ok(uri) = rama::net::uri::Uri::parse(url)
+                    && let Some(authority) = uri.authority()
+                {
+                    self.domains.record(&authority.host().to_string(), entry.protocol, allowed);
+                }
+            }
+        }
         if self.sender.send(entry).is_err() {
             tracing::error!("access-log actor is unavailable");
         }

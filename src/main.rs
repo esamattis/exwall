@@ -4,6 +4,7 @@ mod ca;
 mod command_log;
 mod config;
 mod dns;
+mod domains;
 mod error;
 mod firewall;
 mod hooks;
@@ -243,7 +244,12 @@ async fn serve(
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut http_task = tokio::spawn(proxy.serve(http));
     let mut dns_task = tokio::spawn(dns.serve(dns_udp, dns_tcp));
-    let ui_api = Arc::new(ui_api::Api::new(ui_config.clone(), rules_dir.clone(), policy.clone()));
+    let ui_api = Arc::new(ui_api::Api::new(
+        ui_config.clone(),
+        rules_dir.clone(),
+        policy.clone(),
+        access_log.domains.clone(),
+    ));
     let mut ui_task = tokio::spawn(ui::serve(
         ui_listeners,
         rama::rt::Executor::graceful(shutdown.guard()),

@@ -31,6 +31,7 @@ pub struct Api {
     directory: PathBuf,
     policy: SharedPolicy,
     lock: Mutex<()>,
+    domains: crate::domains::Domains,
 }
 
 /// Credentials accepted by the login endpoint.
@@ -67,11 +68,17 @@ struct RulesDocument {
 
 impl Api {
     /// Attach the UI's startup settings to the active policy and rules directory.
-    pub fn new(config: UiConfig, directory: PathBuf, policy: SharedPolicy) -> Self {
+    pub fn new(
+        config: UiConfig,
+        directory: PathBuf,
+        policy: SharedPolicy,
+        domains: crate::domains::Domains,
+    ) -> Self {
         Self {
             config,
             directory,
             policy,
+            domains,
             lock: Mutex::new(()),
         }
     }
@@ -168,6 +175,7 @@ impl Api {
                 );
                 Ok(response)
             }
+            (Method::GET, "/api/domains") => Ok(json(StatusCode::OK, &self.domains.snapshot())),
             (Method::GET, "/api/rules") => Ok(json(StatusCode::OK, &self.read_rules()?)),
             (Method::PUT, "/api/rules") => {
                 let draft: RulesDocument = match read_json(request).await {
@@ -482,6 +490,7 @@ mod tests {
             },
             directory.join("rules"),
             policy,
+            crate::domains::Domains::default(),
         )
     }
 

@@ -120,6 +120,14 @@ proxy account (`exwall` by default) with mode `0600`. The rules directory remain
 owned by root; the UI writes this file without needing permission to replace
 other rule files.
 
+The Domains page shows all domains encountered since startup, ordered by the
+latest update first. Use the Refresh button to update the table; it does not poll
+automatically. Each domain has separate DNS and HTTP allow/block totals;
+HTTP includes HTTPS. Only the counters and latest update timestamp are retained
+in memory, and they reset when exwall restarts. “Allow completely” saves an exact
+domain rule in `05-web.toml` with `methods = "ANY"` and no pathname restrictions,
+allowing DNS and every HTTP route and method.
+
 The rules page lists the allow tables in `05-web.toml` under the configured rules
 directory, with plain-text fields, boolean and method selectors, header rows, and add/remove controls.
 Enter one domain or pattern per line; quotes and TOML escaping are handled automatically.
@@ -130,7 +138,7 @@ picks up saves automatically; when `watch_rules = false`, the API explicitly rel
 all rule files into the active policy.
 
 REST endpoints accept either the session cookie or HTTP Basic credentials:
-`POST /api/login`, `GET /api/session`, `POST /api/logout`, and `GET`/`PUT /api/rules`.
+`POST /api/login`, `GET /api/session`, `POST /api/logout`, `GET /api/domains`, and `GET`/`PUT /api/rules`.
 Writes require `Content-Type: application/json`. `GET /api/rules` returns a
 `revision` and `rules` array; send that revision with edited rule fields to `PUT`. Field values are ordinary JSON
 strings, arrays, booleans, or header objects, rather than TOML literals.

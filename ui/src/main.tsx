@@ -79,7 +79,10 @@ function Layout() {
                     <Link to="/" className="text-xl font-semibold tracking-tight text-teal-400">
                         exwall
                     </Link>
-                    <span className="text-sm text-slate-400">Egress firewall</span>
+                    <nav className="flex gap-5 text-sm text-slate-400">
+                        <Link to="/">Rules</Link>
+                        <Link to="/domains">Domains</Link>
+                    </nav>
                 </div>
             </header>
             <main className="mx-auto max-w-5xl px-6 py-10">
@@ -560,6 +563,137 @@ function RulesPage() {
     );
 }
 
+/** Current counters for a domain, without individual request history. */
+interface DomainStats {
+    domain: string;
+    dns: { allow: number; block: number };
+    http: { allow: number; block: number };
+    last_updated: string;
+}
+
+/** Show every encountered domain, newest first, and save unrestricted allow rules. */
+function DomainsPage() {
+    const client = useQueryClient();
+    const domains = useQuery({
+        queryKey: ["domains"],
+        queryFn: () => api<DomainStats[]>("domains"),
+        refetchOnWindowFocus: false,
+        refetchOnReconnect: false,
+        retry: false,
+    });
+    const allow = useMutation({
+        mutationFn: async (domain: string) => {
+            const document = await api<RulesDocument>("rules");
+            if (
+                !document.rules.some(
+                    (rule) =>
+                        rule.fields.domain === domain &&
+                        rule.fields.methods === "ANY" &&
+                        rule.fields.pathname_pattern === undefined &&
+                        rule.fields.pathname_regex === undefined &&
+                        rule.fields.inject_headers === undefined,
+                )
+            ) {
+                document.rules.unshift({ index: null, fields: { domain, methods: "ANY" } });
+                return api<RulesDocument>("rules", "PUT", document);
+            }
+            return document;
+        },
+        onSuccess: async () => {
+            await client.invalidateQueries({ queryKey: ["rules"] });
+        },
+    });
+    return (
+        <section>
+            <div className="flex items-center justify-between gap-4">
+                <h1 className="text-3xl font-semibold">Domains</h1>
+                <button
+                    className="button"
+                    aria-label="Refresh domains"
+                    disabled={domains.isFetching}
+                    onClick={() => void domains.refetch()}
+                >
+                    {domains.isFetching ? "Refreshing…" : "Refresh"}
+                </button>
+            </div>
+            <p className="my-4 text-slate-400">
+                All domains seen since startup, with the latest update first. HTTP includes HTTPS.
+            </p>
+            {domains.isPending && <p role="status">Loading domains…</p>}
+            {domains.error instanceof ApiError && domains.error.status === 401 ? (
+                <Link className="button inline-block" to="/login">
+                    Sign in
+                </Link>
+            ) : (
+                domains.error && <p role="alert">{domains.error.message}</p>
+            )}
+            {allow.error && (
+                <p role="alert" className="mb-4 text-red-400">
+                    {allow.error.message}
+                </p>
+            )}
+            {allow.isSuccess && (
+                <p role="status" className="mb-4 text-teal-400">
+                    Domain allowed on all routes and methods.
+                </p>
+            )}
+            {domains.data?.length === 0 && <p>No domains seen yet.</p>}
+            {domains.data && domains.data.length > 0 && (
+                <div className="overflow-x-auto rounded-xl border border-slate-800">
+                    <table className="w-full text-left text-sm">
+                        <caption className="sr-only">Seen domains, latest update first</caption>
+                        <thead className="bg-slate-900 text-slate-400">
+                            <tr>
+                                {[
+                                    "Domain",
+                                    "DNS allow",
+                                    "DNS block",
+                                    "HTTP allow",
+                                    "HTTP block",
+                                    "Last update",
+                                    "Action",
+                                ].map((label) => (
+                                    <th key={label} className="p-3">
+                                        {label}
+                                    </th>
+                                ))}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {domains.data.map((entry) => (
+                                <tr key={entry.domain} className="border-t border-slate-800">
+                                    <th scope="row" className="p-3 font-medium">
+                                        {entry.domain}
+                                    </th>
+                                    <td className="p-3">{entry.dns.allow}</td>
+                                    <td className="p-3">{entry.dns.block}</td>
+                                    <td className="p-3">{entry.http.allow}</td>
+                                    <td className="p-3">{entry.http.block}</td>
+                                    <td className="p-3">
+                                        <time dateTime={entry.last_updated}>
+                                            {entry.last_updated}
+                                        </time>
+                                    </td>
+                                    <td className="p-3">
+                                        <button
+                                            className="button whitespace-nowrap"
+                                            aria-label={`Allow ${entry.domain} completely`}
+                                            disabled={allow.isPending}
+                                            onClick={() => allow.mutate(entry.domain)}
+                                        >
+                                            Allow completely
+                                        </button>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+        </section>
+    );
+}
+
 const rootRoute = createRootRoute({ component: Layout });
 const indexRoute = createRoute({
     getParentRoute: () => rootRoute,
@@ -571,7 +705,14 @@ const loginRoute = createRoute({
     path: "/login",
     component: LoginPage,
 });
-const router = createRouter({ routeTree: rootRoute.addChildren([indexRoute, loginRoute]) });
+const domainsRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/domains",
+    component: DomainsPage,
+});
+const router = createRouter({
+    routeTree: rootRoute.addChildren([indexRoute, loginRoute, domainsRoute]),
+});
 const queryClient = new QueryClient();
 
 declare module "@tanstack/react-router" {
