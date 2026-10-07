@@ -10,6 +10,9 @@ pub enum Error {
     /// A filesystem, socket, or subprocess operation failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// A filesystem watcher could not be initialized or registered.
+    #[error(transparent)]
+    Watch(#[from] notify::Error),
     /// TOML could not be deserialized into the supported configuration format.
     #[error(transparent)]
     Toml(#[from] toml::de::Error),

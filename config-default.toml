@@ -2,6 +2,11 @@
 # The default is "info".
 log_level = "info"
 
+# Automatically reload the rules directory when its TOML files change.
+# Invalid reloads keep the previous rules. SIGHUP applies changes to this option.
+# The default is true.
+watch_rules = true
+
 # When true, DNS queries must match allow rules. Set to false to let the addon
 # pass through all DNS queries while keeping the firewall redirection rules.
 # The default is true.

@@ -410,32 +410,46 @@ methods = ['GET']
                         assert query_dns(dns_port, "denied.test", tcp, ipv6) == 5
 
                 rule_file.write_text("")
+                deadline = time.monotonic() + 3
+                while request_http(proxy_port, port, "/allowed")[0] != 403:
+                    assert time.monotonic() < deadline
+                    time.sleep(0.05)
+                rule_file.write_text(rule_text)
+                deadline = time.monotonic() + 3
+                while request_http(proxy_port, port, "/allowed")[0] != 200:
+                    assert time.monotonic() < deadline
+                    time.sleep(0.05)
+                rule_file.write_text("[[allow]]\nunknown = true\n")
+                time.sleep(0.3)
+                assert request_http(proxy_port, port, "/allowed")[0] == 200
+
+                rule_file.write_text(rule_text)
+                config.write_text("watch_rules = false\nblock_dns = false\nmanage_resolv_conf = false\n" + access_config)
+                process.send_signal(signal.SIGHUP)
+                deadline = time.monotonic() + 3
+                while query_dns(dns_port, "denied.test") != 0:
+                    assert time.monotonic() < deadline
+                    time.sleep(0.05)
+
+                rule_file.write_text("")
+                time.sleep(0.3)
+                assert request_http(proxy_port, port, "/allowed")[0] == 200
+                config.write_text("watch_rules = true\nblock_dns = false\nmanage_resolv_conf = false\n" + access_config)
                 process.send_signal(signal.SIGHUP)
                 deadline = time.monotonic() + 3
                 while request_http(proxy_port, port, "/allowed")[0] != 403:
                     assert time.monotonic() < deadline
                     time.sleep(0.05)
                 rule_file.write_text(rule_text)
-                process.send_signal(signal.SIGHUP)
                 deadline = time.monotonic() + 3
                 while request_http(proxy_port, port, "/allowed")[0] != 200:
-                    assert time.monotonic() < deadline
-                    time.sleep(0.05)
-                rule_file.write_text("[[allow]]\nunknown = true\n")
-                process.send_signal(signal.SIGHUP)
-                time.sleep(0.1)
-                assert request_http(proxy_port, port, "/allowed")[0] == 200
-
-                rule_file.write_text(rule_text)
-                config.write_text("block_dns = false\nmanage_resolv_conf = false\n" + access_config)
-                process.send_signal(signal.SIGHUP)
-                deadline = time.monotonic() + 3
-                while query_dns(dns_port, "denied.test") != 0:
                     assert time.monotonic() < deadline
                     time.sleep(0.05)
                 process.terminate()
                 assert process.wait(timeout=15) == 0
                 application_log = log.read_text()
+                assert "automatically reloaded rules" in application_log, application_log
+                assert "rule reload rejected; keeping previous policy" in application_log, application_log
                 for message in ("allowed HTTP request", "blocked HTTP request", "blocked DNS request",
                                 "rule regex evaluation failed"):
                     assert message not in application_log, application_log

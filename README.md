@@ -222,6 +222,12 @@ ramawall hook --dry-run start
 ramawall hook --dry-run stop
 ```
 
+Changes to `rules.d/*.toml` automatically reload the complete ruleset after a short
+debounce, including file creation, removal, and atomic replacement. Invalid rules
+or an unavailable rules directory keep the previous rules active; fixing the files
+triggers another reload. Automatic rule reloads preserve the current configuration.
+Monitoring is enabled by default. Set `watch_rules = false` in `config.toml` to
+disable it; SIGHUP applies changes to this option without restarting the service.
 SIGHUP reloads the config and complete ruleset atomically. Invalid reloads keep the
 previous policy. Restart to apply changes to firewall bypasses, resolver
 management, application log level, or access-log settings. Set `log_level = "debug"`

@@ -204,16 +204,24 @@ impl RuleSet {
 
     /// Load all TOML rule files in alphabetical filename order.
     pub fn load(directory: &Path) -> Result<Self> {
-        let mut files = match fs::read_dir(directory) {
-            Ok(files) => files.collect::<std::io::Result<Vec<_>>>()?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(e.into()),
-        };
+        match Self::load_existing(directory) {
+            Err(crate::error::Error::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound && !directory.exists() =>
+            {
+                Ok(Self::default())
+            }
+            result => result,
+        }
+    }
+
+    /// Load a complete ruleset, rejecting an unavailable directory during a reload.
+    pub fn load_existing(directory: &Path) -> Result<Self> {
+        let mut files = fs::read_dir(directory)?.collect::<std::io::Result<Vec<_>>>()?;
         files.sort_by_key(|f| f.file_name());
         let mut rules = Vec::new();
         for file in files {
             let path = file.path();
-            if path.extension().is_some_and(|s| s == "toml") && path.is_file() {
+            if path.extension().is_some_and(|s| s == "toml") && fs::metadata(&path)?.is_file() {
                 rules.extend(
                     Self::parse(&fs::read_to_string(&path)?, &path.display().to_string())?.rules,
                 );

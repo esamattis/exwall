@@ -10,6 +10,7 @@ mod hooks;
 mod pathname;
 mod proxy;
 mod rules;
+mod rules_watch;
 mod state;
 mod udp;
 mod ui;
@@ -190,7 +191,7 @@ fn udp_listener(address: SocketAddr) -> Result<UdpSocket> {
     Ok(UdpSocket::from_std(socket.into())?)
 }
 
-/// Run all listeners and atomically reload policy on SIGHUP.
+/// Run listeners, watch rule changes, and atomically reload the full policy on SIGHUP.
 async fn serve(
     config_path: PathBuf,
     rules_dir: PathBuf,
@@ -208,6 +209,11 @@ async fn serve(
     let access_log_config = config.access_log.clone();
     let ui_config = config.ui.clone();
     init_logging(config.tracing_level());
+    let mut rules_watcher = if config.watch_rules {
+        Some(rules_watch::RulesWatcher::new(&rules_dir)?)
+    } else {
+        None
+    };
     let policy = Arc::new(arc_swap::ArcSwap::from_pointee(state::Policy {
         config,
         rules: rules::RuleSet::load(&rules_dir)?,
@@ -259,10 +265,38 @@ async fn serve(
             }
             _ = terminate.recv() => break Ok(()),
             _ = interrupt.recv() => break Ok(()),
+            _ = async {
+                match rules_watcher.as_mut() {
+                    Some(watcher) => watcher.changed().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                let Some(watcher) = rules_watcher.as_ref() else {
+                    continue;
+                };
+                match watcher.reload(&policy) {
+                    Ok(()) => tracing::info!(
+                        rules = policy.load().rules.rules.len(),
+                        "automatically reloaded rules"
+                    ),
+                    Err(error) => tracing::error!(%error, "rule reload rejected; keeping previous policy"),
+                }
+            }
             _ = hangup.recv() => {
                 let reloaded = load_policy(&config_path, &rules_dir);
                 match reloaded {
                     Ok(new_policy) => {
+                        if new_policy.config.watch_rules && rules_watcher.is_none() {
+                            match rules_watch::RulesWatcher::new(&rules_dir) {
+                                Ok(watcher) => rules_watcher = Some(watcher),
+                                Err(error) => {
+                                    tracing::error!(%error, "reload rejected; keeping previous policy");
+                                    continue;
+                                }
+                            }
+                        } else if !new_policy.config.watch_rules {
+                            rules_watcher = None;
+                        }
                         tracing::info!(
                             rules = new_policy.rules.rules.len(),
                             "reloaded policy; restart service to apply firewall/resolver/log-level/access-log/UI changes"
@@ -308,6 +342,6 @@ fn load_policy(
 ) -> Result<state::Policy> {
     Ok(state::Policy {
         config: config::Config::load(config_path)?,
-        rules: rules::RuleSet::load(rules_dir)?,
+        rules: rules::RuleSet::load_existing(rules_dir)?,
     })
 }

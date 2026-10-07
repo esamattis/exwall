@@ -12,6 +12,8 @@ pub struct Config {
     pub log_level: String,
     pub access_log: AccessLogConfig,
     pub ui: UiConfig,
+    /// Automatically reload validated rules when the rules directory changes.
+    pub watch_rules: bool,
     pub block_dns: bool,
     pub manage_resolv_conf: bool,
     pub flow_history_clear_interval: u64,
@@ -27,6 +29,7 @@ impl Default for Config {
             log_level: "info".into(),
             access_log: AccessLogConfig::default(),
             ui: UiConfig::default(),
+            watch_rules: true,
             block_dns: true,
             manage_resolv_conf: true,
             flow_history_clear_interval: 1000,
@@ -181,6 +184,9 @@ mod tests {
         assert_eq!(config.bypass_users, ["root", "_apt"]);
         assert_eq!(config.access_log, AccessLogConfig::default());
         assert_eq!(config.ui, UiConfig::default());
+        assert!(config.watch_rules);
+        assert!(Config::parse("").unwrap().watch_rules);
+        assert!(!Config::parse("watch_rules = false").unwrap().watch_rules);
         let config =
             Config::parse("[[iptables.bypass]]\nnetwork = '192.168.5.19/24'\nport = 1234").unwrap();
         assert_eq!(config.iptables.bypass[0].network.to_string(), "192.168.5.0/24");
@@ -188,6 +194,7 @@ mod tests {
         assert_eq!(config.iptables.bypass[0].network.to_string(), "::1/128");
         for text in [
             "block_dns = 1",
+            "watch_rules = 1",
             "[ui]\nport = 0",
             "[ui]\nport = 65536",
             "[ui]\nhosts = ['localhost']",
