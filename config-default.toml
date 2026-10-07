@@ -1,0 +1,37 @@
+# Available log_level values: "debug", "info", "warning", "error", "critical".
+# The default is "info".
+log_level = "info"
+
+# When true, DNS queries must match allow rules. Set to false to let the addon
+# pass through all DNS queries while keeping the firewall redirection rules.
+# The default is true.
+block_dns = true
+
+# Replace PVE-managed upstream nameservers in /etc/resolv.conf with
+# systemd-resolved's loopback stub while mitmwall runs. Disable this when the
+# system resolver configuration cannot or should not be replaced.
+# The default is true.
+manage_resolv_conf = true
+
+# Compatibility setting: ramawall validates this but stores no flow history.
+# The default is 1000.
+flow_history_clear_interval = 1000
+
+# Compatibility setting: ramawall validates this but stores no flow history.
+# The default is 500. If trimming fails, mitmwall falls back to clearing all
+# flow history entries.
+flow_history_keep_entries = 500
+
+# Existing local users that may connect directly to any network destination
+# without passing through mitmwall. Root is included for host administration and
+# troubleshooting. APT's _apt sandbox user is included so root-invoked package
+# downloads retain their normal privilege separation. Remove either account to
+# subject its traffic to mitmwall's proxy and outbound firewall policy.
+bypass_users = ["root", "_apt"]
+
+# Custom iptables bypass rules. Allow some IP ranges or ports to bypass the
+# firewall and proxy. Bypassed traffic will not be visible in mitmweb and will
+# not be subject to the addon rules.
+# [[iptables.bypass]]
+# network = "192.168.5.0/24"
+# port = 1234

@@ -1,0 +1,23 @@
+[Unit]
+Description=Rama transparent HTTP(S) and DNS egress firewall
+Wants=network-online.target
+After=network-online.target systemd-resolved.service
+BindsTo=systemd-resolved.service
+PartOf=systemd-resolved.service
+
+[Service]
+Type=simple
+User=ramawall
+Group=ramawall
+ExecStartPre=/usr/local/bin/ramawall check
+ExecStartPre=+/usr/local/bin/ramawall hook start
+ExecStart=/usr/local/bin/ramawall serve
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStopPost=+/usr/local/bin/ramawall hook stop
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

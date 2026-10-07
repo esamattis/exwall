@@ -1,0 +1,27 @@
+[package]
+name = "ramawall"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "TOML-driven transparent HTTP(S) and DNS egress firewall using Rama"
+license = "MIT"
+
+[dependencies]
+arc-swap = "1"
+clap = { version = "4", features = ["derive"] }
+fancy-regex = "0.17"
+hickory-proto = "0.25"
+ipnet = { version = "2", features = ["serde"] }
+libc = "0.2"
+rama = { version = "=0.4.0", features = ["http-full", "tcp", "rustls", "ring"] }
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+socket2 = "0.6"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
