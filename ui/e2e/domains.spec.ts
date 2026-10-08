@@ -18,6 +18,8 @@ interface DomainStats {
     dns: { allow: number; block: number };
     http: { allow: number; block: number };
     last_updated: string;
+    last_allowed: string | null;
+    last_denied: string | null;
 }
 
 test("domains refresh manually without polling, aggregate decisions, and allow every route and method", async ({
@@ -55,7 +57,8 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
     await page.getByLabel("Password", { exact: true }).fill("integration-password");
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page.getByRole("link", { name: "Domains", exact: true }).click();
-    await expect(page.getByText("No domains seen yet.")).toBeVisible();
+    await expect(page.getByText("No domain allows yet.")).toBeVisible();
+    await expect(page.getByText("No domain denials yet.")).toBeVisible();
 
     expect(await queryDns("127.0.0.1", fixture.dnsPort, "LOCALHOST")).toBe(0);
     expect(await queryDns("127.0.0.1", fixture.dnsPort, "denied.test")).toBe(5);
@@ -79,18 +82,24 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
             dns: { allow: 0, block: 2 },
             http: { allow: 0, block: 0 },
             last_updated: expect.any(String),
+            last_allowed: null,
+            last_denied: expect.any(String),
         },
         {
             domain: "localhost",
             dns: { allow: 1, block: 0 },
             http: { allow: 1, block: 1 },
             last_updated: expect.any(String),
+            last_allowed: expect.any(String),
+            last_denied: expect.any(String),
         },
         {
             domain: "127.0.0.1",
             dns: { allow: 0, block: 0 },
             http: { allow: 1, block: 1 },
             last_updated: expect.any(String),
+            last_allowed: expect.any(String),
+            last_denied: expect.any(String),
         },
     ]);
     for (const entry of before) {
@@ -98,21 +107,35 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
     }
     // Traffic and elapsed time must not update the page without a refresh.
     await page.clock.runFor(3000);
-    await expect(page.getByText("No domains seen yet.")).toBeVisible();
+    await expect(page.getByText("No domain allows yet.")).toBeVisible();
+    await expect(page.getByText("No domain denials yet.")).toBeVisible();
     expect(domainRequests).toBe(1);
     await page.getByRole("button", { name: "Refresh domains", exact: true }).click();
     const rows = page
-        .getByRole("table", { name: "Seen domains, latest update first" })
+        .getByRole("table", { name: "Domain denials, latest outcome first" })
         .locator("tbody tr");
     await expect(rows).toHaveCount(3);
     await expect(rows.nth(0).getByRole("rowheader")).toHaveText("denied.test");
     const denied = rows.filter({
         has: page.getByRole("rowheader", { name: "denied.test", exact: true }),
     });
-    await expect(denied.getByRole("cell").nth(1)).toHaveText("2");
+    await expect(denied.getByRole("cell").nth(0)).toHaveText("2");
+    await expect(denied.getByRole("cell").nth(1)).toHaveText("0");
+    await expect(denied.getByRole("cell").nth(2)).toHaveText("2");
+    const allowedRows = page
+        .getByRole("table", { name: "Domain allows, latest outcome first" })
+        .locator("tbody tr");
+    await expect(allowedRows).toHaveCount(2);
+    await expect(allowedRows.getByRole("rowheader")).toHaveText(["localhost", "127.0.0.1"]);
+    await expect(allowedRows.nth(0).getByRole("cell").nth(0)).toHaveText("1");
+    await expect(allowedRows.nth(0).getByRole("cell").nth(1)).toHaveText("1");
+    await expect(allowedRows.nth(0).getByRole("cell").nth(2)).toHaveText("2");
     await expect(denied.locator("time")).toHaveAttribute("datetime", before[0]!.last_updated);
 
-    await page.getByRole("button", { name: "Allow 127.0.0.1 completely", exact: true }).click();
+    await page
+        .getByRole("region", { name: "Domain denials", exact: true })
+        .getByRole("button", { name: "Allow 127.0.0.1 completely", exact: true })
+        .click();
     await expect(page.getByRole("status")).toHaveText("Domain allowed on all routes and methods.");
     const persisted = await readFile(join(fixture.rules, "05-web.toml"), "utf8");
     expect(persisted).toContain('domain = "127.0.0.1"');
@@ -132,20 +155,29 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
     await expect(rows.nth(0).getByRole("rowheader")).toHaveText("denied.test");
     expect(domainRequests).toBe(2);
     await page.getByRole("button", { name: "Refresh domains", exact: true }).click();
-    await expect(rows.nth(0).getByRole("rowheader")).toHaveText("127.0.0.1");
-    await expect(rows.nth(0).getByRole("cell").nth(2)).toHaveText("4");
+    await expect(allowedRows.nth(0).getByRole("rowheader")).toHaveText("127.0.0.1");
+    await expect(allowedRows.nth(0).getByRole("cell").nth(1)).toHaveText("4");
+    await expect(rows.getByRole("rowheader")).toHaveText(["denied.test", "localhost", "127.0.0.1"]);
+    await expect(rows.nth(2).locator("time")).toHaveAttribute("datetime", before[2]!.last_denied!);
     const after = await snapshot();
     expect(after[0]!.http).toEqual({ allow: 4, block: 1 });
+    expect(after[0]!.last_denied).toBe(before[2]!.last_denied);
+    expect(after[0]!.last_allowed).toBe(after[0]!.last_updated);
     expect(Date.parse(after[0]!.last_updated)).toBeGreaterThan(Date.parse(before[2]!.last_updated));
     expect(after.find((entry) => entry.domain === "denied.test")).toEqual(before[0]);
-    await page.getByRole("button", { name: "Allow 127.0.0.1 completely", exact: true }).click();
+    await page
+        .getByRole("region", { name: "Domain denials", exact: true })
+        .getByRole("button", { name: "Allow 127.0.0.1 completely", exact: true })
+        .click();
     await expect(
-        page.getByRole("button", { name: "Allow 127.0.0.1 completely", exact: true }),
+        page
+            .getByRole("region", { name: "Domain denials", exact: true })
+            .getByRole("button", { name: "Allow 127.0.0.1 completely", exact: true }),
     ).toBeEnabled();
     expect(await readFile(join(fixture.rules, "05-web.toml"), "utf8")).toBe(persisted);
     await page.reload();
     await expect(rows).toHaveCount(3);
-    await expect(rows.nth(0).getByRole("cell").nth(2)).toHaveText("4");
+    await expect(allowedRows.nth(0).getByRole("cell").nth(1)).toHaveText("4");
 });
 
 firewallTest(
@@ -173,7 +205,10 @@ firewallTest(
         };
         /** Wait for a button's save to finish before checking persisted and active policy. */
         const allow = async (name: string, message: string) => {
-            await page.getByRole("button", { name, exact: true }).click();
+            await page
+                .getByRole("region", { name: "Domain denials", exact: true })
+                .getByRole("button", { name, exact: true })
+                .click();
             await expect(page.getByRole("status")).toHaveText(message);
         };
         await expect.poll(() => dns("openai.com")).toEqual({ result: 5 });
@@ -231,7 +266,9 @@ firewallTest(
         expect(await fixtureRules()).toBe(withSubdomains);
         await page.reload();
         await expect(
-            page.getByRole("button", { name: "Allow openai.com with subdomains", exact: true }),
+            page
+                .getByRole("region", { name: "Domain denials", exact: true })
+                .getByRole("button", { name: "Allow openai.com with subdomains", exact: true }),
         ).toBeVisible();
         expect(await http("api.openai.com", "https", "DELETE")).toBe(200);
     },
@@ -357,6 +394,8 @@ test("HTTP allow actions remove only fully covered DNS-only rules, including dup
                     dns: { allow: 0, block: 1 },
                     http: { allow: 0, block: 1 },
                     last_updated: new Date().toISOString(),
+                    last_allowed: null,
+                    last_denied: new Date().toISOString(),
                 },
             ],
         }),

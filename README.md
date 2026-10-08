@@ -124,11 +124,13 @@ proxy account (`exwall` by default) with mode `0600`. The rules directory remain
 owned by root; the UI writes this file without needing permission to replace
 other rule files.
 
-The Domains page shows all domains encountered since startup, ordered by the
-latest update first. Use the Refresh button to update the table; it does not poll
-automatically. Each domain has separate DNS and HTTP allow/block totals;
-HTTP includes HTTPS. Only the counters and latest update timestamp are retained
-in memory, and they reset when exwall restarts. “Allow completely” saves an exact
+The Domains page shows separate allows and denials tables for domains encountered
+since startup. Each table has DNS, HTTP, and total counts and is ordered by the
+latest occurrence of its own outcome. Domains with both outcomes appear in both
+tables; new allows do not change a domain's last denial time or vice versa.
+Use the Refresh button to update both tables; they do not poll automatically.
+HTTP includes HTTPS. Counters and the latest timestamps are retained in memory
+and reset when exwall restarts. “Allow completely” saves an exact
 domain rule in `05-web.toml` with `methods = "ANY"` and no pathname restrictions,
 allowing DNS and every HTTP route and method. “Allow DNS only” instead saves
 `dns_only = true`, allowing DNS queries without authorizing HTTP, HTTPS, or CONNECT.

@@ -588,6 +588,8 @@ interface DomainStats {
     dns: { allow: number; block: number };
     http: { allow: number; block: number };
     last_updated: string;
+    last_allowed: string | null;
+    last_denied: string | null;
 }
 
 /** One retained policy denial, with the exact pathname and no query string. */
@@ -774,6 +776,131 @@ function HttpDenialsTable() {
     );
 }
 
+/** Parameters shared by domain allowance actions in either outcome table. */
+interface DomainAllowance {
+    domain: string;
+    dnsOnly: boolean;
+    includeSubdomains?: boolean;
+}
+
+/** Show only one policy outcome, ordered by its own latest occurrence. */
+function DomainOutcomesTable({
+    domains,
+    outcome,
+    isPending,
+    onAllow,
+}: {
+    domains: DomainStats[];
+    outcome: "allow" | "block";
+    isPending: boolean;
+    onAllow: (allowance: DomainAllowance) => void;
+}) {
+    const title = outcome === "allow" ? "Domain allows" : "Domain denials";
+    const entries = domains.flatMap((entry) => {
+        const timestamp = outcome === "allow" ? entry.last_allowed : entry.last_denied;
+        return timestamp === null ? [] : [{ entry, timestamp }];
+    });
+    // The API emits UTC timestamps; omit Z so fractional seconds sort after whole seconds.
+    entries.sort(
+        (left, right) =>
+            right.timestamp.slice(0, -1).localeCompare(left.timestamp.slice(0, -1)) ||
+            left.entry.domain.localeCompare(right.entry.domain),
+    );
+    return (
+        <section aria-labelledby={`domain-${outcome}-heading`} className="mt-8">
+            <h2 id={`domain-${outcome}-heading`} className="mb-4 text-2xl font-semibold">
+                {title}
+            </h2>
+            {entries.length === 0 ? (
+                <p>{outcome === "allow" ? "No domain allows yet." : "No domain denials yet."}</p>
+            ) : (
+                <div className="overflow-x-auto rounded-xl border border-slate-800">
+                    <table className="w-full text-left text-sm">
+                        <caption className="sr-only">{title}, latest outcome first</caption>
+                        <thead className="bg-slate-900 text-slate-400">
+                            <tr>
+                                {[
+                                    "Domain",
+                                    "DNS",
+                                    "HTTP",
+                                    "Total",
+                                    outcome === "allow" ? "Last allowed" : "Last denied",
+                                    "Action",
+                                ].map((label) => (
+                                    <th key={label} className="p-3">
+                                        {label}
+                                    </th>
+                                ))}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {entries.map(({ entry, timestamp }) => (
+                                <tr key={entry.domain} className="border-t border-slate-800">
+                                    <th scope="row" className="p-3 font-medium">
+                                        {entry.domain}
+                                    </th>
+                                    <td className="p-3">{entry.dns[outcome]}</td>
+                                    <td className="p-3">{entry.http[outcome]}</td>
+                                    <td className="p-3">
+                                        {entry.dns[outcome] + entry.http[outcome]}
+                                    </td>
+                                    <td className="p-3">
+                                        <time dateTime={timestamp}>{timestamp}</time>
+                                    </td>
+                                    <td className="p-3">
+                                        <div className="flex gap-2">
+                                            <button
+                                                className="button whitespace-nowrap"
+                                                aria-label={`Allow ${entry.domain} completely`}
+                                                disabled={isPending}
+                                                onClick={() =>
+                                                    onAllow({
+                                                        domain: entry.domain,
+                                                        dnsOnly: false,
+                                                    })
+                                                }
+                                            >
+                                                Allow completely
+                                            </button>
+                                            <button
+                                                className="button whitespace-nowrap"
+                                                aria-label={`Allow ${entry.domain} DNS only`}
+                                                disabled={isPending}
+                                                onClick={() =>
+                                                    onAllow({
+                                                        domain: entry.domain,
+                                                        dnsOnly: true,
+                                                    })
+                                                }
+                                            >
+                                                Allow DNS only
+                                            </button>
+                                            <button
+                                                className="button whitespace-nowrap"
+                                                aria-label={`Allow ${entry.domain} with subdomains`}
+                                                disabled={isPending}
+                                                onClick={() =>
+                                                    onAllow({
+                                                        domain: entry.domain,
+                                                        dnsOnly: false,
+                                                        includeSubdomains: true,
+                                                    })
+                                                }
+                                            >
+                                                Allow with subdomains
+                                            </button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+        </section>
+    );
+}
+
 /** Show seen domains and allow an exact domain, DNS only, or a domain with subdomains. */
 function DomainsPage() {
     const client = useQueryClient();
@@ -785,15 +912,7 @@ function DomainsPage() {
         retry: false,
     });
     const allow = useMutation({
-        mutationFn: async ({
-            domain,
-            dnsOnly,
-            includeSubdomains = false,
-        }: {
-            domain: string;
-            dnsOnly: boolean;
-            includeSubdomains?: boolean;
-        }) => {
+        mutationFn: async ({ domain, dnsOnly, includeSubdomains = false }: DomainAllowance) => {
             const document = await api<RulesDocument>("rules");
             let changed = !dnsOnly && removeCoveredDnsRules(document, domain, includeSubdomains);
             if (
@@ -845,7 +964,8 @@ function DomainsPage() {
                 </button>
             </div>
             <p className="my-4 text-slate-400">
-                All domains seen since startup, with the latest update first. HTTP includes HTTPS.
+                Allows and denials since startup, each ordered by its latest occurrence. A domain
+                can appear in both tables. HTTP includes HTTPS.
             </p>
             {domains.isPending && <p role="status">Loading domains…</p>}
             {domains.error instanceof ApiError && domains.error.status === 401 ? (
@@ -865,92 +985,21 @@ function DomainsPage() {
                     {successMessage}
                 </p>
             )}
-            {domains.data?.length === 0 && <p>No domains seen yet.</p>}
-            {domains.data && domains.data.length > 0 && (
-                <div className="overflow-x-auto rounded-xl border border-slate-800">
-                    <table className="w-full text-left text-sm">
-                        <caption className="sr-only">Seen domains, latest update first</caption>
-                        <thead className="bg-slate-900 text-slate-400">
-                            <tr>
-                                {[
-                                    "Domain",
-                                    "DNS allow",
-                                    "DNS block",
-                                    "HTTP allow",
-                                    "HTTP block",
-                                    "Last update",
-                                    "Action",
-                                ].map((label) => (
-                                    <th key={label} className="p-3">
-                                        {label}
-                                    </th>
-                                ))}
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {domains.data.map((entry) => (
-                                <tr key={entry.domain} className="border-t border-slate-800">
-                                    <th scope="row" className="p-3 font-medium">
-                                        {entry.domain}
-                                    </th>
-                                    <td className="p-3">{entry.dns.allow}</td>
-                                    <td className="p-3">{entry.dns.block}</td>
-                                    <td className="p-3">{entry.http.allow}</td>
-                                    <td className="p-3">{entry.http.block}</td>
-                                    <td className="p-3">
-                                        <time dateTime={entry.last_updated}>
-                                            {entry.last_updated}
-                                        </time>
-                                    </td>
-                                    <td className="p-3">
-                                        <div className="flex gap-2">
-                                            <button
-                                                className="button whitespace-nowrap"
-                                                aria-label={`Allow ${entry.domain} completely`}
-                                                disabled={allow.isPending}
-                                                onClick={() =>
-                                                    allow.mutate({
-                                                        domain: entry.domain,
-                                                        dnsOnly: false,
-                                                    })
-                                                }
-                                            >
-                                                Allow completely
-                                            </button>
-                                            <button
-                                                className="button whitespace-nowrap"
-                                                aria-label={`Allow ${entry.domain} DNS only`}
-                                                disabled={allow.isPending}
-                                                onClick={() =>
-                                                    allow.mutate({
-                                                        domain: entry.domain,
-                                                        dnsOnly: true,
-                                                    })
-                                                }
-                                            >
-                                                Allow DNS only
-                                            </button>
-                                            <button
-                                                className="button whitespace-nowrap"
-                                                aria-label={`Allow ${entry.domain} with subdomains`}
-                                                disabled={allow.isPending}
-                                                onClick={() =>
-                                                    allow.mutate({
-                                                        domain: entry.domain,
-                                                        dnsOnly: false,
-                                                        includeSubdomains: true,
-                                                    })
-                                                }
-                                            >
-                                                Allow with subdomains
-                                            </button>
-                                        </div>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
+            {domains.data && (
+                <>
+                    <DomainOutcomesTable
+                        domains={domains.data}
+                        outcome="block"
+                        isPending={allow.isPending}
+                        onAllow={allow.mutate}
+                    />
+                    <DomainOutcomesTable
+                        domains={domains.data}
+                        outcome="allow"
+                        isPending={allow.isPending}
+                        onAllow={allow.mutate}
+                    />
+                </>
             )}
             <HttpDenialsTable />
         </section>

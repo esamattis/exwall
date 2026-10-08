@@ -19,6 +19,10 @@ pub struct Domain {
     pub domain: String,
     pub dns: Counts,
     pub http: Counts,
+    #[serde(serialize_with = "serialize_optional_timestamp")]
+    pub last_allowed: Option<jiff::Timestamp>,
+    #[serde(serialize_with = "serialize_optional_timestamp")]
+    pub last_denied: Option<jiff::Timestamp>,
     #[serde(serialize_with = "serialize_timestamp")]
     pub last_updated: jiff::Timestamp,
 }
@@ -41,7 +45,7 @@ pub struct Domains {
 }
 
 impl Domains {
-    /// Increment a policy outcome and replace only the latest update timestamp.
+    /// Increment a policy outcome and update its timestamp independently of the other outcome.
     pub fn record(&self, host: &str, protocol: Protocol, allowed: bool) {
         let host = normalize_host(host.trim_matches(['[', ']']));
         if host.is_empty() {
@@ -52,18 +56,23 @@ impl Domains {
             domain: host,
             dns: Counts::default(),
             http: Counts::default(),
+            last_allowed: None,
+            last_denied: None,
             last_updated: jiff::Timestamp::now(),
         });
         let counts = match protocol {
             Protocol::Dns => &mut entry.dns,
             Protocol::Http | Protocol::Https => &mut entry.http,
         };
+        let timestamp = jiff::Timestamp::now();
         if allowed {
             counts.allow += 1;
+            entry.last_allowed = Some(timestamp);
         } else {
             counts.block += 1;
+            entry.last_denied = Some(timestamp);
         }
-        entry.last_updated = jiff::Timestamp::now();
+        entry.last_updated = timestamp;
     }
 
     /// Retain the latest 100 denied requests without writing request history to disk.
@@ -104,9 +113,48 @@ fn serialize_timestamp<S: serde::Serializer>(
     serializer.collect_str(timestamp)
 }
 
+/// Encode an outcome's latest timestamp as RFC 3339, or null when it has never occurred.
+fn serialize_optional_timestamp<S: serde::Serializer>(
+    timestamp: &Option<jiff::Timestamp>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    timestamp.map(|value| value.to_string()).serialize(serializer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Keep allow and denial timestamps independent across normalized hosts and protocols.
+    #[test]
+    fn tracks_outcomes_independently() {
+        let domains = Domains::default();
+        domains.record("Example.COM.", Protocol::Dns, true);
+        let allowed = domains.snapshot().remove(0);
+        assert_eq!(allowed.last_allowed, Some(allowed.last_updated));
+        assert_eq!(allowed.last_denied, None);
+        let serialized = serde_json::to_value(&allowed).unwrap();
+        assert_eq!(serialized["last_allowed"], allowed.last_updated.to_string());
+        assert!(serialized["last_denied"].is_null());
+
+        domains.record("example.com", Protocol::Https, false);
+        let denied = domains.snapshot().remove(0);
+        assert_eq!(denied.last_allowed, allowed.last_allowed);
+        assert_eq!(denied.last_denied, Some(denied.last_updated));
+        domains.record("EXAMPLE.COM", Protocol::Http, true);
+        let latest = domains.snapshot().remove(0);
+        assert_eq!(latest.last_denied, denied.last_denied);
+        assert_eq!(latest.last_allowed, Some(latest.last_updated));
+        assert_eq!(latest.dns.allow, 1);
+        assert_eq!(latest.dns.block, 0);
+        assert_eq!(latest.http.allow, 1);
+        assert_eq!(latest.http.block, 1);
+
+        domains.record("denied.test", Protocol::Dns, false);
+        let only_denied = domains.snapshot().remove(0);
+        assert_eq!(only_denied.last_allowed, None);
+        assert_eq!(only_denied.last_denied, Some(only_denied.last_updated));
+    }
 
     /// Evict only the oldest denials while retaining repeats and immutable snapshots.
     #[test]
