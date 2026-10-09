@@ -145,9 +145,12 @@ directory, with plain-text fields, boolean and method selectors, header rows, an
 Enter one domain or pattern per line; quotes and TOML escaping are handled automatically.
 Saving uses `toml_edit` to retain unchanged formatting and comments, validates the
 rules, and writes the service-owned file. Concurrent file edits return a conflict;
-reload the file before retrying. Other TOML rule files are unaffected. The watcher
-picks up saves automatically; when `watch_rules = false`, the API explicitly reloads
-all rule files into the active policy.
+reload the file before retrying. Other TOML rule files are unaffected. Every save
+reloads the complete ruleset before responding, whether or not `watch_rules` is
+enabled, so a successful save is already enforced. If another rule file is invalid,
+the save is still written but the previous policy stays active: the API returns
+HTTP 500 saying the rules could not be activated, and the saved rules take effect
+once the complete ruleset loads again.
 
 A separate HTTP denials table keeps the latest 100 denied HTTP/HTTPS requests
 in memory, newest first, including repeated requests. Refresh it manually.
@@ -315,6 +318,12 @@ in the TOML config to log all executed firewall and related hook commands with
 their arguments. Both the service and hooks use the configured level; `RUST_LOG`
 does not override it. Hooks fall back to `info` if configuration cannot be loaded,
 so invalid configuration never prevents guarding or cleanup.
+SIGHUPs received while a reload is pending are merged into it rather than dropped.
+
+`--dry-run` never runs commands or changes files, sysctls, or the resolver. It
+prints the iptables commands a hook would execute against a simulated firewall:
+`guard` and `start` begin from empty exwall chains, and `stop` assumes installed
+chains, so it shows their removal. Account lookups read the account database directly.
 
 Application logs still go to stdout and the systemd journal. Independently of
 `log_level`, access logs record every HTTP(S) request handled by the proxy and
@@ -372,8 +381,9 @@ by commas. Full HTTP URLs include query strings. Whitespace, control characters,
 and percent signs in fields are percent-escaped to prevent injected log lines;
 headers and bodies are not logged.
 
-The file is owned by a logging actor that receives entries through a mailbox.
-Request handlers never wait for file writes or trimming. Shutdown drains the
+The file is owned by a logging actor that receives entries through an unbounded
+mailbox. Request handlers never wait for file writes or trimming, and entries are
+never dropped for lack of queue capacity. Shutdown drains the
 mailbox and writes the pending batch immediately. An access-log I/O failure fails
 the service instead of silently discarding subsequent logs. The following settings
 are configurable in `config.toml` and take effect after a restart:

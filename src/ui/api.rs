@@ -27,6 +27,9 @@ const BODY_LIMIT: usize = 1024 * 1024;
 pub const CLEAR_COOKIE: &str = "exwall_session=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0";
 /// The message shown when the file changed underneath an edit.
 const CONFLICT_MESSAGE: &str = "05-web.toml changed. Reload before saving.";
+/// The message shown when a save was written but the ruleset could not be activated.
+const NOT_ACTIVATED_MESSAGE: &str = "05-web.toml was saved, but the rules could not be activated; \
+     the previous rules remain active. Check the other rule files and the service log.";
 
 /// Credentials accepted by the login endpoint.
 #[derive(Deserialize)]
@@ -50,9 +53,6 @@ pub enum InternalError {
     /// The stored rules file is unreadable.
     #[error("read 05-web.toml")]
     Document(#[source] RulesDocError),
-    /// The saved rules could not be activated.
-    #[error("activate saved rules")]
-    Reload(#[source] Arc<ReloadError>),
     /// A blocking file task failed.
     #[error("file task failed")]
     Task(#[from] tokio::task::JoinError),
@@ -88,6 +88,12 @@ pub enum ApiError {
     /// The edited rules are invalid.
     #[error("{0}")]
     Validation(String),
+    /// The edited file was written, but the complete ruleset could not be published.
+    ///
+    /// Typically another rule file is invalid; the previous policy stays active
+    /// and the saved rules take effect once the ruleset loads again.
+    #[error("{NOT_ACTIVATED_MESSAGE}")]
+    NotActivated(#[source] Arc<ReloadError>),
     /// A server-side failure.
     #[error("Server operation failed")]
     Internal(#[from] InternalError),
@@ -106,14 +112,25 @@ impl ApiError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict => StatusCode::CONFLICT,
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::NotActivated(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
-    /// Render the error as a JSON response, logging internal failures with their causes.
+    /// Render the error as a JSON response, logging server-side failures with their causes.
+    ///
+    /// Causes are logged rather than returned so responses never disclose host details.
     pub fn into_response(self) -> Response {
-        if let Self::Internal(error) = &self {
-            tracing::error!(error = %ErrorChain(error), "UI API request failed");
+        match &self {
+            Self::Internal(error) => {
+                tracing::error!(error = %ErrorChain(error), "UI API request failed");
+            }
+            Self::NotActivated(error) => {
+                tracing::error!(
+                    error = %ErrorChain(error.as_ref()),
+                    "saved UI rules could not be activated; keeping previous policy"
+                );
+            }
+            _ => {}
         }
         json(self.status(), &serde_json::json!({ "error": self.to_string() }))
     }
@@ -224,6 +241,10 @@ impl Api {
     }
 
     /// Validate and write edited rules, then activate them before responding.
+    ///
+    /// The response is sent only after the complete ruleset has been published,
+    /// so a successful save is already enforced. If publishing fails, the write
+    /// is kept and reported as not activated.
     async fn save_rules(&self, request: Request) -> Result<Response, ApiError> {
         // No shared lock is held while waiting for client-controlled bytes.
         let draft: RulesDocument = read_json(request).await.map_err(|error| match error {
@@ -247,7 +268,7 @@ impl Api {
         if outcome == WriteOutcome::Conflict {
             return Err(ApiError::Conflict);
         }
-        self.reload.reload_rules().await.map_err(InternalError::Reload)?;
+        self.reload.reload_rules().await.map_err(ApiError::NotActivated)?;
         Ok(json(StatusCode::OK, &self.read_rules().await?))
     }
 
@@ -314,7 +335,10 @@ mod tests {
         config::RuntimeSettings,
         policy::{Host, LoadError, MissingDirectory, Policy, load_rules},
         runtime::{PolicyStore, Reloader},
-        ui::auth::{Credentials, FileSessionStore, RandomTokens},
+        ui::{
+            auth::{Credentials, FileSessionStore, RandomTokens},
+            rules_doc::Draft,
+        },
     };
     use base64::{Engine, engine::general_purpose::STANDARD};
     use std::{fs, path::Path};
@@ -542,6 +566,32 @@ mod tests {
         assert!(allows("other.test"));
     }
 
+    /// A save blocked by another invalid file is kept on disk and reported as not activated.
+    #[tokio::test]
+    async fn saves_report_when_other_files_block_activation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let harness = harness(temporary.path(), "secret");
+        fs::create_dir_all(&harness.rules).unwrap();
+        fs::write(harness.rules.join("other.toml"), "[[allow]]\nunknown = 1\n").unwrap();
+        let basic = format!("Basic {}", STANDARD.encode("admin:secret"));
+        let auth = Some(("authorization", basic.as_str()));
+        let mut draft: RulesDocument =
+            decode(harness.api.response(request(Method::GET, "/api/rules", auth, &())).await).await;
+        draft.rules.push(Draft {
+            index: None,
+            fields: [("domain".to_owned(), "saved.test".into())].into(),
+        });
+        let before = harness.store.snapshot();
+        let response = harness.api.response(request(Method::PUT, "/api/rules", auth, &draft)).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = decode(response).await;
+        assert_eq!(body["error"], NOT_ACTIVATED_MESSAGE);
+        assert!(!body["error"].as_str().unwrap().contains("other.toml"));
+        let saved = fs::read_to_string(harness.rules.join("05-web.toml")).unwrap();
+        assert!(saved.contains("saved.test"));
+        assert!(Arc::ptr_eq(&before, &harness.store.snapshot()));
+    }
+
     /// Reject cross-origin mutations, unknown endpoints, methods, and disabled credentials.
     #[tokio::test]
     async fn rejects_unsafe_or_unauthenticated_requests() {
@@ -583,6 +633,7 @@ mod tests {
             (ApiError::NotFound, 404),
             (ApiError::Conflict, 409),
             (ApiError::Validation("bad".into()), 400),
+            (ApiError::NotActivated(Arc::new(ReloadError::Unavailable)), 500),
             (ApiError::Internal(InternalError::RulesFile(io::Error::other("secret path"))), 500),
         ] {
             let message = error.to_string();

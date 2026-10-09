@@ -8,7 +8,7 @@ use crate::{
     dns::{DnsError, DnsService, SocketUpstream},
     error::ErrorChain,
     net::{self, Stack},
-    policy::{LoadError, LocalHostname, MissingDirectory, Policy, load_rules},
+    policy::{Host, LoadError, LocalHostname, MissingDirectory, Policy, load_rules},
     proxy::{HttpUpstream, Proxy, ProxyError},
     runtime::{PolicyStore, ReloadHandle, Reloader, RulesWatcher, WatchError},
     telemetry::{self, AccessLogError, AccessLogTask},
@@ -32,6 +32,8 @@ const BACKLOG: i32 = 1024;
 const GRACEFUL_LIMIT: Duration = Duration::from_secs(10);
 /// How long the access log may take to write its final batch.
 const DRAIN_LIMIT: Duration = Duration::from_secs(5);
+/// The kernel's record of this host's name.
+const KERNEL_HOSTNAME: &str = "/proc/sys/kernel/hostname";
 
 /// Why a supervised task stopped.
 #[derive(Debug, Error)]
@@ -285,7 +287,7 @@ pub async fn run(cli: &Cli, args: ServeArgs) -> Result<(), ServeError> {
             store.clone(),
             Arc::new(SocketUpstream::new(args.dns_upstream)),
             sink.clone(),
-            LocalHostname::from_system(),
+            local_hostname(),
         );
         supervisor.spawn("DNS", async move { Ok(dns.serve(dns_udp, dns_tcp).await?) });
         if !ui_listeners.is_empty() {
@@ -329,6 +331,20 @@ pub async fn run(cli: &Cli, args: ServeArgs) -> Result<(), ServeError> {
         None => Ok(()),
     };
     outcome.and(graceful_result).and(drain_result)
+}
+
+/// Read the kernel hostname for the DNS exception, disabling it if unavailable.
+///
+/// A failed read must not fall back to an empty name, which would otherwise
+/// authorize queries for the DNS root.
+fn local_hostname() -> LocalHostname {
+    match std::fs::read_to_string(KERNEL_HOSTNAME) {
+        Ok(name) => LocalHostname::new(Host::new(&name)),
+        Err(error) => {
+            tracing::warn!(%error, "cannot read the local hostname; its DNS exception is disabled");
+            LocalHostname::default()
+        }
+    }
 }
 
 /// Assemble the UI API from configuration and shared services.

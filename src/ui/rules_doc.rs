@@ -74,7 +74,12 @@ pub fn read_document(revision: String) -> Result<RulesDocument, RulesDocError> {
     for (index, table) in allow_tables(&document)?.iter().enumerate() {
         let mut fields = BTreeMap::new();
         for (key, _) in table {
-            fields.insert(key.to_owned(), values["allow"][index][key].clone());
+            let value = values
+                .get("allow")
+                .and_then(|rules| rules.get(index))
+                .and_then(|rule| rule.get(key))
+                .ok_or(RulesDocError::NotTables)?;
+            fields.insert(key.to_owned(), value.clone());
         }
         rules.push(Draft {
             index: Some(index),

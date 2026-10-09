@@ -15,9 +15,9 @@ use crate::{
 };
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
-/// Pending requests accepted before senders must wait.
+/// Pending rule reload requests accepted before senders must wait.
 const REQUEST_CAPACITY: usize = 16;
 
 /// A rejected reload; the previous policy stays active.
@@ -54,29 +54,26 @@ pub enum Trigger {
     Hangup,
 }
 
-/// A message to the reloader.
-enum ReloadRequest {
-    /// Reload the rules directory and report the new rule count.
-    Rules {
-        /// Receives the reload result.
-        reply: oneshot::Sender<ReloadResult>,
-    },
-    /// Reload configuration and rules together (SIGHUP).
-    Policy,
+/// A request to reload the rules directory and report the new rule count.
+struct RulesRequest {
+    /// Receives the reload result.
+    reply: oneshot::Sender<ReloadResult>,
 }
 
 /// A cloneable way to ask the reloader for work.
 #[derive(Clone)]
 pub struct ReloadHandle {
-    /// The reloader's request queue.
-    sender: mpsc::Sender<ReloadRequest>,
+    /// The reloader's queue of rule reload requests.
+    sender: mpsc::Sender<RulesRequest>,
+    /// Pending full reloads; repeated requests coalesce and are never lost.
+    hangup: Arc<Notify>,
 }
 
 impl ReloadHandle {
     /// Reload every rule file and wait until the result is published or rejected.
     pub async fn reload_rules(&self) -> ReloadResult {
         let (reply, response) = oneshot::channel();
-        let request = ReloadRequest::Rules {
+        let request = RulesRequest {
             reply,
         };
         if self.sender.send(request).await.is_err() {
@@ -86,11 +83,22 @@ impl ReloadHandle {
     }
 
     /// Ask for a full configuration and rules reload without waiting for it.
+    ///
+    /// Requests made while one is already pending are merged into it, so a
+    /// burst of SIGHUPs performs at least one reload after the last signal.
     pub fn request_policy_reload(&self) {
-        if self.sender.try_send(ReloadRequest::Policy).is_err() {
-            tracing::warn!("policy reload already pending or reloader unavailable");
-        }
+        self.hangup.notify_one();
     }
+}
+
+/// The next piece of work for the reloader.
+enum Work {
+    /// A UI save asked for the rules to be reloaded.
+    Rules(RulesRequest),
+    /// SIGHUP asked for configuration and rules to be reloaded.
+    Policy,
+    /// The rules watcher observed a change.
+    Watcher,
 }
 
 /// Owns the rules watcher and applies every reload in order.
@@ -103,8 +111,10 @@ pub struct Reloader {
     store: Arc<PolicyStore>,
     /// The active watcher when `watch_rules` is enabled.
     watcher: Option<RulesWatcher>,
-    /// Requests from UI saves and signals.
-    requests: mpsc::Receiver<ReloadRequest>,
+    /// Requests from UI saves.
+    requests: mpsc::Receiver<RulesRequest>,
+    /// Pending SIGHUP reloads.
+    hangup: Arc<Notify>,
 }
 
 impl Reloader {
@@ -116,17 +126,20 @@ impl Reloader {
         watcher: Option<RulesWatcher>,
     ) -> (Self, ReloadHandle) {
         let (sender, requests) = mpsc::channel(REQUEST_CAPACITY);
+        let hangup = Arc::new(Notify::new());
         let reloader = Self {
             config_path,
             rules_dir,
             store,
             watcher,
             requests,
+            hangup: hangup.clone(),
         };
         (
             reloader,
             ReloadHandle {
                 sender,
+                hangup,
             },
         )
     }
@@ -136,29 +149,32 @@ impl Reloader {
         while self.step().await.is_some() {}
     }
 
+    /// Wait for the next piece of work; `None` means every handle was dropped.
+    async fn next_work(&mut self) -> Option<Work> {
+        let watcher = self.watcher.as_mut();
+        tokio::select! {
+            request = self.requests.recv() => request.map(Work::Rules),
+            () = self.hangup.notified() => Some(Work::Policy),
+            () = changed(watcher) => Some(Work::Watcher),
+        }
+    }
+
     /// Wait for one trigger, apply it, and report what happened; `None` means shut down.
     pub async fn step(&mut self) -> Option<(Trigger, ReloadResult)> {
-        let watcher = self.watcher.as_mut();
-        let request = tokio::select! {
-            request = self.requests.recv() => Some(request?),
-            () = changed(watcher) => None,
-        };
-        let Some(request) = request else {
-            let result = self.reload_rules().await.map_err(Arc::new);
-            log_rules_result(&result, "automatically reloaded rules");
-            return Some((Trigger::Watcher, result));
-        };
-        match request {
-            ReloadRequest::Rules {
-                reply,
-            } => {
+        match self.next_work().await? {
+            Work::Watcher => {
+                let result = self.reload_rules().await.map_err(Arc::new);
+                log_rules_result(&result, "automatically reloaded rules");
+                Some((Trigger::Watcher, result))
+            }
+            Work::Rules(request) => {
                 let result = self.reload_rules().await.map_err(Arc::new);
                 log_rules_result(&result, "reloaded rules after UI edit");
                 // The requester may have gone away; the policy is published either way.
-                let _ = reply.send(result.clone());
+                let _ = request.reply.send(result.clone());
                 Some((Trigger::Request, result))
             }
-            ReloadRequest::Policy => {
+            Work::Policy => {
                 let result = self.reload_policy().await.map_err(Arc::new);
                 match &result {
                     Ok(count) => tracing::info!(
@@ -337,6 +353,39 @@ mod tests {
         assert!(Arc::ptr_eq(&before, &store.snapshot()));
         drop(handle);
         task.await.unwrap();
+    }
+
+    /// Hangups are never lost behind queued UI reloads, and bursts coalesce.
+    #[tokio::test]
+    async fn hangups_are_not_lost_when_rule_requests_are_queued() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("rules");
+        fs::create_dir(&directory).unwrap();
+        let config = temporary.path().join("config.toml");
+        let (mut reloader, handle, store) = reloader(&config, &directory, false);
+        let mut pending = Vec::new();
+        for _ in 0..REQUEST_CAPACITY {
+            let handle = handle.clone();
+            pending.push(tokio::spawn(async move { handle.reload_rules().await }));
+        }
+        while reloader.requests.len() < REQUEST_CAPACITY {
+            tokio::task::yield_now().await;
+        }
+        fs::write(&config, "block_dns = false\n").unwrap();
+        for _ in 0..3 {
+            handle.request_policy_reload();
+        }
+        let mut hangups = 0;
+        for _ in 0..=REQUEST_CAPACITY {
+            if next(&mut reloader).await.0 == Trigger::Hangup {
+                hangups += 1;
+            }
+        }
+        assert_eq!(hangups, 1);
+        assert!(!store.load().runtime.block_dns);
+        for request in pending {
+            request.await.unwrap().unwrap();
+        }
     }
 
     /// SIGHUP republishes settings and toggles the watcher on and off.

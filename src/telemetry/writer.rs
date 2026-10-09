@@ -13,7 +13,6 @@ use std::{
     io::{self, BufRead, BufReader, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    sync::atomic::Ordering,
     time::Duration,
 };
 use thiserror::Error;
@@ -21,8 +20,6 @@ use tokio::{task::JoinHandle, time::Instant};
 
 /// How long events are batched after the first arrival.
 const BATCH_WINDOW: Duration = Duration::from_secs(1);
-/// Events queued before handlers start dropping them.
-const QUEUE_CAPACITY: usize = 65_536;
 /// Events received from the queue per wakeup.
 const RECEIVE_CHUNK: usize = 256;
 
@@ -70,7 +67,7 @@ pub type AccessLogTask = JoinHandle<Result<(), AccessLogError>>;
 /// final batch has been written.
 pub async fn start(config: AccessLogConfig) -> Result<(EventSink, AccessLogTask), AccessLogError> {
     let writer = tokio::task::spawn_blocking(move || AccessLogWriter::open(config)).await??;
-    let (sink, receiver) = EventSink::channel(QUEUE_CAPACITY);
+    let (sink, receiver) = EventSink::channel();
     let task = tokio::spawn(run(writer, receiver));
     Ok((sink, task))
 }
@@ -98,7 +95,6 @@ async fn run(writer: AccessLogWriter, mut receiver: EventReceiver) -> Result<(),
             }
         };
         writer = write_batch(writer, batcher.take()).await?;
-        report_drops(&receiver);
         if closed {
             break;
         }
@@ -129,14 +125,6 @@ async fn write_batch(
     .await?;
     result?;
     Ok(writer)
-}
-
-/// Report events discarded because the queue was full.
-fn report_drops(receiver: &EventReceiver) {
-    let dropped = receiver.dropped.swap(0, Ordering::Relaxed);
-    if dropped > 0 {
-        tracing::warn!(dropped, "access-log queue was full; events were discarded");
-    }
 }
 
 /// The file and retention counter owned exclusively by the access-log actor.

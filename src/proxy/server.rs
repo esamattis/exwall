@@ -7,6 +7,7 @@ use super::{
 };
 use crate::{
     ca::{Authority, Resolver},
+    error::ErrorChain,
     policy::{Decision, MatchSource},
     runtime::PolicyStore,
     telemetry::{EventSink, Failure},
@@ -149,7 +150,7 @@ impl Proxy {
                 return Ok(upstream);
             }
             Ok(Err(error)) => {
-                tracing::warn!(error = %error, "upstream HTTP request failed");
+                tracing::warn!(error = %ErrorChain(&*error), "upstream HTTP request failed");
                 Failure::Upstream
             }
             Err(_) => {
@@ -300,7 +301,7 @@ impl Proxy {
                     tasks.spawn(async move {
                         let _permit = permit;
                         if let Err(error) = proxy.connection(stream).await {
-                            tracing::debug!(%peer, error = %crate::error::ErrorChain(&error), "proxy connection ended");
+                            tracing::debug!(%peer, error = %ErrorChain(&error), "proxy connection ended");
                         }
                     });
                 }
@@ -373,7 +374,7 @@ mod tests {
         )
         .unwrap();
         let store = Arc::new(PolicyStore::new(Policy::new(RuntimeSettings::default(), rules)));
-        let (sink, receiver) = EventSink::channel(16);
+        let (sink, receiver) = EventSink::channel();
         let upstream = Arc::new(FakeUpstream {
             behaviour,
             received: Mutex::new(Vec::new()),

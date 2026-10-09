@@ -62,6 +62,8 @@ impl DnsDecision {
 }
 
 /// The local hostname exception used by DNS decisions, captured once at startup.
+///
+/// The default (no hostname) disables the exception.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LocalHostname(Option<Host>);
 
@@ -72,17 +74,6 @@ impl LocalHostname {
             Self(None)
         } else {
             Self(Some(host))
-        }
-    }
-
-    /// Read the kernel hostname, disabling the exception if it is unavailable.
-    pub fn from_system() -> Self {
-        match std::fs::read_to_string("/proc/sys/kernel/hostname") {
-            Ok(name) => Self::new(Host::new(&name)),
-            Err(error) => {
-                tracing::warn!(%error, "cannot read the local hostname; its DNS exception is disabled");
-                Self(None)
-            }
         }
     }
 

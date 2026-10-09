@@ -1,7 +1,7 @@
 //! UI listeners and request routing between the API and embedded assets.
 
 use super::{api::Api, assets};
-use crate::{config::UiConfig, net};
+use crate::{config::UiConfig, error::ErrorChain, net};
 use rama::{
     Service,
     http::{Request, Response, server::HttpServer},
@@ -104,7 +104,7 @@ async fn serve_listener(
                 connections.spawn(async move {
                     let _permit = permit;
                     if let Err(error) = server.serve(rama::tcp::TcpStream::new(stream)).await {
-                        tracing::debug!(%peer, %error, "UI connection ended");
+                        tracing::debug!(%peer, error = %ErrorChain(&*error), "UI connection ended");
                     }
                 });
             }

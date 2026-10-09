@@ -34,3 +34,11 @@ subtle = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
+
+# AGENTS.md requires a doc comment on every item, including private items and
+# test helpers; `cargo clippy --all-targets -- -D warnings` enforces it.
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+missing_docs_in_private_items = "warn"

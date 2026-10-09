@@ -5,6 +5,7 @@ use super::{
     relay::{DnsUpstream, Transport, error_response, validate_reply},
 };
 use crate::{
+    error::ErrorChain,
     policy::{Decision, DnsDecision, Host, LocalHostname, Policy},
     runtime::PolicyStore,
     telemetry::{EventSink, Failure, PendingEvent, RequestEvent},
@@ -243,7 +244,7 @@ impl DnsService {
                     let mut inspected = match self.inspect(&bytes) {
                         Ok(inspected) => inspected,
                         Err(error) => {
-                            tracing::debug!(%error, "DNS UDP request failed");
+                            tracing::debug!(error = %ErrorChain(&error), "DNS UDP request failed");
                             continue;
                         }
                     };
@@ -261,7 +262,9 @@ impl DnsService {
                                     tracing::debug!(%error, "DNS UDP reply failed");
                                 }
                             }
-                            Err(error) => tracing::debug!(%error, "DNS UDP request failed"),
+                            Err(error) => {
+                                tracing::debug!(error = %ErrorChain(&error), "DNS UDP request failed");
+                            }
                         }
                     });
                 }
@@ -274,7 +277,7 @@ impl DnsService {
                     tasks.spawn(async move {
                         let _permit = permit;
                         if let Err(error) = dns.tcp_session(stream).await {
-                            tracing::debug!(%error, "DNS TCP session ended");
+                            tracing::debug!(error = %ErrorChain(&error), "DNS TCP session ended");
                         }
                     });
                 }
@@ -344,7 +347,7 @@ mod tests {
         };
         let policy = Policy::new(runtime, RuleSet::parse(rules, "test").unwrap());
         let store = Arc::new(PolicyStore::new(policy));
-        let (sink, receiver) = EventSink::channel(16);
+        let (sink, receiver) = EventSink::channel();
         let mut dns = DnsService::new(
             store.clone(),
             Arc::new(FakeUpstream(behaviour)),
