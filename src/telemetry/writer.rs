@@ -13,13 +13,16 @@ use std::{
     io::{self, BufRead, BufReader, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
+    sync::{Arc, atomic::Ordering},
     time::Duration,
 };
 use thiserror::Error;
-use tokio::{task::JoinHandle, time::Instant};
+use tokio::{sync::Notify, task::JoinHandle, time::Instant};
 
 /// How long events are batched after the first arrival.
 const BATCH_WINDOW: Duration = Duration::from_secs(1);
+/// Events queued before handlers start dropping them.
+const QUEUE_CAPACITY: usize = 65_536;
 /// Events received from the queue per wakeup.
 const RECEIVE_CHUNK: usize = 256;
 
@@ -61,28 +64,73 @@ pub enum AccessLogError {
 /// The running access-log actor.
 pub type AccessLogTask = JoinHandle<Result<(), AccessLogError>>;
 
+/// The handles returned when the access-log actor starts.
+pub struct AccessLog {
+    /// The mailbox handed to request handlers.
+    pub sink: EventSink,
+    /// The actor task, which finishes after its final write.
+    pub task: AccessLogTask,
+    /// Closes the queue even while handlers still hold sinks.
+    pub closer: AccessLogCloser,
+}
+
+/// Tells the access-log actor to stop accepting events and finish.
+#[derive(Clone)]
+pub struct AccessLogCloser {
+    /// Wakes the actor; a stored permit covers a close before it waits.
+    notify: Arc<Notify>,
+}
+
+impl AccessLogCloser {
+    /// Close the queue: events already queued are written, later ones are rejected.
+    ///
+    /// Shutdown uses this when request handlers outlive the graceful deadline,
+    /// so their open sinks cannot keep the final batch from being written.
+    pub fn close(&self) {
+        self.notify.notify_one();
+    }
+}
+
 /// Open the log before serving requests, then start the actor that owns it.
 ///
-/// The actor exits after every [`EventSink`] clone has been dropped and the
-/// final batch has been written.
-pub async fn start(config: AccessLogConfig) -> Result<(EventSink, AccessLogTask), AccessLogError> {
+/// The actor exits after every [`EventSink`] clone has been dropped, or after
+/// [`AccessLogCloser::close`], once the final batch has been written.
+pub async fn start(config: AccessLogConfig) -> Result<AccessLog, AccessLogError> {
     let writer = tokio::task::spawn_blocking(move || AccessLogWriter::open(config)).await??;
-    let (sink, receiver) = EventSink::channel();
-    let task = tokio::spawn(run(writer, receiver));
-    Ok((sink, task))
+    let (sink, receiver) = EventSink::channel(QUEUE_CAPACITY);
+    let notify = Arc::new(Notify::new());
+    let task = tokio::spawn(run(writer, receiver, notify.clone()));
+    Ok(AccessLog {
+        sink,
+        task,
+        closer: AccessLogCloser {
+            notify,
+        },
+    })
 }
 
 /// Batch events for one second, write each batch off the async runtime, and drain on close.
-async fn run(writer: AccessLogWriter, mut receiver: EventReceiver) -> Result<(), AccessLogError> {
+async fn run(
+    writer: AccessLogWriter,
+    mut receiver: EventReceiver,
+    close: Arc<Notify>,
+) -> Result<(), AccessLogError> {
     let mut writer = writer;
     let mut batcher = Batcher::new(BATCH_WINDOW);
     let mut received = Vec::with_capacity(RECEIVE_CHUNK);
+    let mut closing = false;
     loop {
         let deadline = batcher.deadline();
         let closed = tokio::select! {
             // A busy queue must not postpone the flush deadline.
             biased;
             () = sleep_until(deadline) => false,
+            () = close.notified(), if !closing => {
+                // Buffered events remain readable; the queue then reports closed.
+                receiver.events.close();
+                closing = true;
+                continue;
+            }
             count = receiver.events.recv_many(&mut received, RECEIVE_CHUNK) => {
                 if count > 0 {
                     let now = Instant::now();
@@ -95,6 +143,7 @@ async fn run(writer: AccessLogWriter, mut receiver: EventReceiver) -> Result<(),
             }
         };
         writer = write_batch(writer, batcher.take()).await?;
+        report_drops(&receiver);
         if closed {
             break;
         }
@@ -125,6 +174,14 @@ async fn write_batch(
     .await?;
     result?;
     Ok(writer)
+}
+
+/// Report events discarded because the queue was full.
+fn report_drops(receiver: &EventReceiver) {
+    let dropped = receiver.dropped.swap(0, Ordering::Relaxed);
+    if dropped > 0 {
+        tracing::warn!(dropped, "access-log queue was full; events were discarded");
+    }
 }
 
 /// The file and retention counter owned exclusively by the access-log actor.
@@ -245,7 +302,11 @@ mod tests {
     async fn actor_flushes_counted_rows_on_shutdown() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("access.log");
-        let (sink, task) = start(config(&path)).await.unwrap();
+        let AccessLog {
+            sink,
+            task,
+            ..
+        } = start(config(&path)).await.unwrap();
         for _ in 0..300 {
             sink.submit(event(2));
             sink.submit(event(1));
@@ -313,7 +374,11 @@ mod tests {
     async fn actor_drains_concurrent_producers() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("access.log");
-        let (sink, task) = start(config(&path)).await.unwrap();
+        let AccessLog {
+            sink,
+            task,
+            ..
+        } = start(config(&path)).await.unwrap();
         let mut producers = tokio::task::JoinSet::new();
         for producer in 0..4 {
             let sink = sink.clone();
@@ -348,7 +413,11 @@ mod tests {
     async fn logs_cancelled_requests_before_shutdown() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("access.log");
-        let (sink, task) = start(config(&path)).await.unwrap();
+        let AccessLog {
+            sink,
+            task,
+            ..
+        } = start(config(&path)).await.unwrap();
         let guard = sink.track(RequestEvent::http(Protocol::Http, "GET", "http://test/cancelled"));
         drop(sink);
         tokio::task::yield_now().await;
@@ -360,12 +429,41 @@ mod tests {
         assert!(contents.contains("http - - GET http://test/cancelled - - CANCELLED"));
     }
 
+    /// Closing writes every queued event although a handler still holds a sink.
+    #[tokio::test]
+    async fn close_drains_while_handlers_hold_sinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("access.log");
+        let AccessLog {
+            sink,
+            task,
+            closer,
+        } = start(config(&path)).await.unwrap();
+        let lingering = sink.clone();
+        drop(sink);
+        lingering.submit(event(1));
+        lingering.submit(event(2));
+        closer.close();
+        tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            line(&event(1), 1) + &line(&event(2), 1)
+        );
+        // Late events are rejected instead of reopening the log.
+        lingering.submit(event(3));
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+    }
+
     /// Batches stay open for the window and flush without waiting for shutdown.
     #[tokio::test(start_paused = true)]
     async fn actor_flushes_after_the_batch_window() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("access.log");
-        let (sink, task) = start(config(&path)).await.unwrap();
+        let AccessLog {
+            sink,
+            task,
+            ..
+        } = start(config(&path)).await.unwrap();
         sink.submit(event(1));
         sink.submit(event(1));
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -388,7 +486,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn reports_actor_write_failure() {
-        let (sink, task) = start(config(Path::new("/dev/full"))).await.unwrap();
+        let AccessLog {
+            sink,
+            task,
+            ..
+        } = start(config(Path::new("/dev/full"))).await.unwrap();
         sink.submit(event(0));
         drop(sink);
         let error = task.await.unwrap().unwrap_err();

@@ -14,4 +14,6 @@ pub use batcher::Batcher;
 pub use event::{Failure, Protocol, RequestEvent};
 pub use sink::{EventReceiver, EventSink, PendingEvent};
 pub use stats::{Counts, DomainStats, DomainSummary, HttpDenial};
-pub use writer::{AccessLogError, AccessLogTask, AccessLogWriter, start};
+pub use writer::{
+    AccessLog, AccessLogCloser, AccessLogError, AccessLogTask, AccessLogWriter, start,
+};

@@ -1,39 +1,46 @@
 //! The handler-facing mailbox for request events and the cancellation guard.
 
 use super::{event::RequestEvent, stats::DomainStats};
-use tokio::sync::mpsc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use tokio::sync::mpsc::{self, error::TrySendError};
 
 /// A cloneable mailbox used by handlers without awaiting filesystem operations.
-///
-/// The queue is deliberately unbounded: every handled request is logged and
-/// handlers never wait for the access-log actor. Dropping entries under load
-/// would let a flood of requests hide others from the audit trail.
 #[derive(Clone)]
 pub struct EventSink {
-    /// The access-log actor's queue.
-    sender: mpsc::UnboundedSender<RequestEvent>,
+    /// The access-log actor's bounded queue.
+    sender: mpsc::Sender<RequestEvent>,
     /// Domain counters updated synchronously from every event.
     stats: DomainStats,
+    /// Events discarded because the queue was full.
+    dropped: Arc<AtomicU64>,
 }
 
 /// The receiving end of an [`EventSink`].
 pub struct EventReceiver {
     /// Submitted events in arrival order.
-    pub events: mpsc::UnboundedReceiver<RequestEvent>,
+    pub events: mpsc::Receiver<RequestEvent>,
+    /// Events discarded because the queue was full.
+    pub dropped: Arc<AtomicU64>,
 }
 
 impl EventSink {
-    /// Create a sink and the receiver that the access-log actor drains.
-    pub fn channel() -> (Self, EventReceiver) {
-        let (sender, events) = mpsc::unbounded_channel();
+    /// Create a sink with a bounded queue of `capacity` events.
+    pub fn channel(capacity: usize) -> (Self, EventReceiver) {
+        let (sender, events) = mpsc::channel(capacity);
+        let dropped = Arc::new(AtomicU64::new(0));
         let sink = Self {
             sender,
             stats: DomainStats::default(),
+            dropped: dropped.clone(),
         };
         (
             sink,
             EventReceiver {
                 events,
+                dropped,
             },
         )
     }
@@ -43,11 +50,19 @@ impl EventSink {
         &self.stats
     }
 
-    /// Update domain statistics and queue the event without blocking or capacity drops.
+    /// Update domain statistics and queue the event without blocking.
+    ///
+    /// A full queue drops the event and counts it so the actor can report the loss.
     pub fn submit(&self, event: RequestEvent) {
         self.stats.record_event(&event);
-        if self.sender.send(event).is_err() {
-            tracing::error!("access-log actor is unavailable");
+        match self.sender.try_send(event) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(TrySendError::Closed(_)) => {
+                tracing::warn!("access log is closed; request event discarded");
+            }
         }
     }
 
@@ -92,7 +107,7 @@ mod tests {
     /// Dropping a guard submits its event once, presumed cancelled unless answered.
     #[tokio::test]
     async fn guards_submit_on_drop() {
-        let (sink, mut receiver) = EventSink::channel();
+        let (sink, mut receiver) = EventSink::channel(4);
         let guard = sink.track(RequestEvent::http(Protocol::Http, "GET", "http://test/"));
         drop(guard);
         let mut answered = sink.track(RequestEvent::http(Protocol::Http, "GET", "http://test/"));
@@ -102,18 +117,13 @@ mod tests {
         assert_eq!(receiver.events.recv().await.unwrap().failure, None);
     }
 
-    /// Bursts far beyond any batch size are queued without blocking or losing events.
+    /// A full queue never blocks handlers; losses are counted for reporting.
     #[tokio::test]
-    async fn bursts_are_never_dropped() {
-        let (sink, mut receiver) = EventSink::channel();
-        for _ in 0..100_000 {
+    async fn full_queue_counts_drops() {
+        let (sink, receiver) = EventSink::channel(1);
+        for _ in 0..3 {
             sink.submit(RequestEvent::dns());
         }
-        drop(sink);
-        let mut received = 0;
-        while receiver.events.recv().await.is_some() {
-            received += 1;
-        }
-        assert_eq!(received, 100_000);
+        assert_eq!(receiver.dropped.load(Ordering::Relaxed), 2);
     }
 }

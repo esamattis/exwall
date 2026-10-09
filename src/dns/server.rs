@@ -347,7 +347,7 @@ mod tests {
         };
         let policy = Policy::new(runtime, RuleSet::parse(rules, "test").unwrap());
         let store = Arc::new(PolicyStore::new(policy));
-        let (sink, receiver) = EventSink::channel();
+        let (sink, receiver) = EventSink::channel(16);
         let mut dns = DnsService::new(
             store.clone(),
             Arc::new(FakeUpstream(behaviour)),

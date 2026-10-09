@@ -1,4 +1,4 @@
-//! Current domain counters and a bounded, process-local list of HTTP denials.
+//! Bounded domain counters and a bounded, process-local list of HTTP denials.
 
 use super::event::{Protocol, RequestEvent};
 use crate::policy::{Decision, Host};
@@ -10,6 +10,8 @@ use std::{
 
 /// The number of HTTP denials retained for the UI.
 const DENIAL_CAPACITY: usize = 100;
+/// The number of domains tracked; the least recently updated is evicted first.
+const DOMAIN_CAPACITY: usize = 1000;
 
 /// Totals for evaluated requests in one application protocol.
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
@@ -54,11 +56,65 @@ pub struct HttpDenial {
     pub timestamp: jiff::Timestamp,
 }
 
+/// A domain summary with its position in update order.
+struct TrackedDomain {
+    /// The value of [`Domains::next_update`] when this domain last changed.
+    updated: u64,
+    /// The counters reported to the UI.
+    summary: DomainSummary,
+}
+
+/// Per-domain summaries limited to the most recently updated domains.
+#[derive(Default)]
+struct Domains {
+    /// Summaries keyed by normalized domain.
+    entries: BTreeMap<Host, TrackedDomain>,
+    /// Update sequence keys, oldest first, pointing back into `entries`.
+    order: BTreeMap<u64, Host>,
+    /// The sequence number assigned to the next update.
+    next_update: u64,
+}
+
+impl Domains {
+    /// Return a domain's summary marked as just updated, evicting the stalest domain if full.
+    fn touch(&mut self, host: &Host, timestamp: jiff::Timestamp) -> &mut DomainSummary {
+        let updated = self.next_update;
+        self.next_update += 1;
+        if let Some(tracked) = self.entries.get_mut(host) {
+            self.order.remove(&tracked.updated);
+            tracked.updated = updated;
+        } else {
+            if self.entries.len() >= DOMAIN_CAPACITY
+                && let Some((_, stalest)) = self.order.pop_first()
+            {
+                self.entries.remove(&stalest);
+            }
+            self.entries.insert(
+                host.clone(),
+                TrackedDomain {
+                    updated,
+                    summary: DomainSummary {
+                        domain: host.to_string(),
+                        dns: Counts::default(),
+                        http: Counts::default(),
+                        last_allowed: None,
+                        last_denied: None,
+                        last_updated: timestamp,
+                    },
+                },
+            );
+        }
+        self.order.insert(updated, host.clone());
+        let tracked = self.entries.get_mut(host).expect("domain was just inserted");
+        &mut tracked.summary
+    }
+}
+
 /// Shared process-lifetime counters and bounded denials, independent of log retention.
 #[derive(Clone, Default)]
 pub struct DomainStats {
-    /// Per-domain summaries keyed by normalized domain.
-    domains: Arc<Mutex<BTreeMap<Host, DomainSummary>>>,
+    /// Summaries of the most recently updated domains.
+    domains: Arc<Mutex<Domains>>,
     /// The newest HTTP denials, oldest first.
     denials: Arc<Mutex<VecDeque<HttpDenial>>>,
 }
@@ -91,14 +147,7 @@ impl DomainStats {
         }
         let timestamp = jiff::Timestamp::now();
         let mut domains = self.domains.lock().expect("domain counter lock poisoned");
-        let summary = domains.entry(host.clone()).or_insert_with(|| DomainSummary {
-            domain: host.to_string(),
-            dns: Counts::default(),
-            http: Counts::default(),
-            last_allowed: None,
-            last_denied: None,
-            last_updated: timestamp,
-        });
+        let summary = domains.touch(host, timestamp);
         let counts = match protocol {
             Protocol::Dns => &mut summary.dns,
             Protocol::Http | Protocol::Https => &mut summary.http,
@@ -135,8 +184,14 @@ impl DomainStats {
 
     /// Return independent snapshots with the most recently updated domain first.
     pub fn snapshot(&self) -> Vec<DomainSummary> {
-        let mut domains: Vec<_> =
-            self.domains.lock().expect("domain counter lock poisoned").values().cloned().collect();
+        let mut domains: Vec<_> = self
+            .domains
+            .lock()
+            .expect("domain counter lock poisoned")
+            .entries
+            .values()
+            .map(|tracked| tracked.summary.clone())
+            .collect();
         domains.sort_by(|left, right| {
             right.last_updated.cmp(&left.last_updated).then_with(|| left.domain.cmp(&right.domain))
         });
@@ -254,6 +309,27 @@ mod tests {
         let latest = stats.snapshot();
         assert_eq!(latest[0].domain, "other.test");
         assert_eq!(latest[1].last_updated, first[0].last_updated);
+    }
+
+    /// Evict the least recently updated domain once the limit is reached.
+    #[test]
+    fn evicts_the_stalest_domain_beyond_the_limit() {
+        let stats = DomainStats::default();
+        for index in 0..DOMAIN_CAPACITY {
+            stats.record(&host(&format!("d{index}.test")), Protocol::Dns, true);
+        }
+        // Refreshing the oldest domain moves it to the back of the eviction order.
+        stats.record(&host("d0.test"), Protocol::Http, false);
+        stats.record(&host("new.test"), Protocol::Dns, false);
+        let domains: std::collections::HashSet<_> =
+            stats.snapshot().into_iter().map(|summary| summary.domain).collect();
+        assert_eq!(domains.len(), DOMAIN_CAPACITY);
+        assert!(domains.contains("d0.test"));
+        assert!(domains.contains("new.test"));
+        assert!(!domains.contains("d1.test"));
+        assert!(domains.contains("d2.test"));
+        let inner = stats.domains.lock().unwrap();
+        assert_eq!(inner.order.len(), DOMAIN_CAPACITY);
     }
 
     /// Retain only evaluated HTTP denials, with normalized hosts and query-free pathnames.

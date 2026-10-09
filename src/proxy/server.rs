@@ -374,7 +374,7 @@ mod tests {
         )
         .unwrap();
         let store = Arc::new(PolicyStore::new(Policy::new(RuntimeSettings::default(), rules)));
-        let (sink, receiver) = EventSink::channel();
+        let (sink, receiver) = EventSink::channel(16);
         let upstream = Arc::new(FakeUpstream {
             behaviour,
             received: Mutex::new(Vec::new()),

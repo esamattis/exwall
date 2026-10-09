@@ -30,7 +30,7 @@ use tokio::{
 const BACKLOG: i32 = 1024;
 /// How long in-flight graceful tasks may run after shutdown begins.
 const GRACEFUL_LIMIT: Duration = Duration::from_secs(10);
-/// How long the access log may take to write its final batch.
+/// How long the closed access log may take to write its final batch.
 const DRAIN_LIMIT: Duration = Duration::from_secs(5);
 /// The kernel's record of this host's name.
 const KERNEL_HOSTNAME: &str = "/proc/sys/kernel/hostname";
@@ -268,7 +268,11 @@ pub async fn run(cli: &Cli, args: ServeArgs) -> Result<(), ServeError> {
         net::tcp_listener(args.dns_listen, Stack::Dual, BACKLOG).map_err(ServeError::BindDnsTcp)?;
     let dns_udp = net::udp_socket(args.dns_listen, Stack::Dual).map_err(ServeError::BindDnsUdp)?;
     let ui_listeners = ui::bind(&config.startup.ui)?;
-    let (sink, access_log) = telemetry::start(config.startup.access_log.clone()).await?;
+    let telemetry::AccessLog {
+        sink,
+        task: access_log,
+        closer: close_access_log,
+    } = telemetry::start(config.startup.access_log.clone()).await?;
     let mut signals = Signals::install()?;
 
     let (begin_shutdown, shutdown_requested) = oneshot::channel::<()>();
@@ -326,6 +330,8 @@ pub async fn run(cli: &Cli, args: ServeArgs) -> Result<(), ServeError> {
         .await
         .map(|_| ())
         .map_err(|error| ServeError::Shutdown(error.into()));
+    // Handlers that outlived the graceful limit must not hold back queued events.
+    close_access_log.close();
     let drain_result = match access_log {
         Some(task) => drain(task).await,
         None => Ok(()),
@@ -387,7 +393,7 @@ async fn supervise(
     }
 }
 
-/// Wait for cancelled handlers to submit their events and the actor to write them.
+/// Wait for the closed access-log actor to write its final batch.
 async fn drain(task: AccessLogTask) -> Result<(), ServeError> {
     match tokio::time::timeout(DRAIN_LIMIT, task).await {
         Ok(Ok(result)) => Ok(result?),

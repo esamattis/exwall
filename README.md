@@ -130,7 +130,8 @@ latest occurrence of its own outcome. Domains with both outcomes appear in both
 tables; new allows do not change a domain's last denial time or vice versa.
 Use the Refresh button to update both tables; they do not poll automatically.
 HTTP includes HTTPS. Counters and the latest timestamps are retained in memory
-and reset when exwall restarts. “Allow completely” saves an exact
+and reset when exwall restarts. At most 1000 domains are tracked; when a new
+domain arrives at the limit, the domain updated least recently is dropped. “Allow completely” saves an exact
 domain rule in `05-web.toml` with `methods = "ANY"` and no pathname restrictions,
 allowing DNS and every HTTP route and method. “Allow DNS only” instead saves
 `dns_only = true`, allowing DNS queries without authorizing HTTP, HTTPS, or CONNECT.
@@ -381,12 +382,15 @@ by commas. Full HTTP URLs include query strings. Whitespace, control characters,
 and percent signs in fields are percent-escaped to prevent injected log lines;
 headers and bodies are not logged.
 
-The file is owned by a logging actor that receives entries through an unbounded
-mailbox. Request handlers never wait for file writes or trimming, and entries are
-never dropped for lack of queue capacity. Shutdown drains the
-mailbox and writes the pending batch immediately. An access-log I/O failure fails
-the service instead of silently discarding subsequent logs. The following settings
-are configurable in `config.toml` and take effect after a restart:
+The file is owned by a logging actor that receives entries through a mailbox
+holding up to 65,536 entries. Request handlers never wait for file writes or
+trimming; if the mailbox is full, new entries are dropped and the actor logs a
+warning with the number discarded. Shutdown closes the mailbox once in-flight
+requests finish or the 10-second graceful limit passes, then writes every queued
+entry immediately; requests still running after that limit are not logged. An
+access-log I/O failure fails the service instead of silently discarding subsequent
+logs. The following settings are configurable in `config.toml` and take effect
+after a restart:
 
 ```toml
 [access_log]
