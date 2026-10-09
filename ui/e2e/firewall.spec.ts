@@ -9,6 +9,14 @@ async function save(page: Page) {
     await expect(page.getByRole("status")).toHaveText("Changes saved.");
 }
 
+/** Choose how rule 1 constrains HTTP methods. */
+async function methodMode(page: Page, mode: string) {
+    await page
+        .getByRole("radiogroup", { name: "Rule 1 methods", exact: true })
+        .getByRole("radio", { name: mode, exact: true })
+        .click();
+}
+
 /** Run the existing client as nobody and wait for real firewall policy changes. */
 async function expectTraffic(url: string, status: number, header?: string, method = "GET") {
     await expect
@@ -61,9 +69,8 @@ test("real login, edits, validation, persistence, and HTTP/TLS interception", as
         ),
     ).toBe(false);
 
-    await page.goto("/");
-    await expect(page.getByRole("heading", { name: "Sign in to edit rules" })).toBeVisible();
-    await page.getByRole("link", { name: "Sign in", exact: true }).click();
+    await page.goto("/rules");
+    await expect(page.getByRole("heading", { name: "Sign in", exact: true })).toBeVisible();
     await page.getByRole("textbox", { name: "Username" }).fill("admin");
     await page.getByLabel("Password", { exact: true }).fill("wrong-password");
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
@@ -73,10 +80,8 @@ test("real login, edits, validation, persistence, and HTTP/TLS interception", as
     await expect(page.getByRole("heading", { name: "Rules", exact: true })).toBeVisible();
 
     await page.getByRole("button", { name: "Add rule", exact: true }).click();
-    await page.getByRole("textbox", { name: "Rule 1 domain", exact: true }).fill("example.com");
-    await page
-        .getByRole("textbox", { name: "Rule 1 pathname_pattern", exact: true })
-        .fill("/browser");
+    await page.getByRole("textbox", { name: "Rule 1 domains", exact: true }).fill("example.com");
+    await page.getByRole("textbox", { name: "Rule 1 path patterns", exact: true }).fill("/browser");
     await save(page);
     expect(await fixtureRules()).toContain('domain = "example.com"');
     for (const scheme of ["http", "https"]) {
@@ -85,10 +90,8 @@ test("real login, edits, validation, persistence, and HTTP/TLS interception", as
     }
 
     await page.getByRole("button", { name: "Add header", exact: true }).click();
-    await page.getByRole("textbox", { name: "Rule 1 inject_headers 1 name" }).fill("X-Browser-E2E");
-    await page
-        .getByRole("textbox", { name: "Rule 1 inject_headers 1 value" })
-        .fill("saved-in-browser");
+    await page.getByRole("textbox", { name: "Rule 1 header 1 name" }).fill("X-Browser-E2E");
+    await page.getByRole("textbox", { name: "Rule 1 header 1 value" }).fill("saved-in-browser");
     await save(page);
     await expectTraffic("https://example.com/browser", 200, "saved-in-browser");
     // Production rules intentionally refuse to inject headers into plaintext traffic.
@@ -96,7 +99,7 @@ test("real login, edits, validation, persistence, and HTTP/TLS interception", as
 
     // A real validation failure must preserve both the file and active policy.
     const persisted = await fixtureRules();
-    await page.getByRole("textbox", { name: "Rule 1 pathname_regex", exact: true }).fill("[");
+    await page.getByRole("textbox", { name: "Rule 1 path regexes", exact: true }).fill("[");
     const rejected = page.waitForResponse(
         (response) =>
             response.url().endsWith("/api/rules") && response.request().method() === "PUT",
@@ -107,33 +110,35 @@ test("real login, edits, validation, persistence, and HTTP/TLS interception", as
     expect(await fixtureRules()).toBe(persisted);
     await expectTraffic("https://example.com/browser", 200, "saved-in-browser");
     await page.reload();
+    await page.getByRole("button", { name: "Rule 1", exact: true }).click();
     await expect(
-        page.getByRole("textbox", { name: "Rule 1 pathname_regex", exact: true }),
+        page.getByRole("textbox", { name: "Rule 1 path regexes", exact: true }),
     ).toHaveValue("");
-    await expect(page.getByRole("textbox", { name: "Rule 1 domain", exact: true })).toHaveValue(
+    await expect(page.getByRole("textbox", { name: "Rule 1 domains", exact: true })).toHaveValue(
         "example.com",
     );
 
     // Exercise IPv6 redirects with the same restricted client UID.
     await expectTraffic("http://[fd00:7261::2]/browser", 403);
     await page
-        .getByRole("textbox", { name: "Rule 1 domain", exact: true })
+        .getByRole("textbox", { name: "Rule 1 domains", exact: true })
         .fill("example.com\nfd00:7261::2");
-    await page.getByRole("button", { name: "Remove Rule 1 inject_headers 1" }).click();
+    await page.getByRole("button", { name: "Remove Rule 1 header 1" }).click();
     await save(page);
     await expectTraffic("http://[fd00:7261::2]/browser", 200);
     await expectTraffic("https://[fd00:7261::2]/browser", 200);
 
     // Two authenticated tabs must not silently overwrite each other's saved revisions.
     const stale = await context.newPage();
-    await stale.goto("/");
-    await expect(stale.getByRole("textbox", { name: "Rule 1 domain", exact: true })).toHaveValue(
+    await stale.goto("/rules");
+    await stale.getByRole("button", { name: "Rule 1", exact: true }).click();
+    await expect(stale.getByRole("textbox", { name: "Rule 1 domains", exact: true })).toHaveValue(
         "example.com\nfd00:7261::2",
     );
-    await page.getByRole("combobox", { name: "Rule 1 methods", exact: true }).selectOption("any");
+    await methodMode(page, "Any method");
     await save(page);
     const current = await fixtureRules();
-    await stale.getByRole("textbox", { name: "Rule 1 domain", exact: true }).fill("github.com");
+    await stale.getByRole("textbox", { name: "Rule 1 domains", exact: true }).fill("github.com");
     await stale.getByRole("button", { name: "Save changes" }).click();
     await expect(stale.getByRole("alert")).toHaveText("05-web.toml changed. Reload before saving.");
     expect(await fixtureRules()).toBe(current);
@@ -141,7 +146,7 @@ test("real login, edits, validation, persistence, and HTTP/TLS interception", as
     await expectTraffic("https://example.com/browser", 200, undefined, "POST");
     await stale.close();
 
-    await page.getByRole("button", { name: "Remove rule", exact: true }).click();
+    await page.getByRole("button", { name: "Remove rule 1", exact: true }).click();
     await save(page);
     for (const url of [
         "http://example.com/browser",
@@ -153,23 +158,25 @@ test("real login, edits, validation, persistence, and HTTP/TLS interception", as
     await expectTraffic("https://github.com/control", 200);
     await page.getByRole("button", { name: "Sign out", exact: true }).click();
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: "Sign in to edit rules" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Sign in", exact: true })).toBeVisible();
 });
 
 test("pathname patterns, regexes, query strings, and POST bodies reach an HTTP/2 upstream", async ({
     authenticatedPage: page,
 }) => {
-    await page.goto("/");
+    await page.goto("/rules");
     await expect(page.getByRole("heading", { name: "Rules", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Add rule", exact: true }).click();
-    await page.getByRole("textbox", { name: "Rule 1 domain", exact: true }).fill("pathname.test");
+    await page.getByRole("textbox", { name: "Rule 1 domains", exact: true }).fill("pathname.test");
     await page
-        .getByRole("textbox", { name: "Rule 1 pathname_pattern", exact: true })
+        .getByRole("textbox", { name: "Rule 1 path patterns", exact: true })
         .fill("/api/:account/items/:item");
-    await page
-        .getByRole("combobox", { name: "Rule 1 methods", exact: true })
-        .selectOption("custom");
-    await page.getByRole("textbox", { name: "Rule 1 methods list", exact: true }).fill("POST");
+    await methodMode(page, "Custom");
+    const methods = page.getByRole("group", { name: "Rule 1 custom methods", exact: true });
+    for (const method of ["POST", "GET", "HEAD"]) {
+        await methods.getByRole("checkbox", { name: method, exact: true }).click();
+    }
+    await expect(methods.getByRole("checkbox", { checked: true })).toHaveText(["POST"]);
     await save(page);
     await expectTraffic(
         "https://pathname.test/api/acme/items/42?format=json",
@@ -205,18 +212,16 @@ test("pathname patterns, regexes, query strings, and POST bodies reach an HTTP/2
     const reached = await upstreamRequests();
     expect(reached.some((request) => deniedPaths.includes(request.pathname))).toBe(false);
 
-    await page.getByRole("textbox", { name: "Rule 1 pathname_pattern", exact: true }).fill("");
+    await page.getByRole("textbox", { name: "Rule 1 path patterns", exact: true }).fill("");
     await page
-        .getByRole("textbox", { name: "Rule 1 pathname_regex", exact: true })
+        .getByRole("textbox", { name: "Rule 1 path regexes", exact: true })
         .fill("^/reports/[0-9]+$");
-    await page
-        .getByRole("combobox", { name: "Rule 1 methods", exact: true })
-        .selectOption("default");
+    await methodMode(page, "GET & HEAD");
     await save(page);
     await expectTraffic("https://pathname.test/reports/123?download=true", 200);
     await expectTraffic("https://pathname.test/reports/letters", 403);
     await expectTraffic("https://pathname.test/reports/123/extra", 403);
     await expectTraffic("https://pathname.test/reports/123", 403, undefined, "POST");
-    await page.getByRole("button", { name: "Remove rule", exact: true }).click();
+    await page.getByRole("button", { name: "Remove rule 1", exact: true }).click();
     await save(page);
 });

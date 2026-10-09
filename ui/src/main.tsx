@@ -1,6 +1,8 @@
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+    MutationCache,
+    QueryCache,
     QueryClient,
     QueryClientProvider,
     useMutation,
@@ -13,102 +15,115 @@ import {
     createRouter,
     Link,
     Outlet,
+    redirect,
     RouterProvider,
     useNavigate,
 } from "@tanstack/react-router";
+import { api, ApiError, hasSession, sessionKey, type Session } from "./api.ts";
+import { ErrorBanner, ShieldIcon, SignOutIcon, Spinner, ToastProvider } from "./components.tsx";
+import { RulesPage } from "./rules.tsx";
+import { parseTrafficView, TrafficPage } from "./traffic.tsx";
 import "./style.css";
 
-/** A header added to matching upstream requests. */
-interface InjectedHeader {
-    name: string;
-    value: string;
+/** Accept only same-origin paths as post-login destinations. */
+function safeRedirect(value: unknown): string | undefined {
+    if (typeof value === "string" && value.startsWith("/") && !value.startsWith("//")) {
+        return value;
+    }
+    return undefined;
 }
 
-/** Ordinary JSON values used by the rule editing API. */
-type FieldValue = string | string[] | boolean | InjectedHeader[];
-
-/** An editable allow table with its original position for comment preservation. */
-interface RuleDraft {
-    index: number | null;
-    fields: Record<string, FieldValue>;
-}
-
-/** Rules and a revision used to reject overwriting concurrent file edits. */
-interface RulesDocument {
-    revision: string;
-    rules: RuleDraft[];
-}
-
-/** An API failure retaining its HTTP status for authentication handling. */
-class ApiError extends Error {
-    status: number;
-    constructor(status: number, message: string) {
-        super(message);
-        this.status = status;
-    }
-}
-
-/** Persist sessions within this exact scheme, hostname, and port rather than shared cookies. */
-const sessionKey = "exwall.session";
-
-/** Fetch same-origin JSON with a token that other localhost ports cannot read or receive. */
-async function api<T>(
-    path: string,
-    method: "GET" | "POST" | "PUT" = "GET",
-    body?: unknown,
-): Promise<T> {
-    const headers = new Headers();
-    const token = localStorage.getItem(sessionKey);
-    if (token && path !== "login") {
-        headers.set("Authorization", `Bearer ${token}`);
-    }
-    if (body !== undefined) {
-        headers.set("Content-Type", "application/json");
-    }
-    const options: RequestInit = {
-        method,
-        credentials: "omit",
-        redirect: "error",
-        headers,
-    };
-    if (method !== "GET" && body !== undefined) {
-        options.body = JSON.stringify(body);
-    }
-    const response = await fetch(`/api/${path}`, options);
-    const result: T & { error?: string } = await response.json();
-    if (!response.ok) {
-        if (response.status === 401 && path !== "login") {
-            localStorage.removeItem(sessionKey);
-        }
-        throw new ApiError(response.status, result.error ?? "Request failed");
-    }
-    return result;
-}
-
-/** Render the common application frame and navigation. */
-function Layout() {
+/** The product mark and name. */
+function Brand() {
     return (
-        <div className="min-h-screen bg-slate-950 text-slate-100">
-            <header className="border-b border-slate-800 px-6 py-5">
-                <div className="mx-auto flex max-w-5xl items-center justify-between">
-                    <Link to="/" className="text-xl font-semibold tracking-tight text-teal-400">
-                        exwall
+        <span className="flex items-center gap-2 text-base font-semibold tracking-tight text-white">
+            <span className="grid size-7 place-items-center rounded-lg bg-emerald-400/15 text-emerald-300 ring-1 ring-emerald-400/30">
+                <ShieldIcon className="size-4" />
+            </span>
+            exwall
+        </span>
+    );
+}
+
+/** Render the signed-in application frame with navigation and account controls. */
+function AppShell() {
+    const navigate = useNavigate();
+    const client = useQueryClient();
+    const session = useQuery({
+        queryKey: ["session"],
+        queryFn: () => api<Session>("session"),
+        retry: false,
+        refetchOnWindowFocus: false,
+        staleTime: Infinity,
+    });
+    const logout = useMutation({
+        mutationFn: () => api("logout", "POST", {}),
+        onSuccess: async () => {
+            localStorage.removeItem(sessionKey);
+            client.clear();
+            await navigate({ to: "/login" });
+        },
+    });
+    const navLink =
+        "rounded-md px-3 py-1.5 text-sm font-medium text-zinc-400 transition hover:text-zinc-100";
+    return (
+        <div className="min-h-screen">
+            <header className="sticky top-0 z-30 border-b border-white/10 bg-zinc-950/80 backdrop-blur">
+                <div className="mx-auto flex h-14 max-w-6xl items-center gap-6 px-4 sm:px-6">
+                    <Link to="/" search={{}} aria-label="exwall home">
+                        <Brand />
                     </Link>
-                    <nav className="flex gap-5 text-sm text-slate-400">
-                        <Link to="/">Rules</Link>
-                        <Link to="/domains">Domains</Link>
+                    <nav aria-label="Main" className="flex gap-1">
+                        <Link
+                            to="/"
+                            search={{}}
+                            className={navLink}
+                            activeOptions={{ exact: true, includeSearch: false }}
+                            activeProps={{ className: "bg-white/10 text-white" }}
+                        >
+                            Traffic
+                        </Link>
+                        <Link
+                            to="/rules"
+                            className={navLink}
+                            activeProps={{ className: "bg-white/10 text-white" }}
+                        >
+                            Rules
+                        </Link>
                     </nav>
+                    <div className="ml-auto flex items-center gap-3">
+                        {session.data && (
+                            <span className="hidden text-sm text-zinc-500 sm:inline">
+                                {session.data.username}
+                            </span>
+                        )}
+                        <button
+                            type="button"
+                            className="btn btn-ghost"
+                            disabled={logout.isPending}
+                            onClick={() => logout.mutate()}
+                        >
+                            <SignOutIcon />
+                            Sign out
+                        </button>
+                    </div>
                 </div>
             </header>
-            <main className="mx-auto max-w-5xl px-6 py-10">
+            <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+                {logout.error && (
+                    <div className="mb-4">
+                        <ErrorBanner>{logout.error.message}</ErrorBanner>
+                    </div>
+                )}
                 <Outlet />
             </main>
         </div>
     );
 }
 
-/** Authenticate through TanStack Query and navigate to the rules editor. */
+/** Authenticate and continue to the page that required signing in. */
 function LoginPage() {
+    const { redirect: destination } = loginRoute.useSearch();
     const [username, setUsername] = useState("");
     const [password, setPassword] = useState("");
     const navigate = useNavigate();
@@ -119,913 +134,145 @@ function LoginPage() {
         onSuccess: async ({ token }) => {
             localStorage.setItem(sessionKey, token);
             client.clear();
-            await navigate({ to: "/" });
+            await navigate({ href: destination ?? "/" });
         },
     });
-    return (
-        <section className="mx-auto mt-10 max-w-md rounded-2xl border border-slate-800 bg-slate-900 p-8">
-            <h1 className="text-3xl font-semibold">Sign in</h1>
-            <p className="mt-3 text-slate-400">
-                Use your configured account to manage firewall rules.
-            </p>
-            <form
-                className="mt-8 space-y-5"
-                onSubmit={(event) => {
-                    event.preventDefault();
-                    login.mutate();
-                }}
-            >
-                <label className="block">
-                    Username
-                    <input
-                        className="input mt-2"
-                        autoComplete="username"
-                        required
-                        value={username}
-                        onChange={(event) => setUsername(event.target.value)}
-                    />
-                </label>
-                <label className="block">
-                    Password
-                    <input
-                        className="input mt-2"
-                        type="password"
-                        autoComplete="current-password"
-                        required
-                        value={password}
-                        onChange={(event) => setPassword(event.target.value)}
-                    />
-                </label>
-                {login.error && (
-                    <p role="alert" className="text-red-400">
-                        {login.error.message}
-                    </p>
-                )}
-                <button className="button w-full" disabled={login.isPending}>
-                    {login.isPending ? "Signing in…" : "Sign in"}
-                </button>
-            </form>
-        </section>
-    );
-}
-
-const fields = [
-    "domain",
-    "domain_regex",
-    "include_subdomains",
-    "dns_only",
-    "methods",
-    "pathname_pattern",
-    "pathname_regex",
-    "stream",
-    "inject_headers",
-];
-const hints: Record<string, string> = {
-    domain: "example.com",
-    domain_regex: "^.*\\.example\\.com$",
-    pathname_pattern: "/api/*",
-    pathname_regex: "^/api/",
-};
-
-/** Edit a typed field without requiring configuration-file syntax. */
-function RuleField({
-    name,
-    field,
-    value,
-    onChange,
-}: {
-    name: string;
-    field: string;
-    value: FieldValue | undefined;
-    onChange: (value: FieldValue | undefined) => void;
-}) {
-    const [text, setText] = useState(() => {
-        if (typeof value === "string") {
-            return value;
-        }
-        if (Array.isArray(value)) {
-            return value.filter((item) => typeof item === "string").join("\n");
-        }
-        return "";
-    });
-    if (field === "include_subdomains" || field === "stream" || field === "dns_only") {
-        return (
-            <select
-                className="input mt-2"
-                aria-label={name}
-                value={typeof value === "boolean" ? String(value) : ""}
-                onChange={(event) =>
-                    onChange(event.target.value === "" ? undefined : event.target.value === "true")
-                }
-            >
-                <option value="">Default ({field === "stream" ? "enabled" : "disabled"})</option>
-                <option value="true">Enabled</option>
-                <option value="false">Disabled</option>
-            </select>
-        );
-    }
-    if (field === "methods") {
-        let mode = "custom";
-        if (value === undefined) {
-            mode = "default";
-        } else if (typeof value === "string") {
-            mode = "any";
-        }
-        return (
-            <div className="mt-2 space-y-2">
-                <select
-                    className="input"
-                    aria-label={name}
-                    value={mode}
-                    onChange={(event) => {
-                        const next = event.target.value;
-                        if (next === "default") {
-                            onChange(undefined);
-                        } else if (next === "any") {
-                            onChange("ANY");
-                        } else {
-                            onChange(["GET", "HEAD"]);
-                        }
-                        setText("GET\nHEAD");
-                    }}
-                >
-                    <option value="default">Default (GET and HEAD)</option>
-                    <option value="any">Any method</option>
-                    <option value="custom">Choose methods</option>
-                </select>
-                {mode === "custom" && (
-                    <textarea
-                        className="input"
-                        aria-label={`${name} list`}
-                        rows={3}
-                        value={text}
-                        placeholder={"GET\nHEAD\nPOST"}
-                        onChange={(event) => {
-                            setText(event.target.value);
-                            onChange(
-                                event.target.value
-                                    .split("\n")
-                                    .map((item) => item.trim())
-                                    .filter(Boolean),
-                            );
-                        }}
-                    />
-                )}
-                {mode === "custom" && (
-                    <p className="text-xs text-slate-400">One method per line.</p>
-                )}
-            </div>
-        );
-    }
-    if (field === "inject_headers") {
-        const headers: InjectedHeader[] = Array.isArray(value)
-            ? value.filter((item): item is InjectedHeader => typeof item !== "string")
-            : [];
-        return (
-            <div className="mt-2 space-y-3">
-                {headers.map((header, index) => (
-                    <div key={index} className="flex flex-wrap items-center gap-2">
-                        <input
-                            className="input flex-1"
-                            aria-label={`${name} ${index + 1} name`}
-                            placeholder="Header name"
-                            required
-                            value={header.name}
-                            onChange={(event) =>
-                                onChange(
-                                    headers.map((item, position) =>
-                                        position === index
-                                            ? { ...item, name: event.target.value }
-                                            : item,
-                                    ),
-                                )
-                            }
-                        />
-                        <input
-                            className="input flex-1"
-                            aria-label={`${name} ${index + 1} value`}
-                            placeholder="Header value"
-                            value={header.value}
-                            onChange={(event) =>
-                                onChange(
-                                    headers.map((item, position) =>
-                                        position === index
-                                            ? { ...item, value: event.target.value }
-                                            : item,
-                                    ),
-                                )
-                            }
-                        />
-                        <button
-                            type="button"
-                            className="text-red-400"
-                            aria-label={`Remove ${name} ${index + 1}`}
-                            onClick={() => {
-                                const remaining = headers.filter(
-                                    (_, position) => position !== index,
-                                );
-                                onChange(remaining.length ? remaining : undefined);
-                            }}
-                        >
-                            Remove
-                        </button>
-                    </div>
-                ))}
-                <button
-                    type="button"
-                    className="text-teal-400"
-                    onClick={() => onChange([...headers, { name: "", value: "" }])}
-                >
-                    Add header
-                </button>
-            </div>
-        );
+    let error = login.error?.message;
+    if (login.error instanceof ApiError && login.error.status === 401) {
+        error = "Incorrect username or password.";
     }
     return (
-        <div>
-            <textarea
-                className="input mt-2 font-mono"
-                aria-label={name}
-                rows={2}
-                value={text}
-                placeholder={hints[field]}
-                onChange={(event) => {
-                    const next = event.target.value;
-                    setText(next);
-                    const items = next.split("\n").filter((item) => item.trim());
-                    if (items.length === 0) {
-                        onChange(undefined);
-                    } else if (items.length === 1 && !Array.isArray(value)) {
-                        onChange(items[0]);
-                    } else {
-                        onChange(items);
-                    }
-                }}
-            />
-            <p className="mt-1 text-xs text-slate-400">One value per line.</p>
-        </div>
-    );
-}
-
-/** Edit ordinary rule values while retaining optional fields and original rule positions. */
-function Editor({
-    document,
-    onSaved,
-    onEdit,
-}: {
-    document: RulesDocument;
-    onSaved: () => void;
-    onEdit: () => void;
-}) {
-    const [rules, setRules] = useState(document.rules);
-    const client = useQueryClient();
-    const save = useMutation({
-        mutationFn: () =>
-            api<RulesDocument>("rules", "PUT", { revision: document.revision, rules }),
-        onSuccess: (result) => {
-            client.setQueryData(["rules"], result);
-            onSaved();
-        },
-    });
-    /** Update or omit one field without changing the other rule tables. */
-    function update(index: number, key: string, value: FieldValue | undefined) {
-        onEdit();
-        setRules((previous) =>
-            previous.map((rule, position) => {
-                if (position !== index) {
-                    return rule;
-                }
-                const next = { ...rule.fields };
-                if (value !== undefined) {
-                    next[key] = value;
-                } else {
-                    delete next[key];
-                }
-                return { ...rule, fields: next };
-            }),
-        );
-    }
-    const dirty = JSON.stringify(rules) !== JSON.stringify(document.rules);
-    return (
-        <form
-            className="space-y-6"
-            onSubmit={(event) => {
-                event.preventDefault();
-                save.mutate();
-            }}
-        >
-            <div className="flex flex-wrap items-center justify-between gap-4">
-                <div>
-                    <h1 className="text-3xl font-semibold">Rules</h1>
-                    <p className="mt-2 text-slate-400">
-                        Edit allow rules in 05-web.toml. Other rule files stay active.
-                    </p>
+        <main className="grid min-h-screen place-items-center bg-[radial-gradient(ellipse_at_top,rgba(52,211,153,0.08),transparent_60%)] px-4">
+            <div className="w-full max-w-sm">
+                <div className="mb-8 flex justify-center">
+                    <Brand />
                 </div>
-                <button className="button" disabled={save.isPending || !dirty}>
-                    {save.isPending ? "Saving…" : "Save changes"}
-                </button>
-            </div>
-            <p className="rounded-xl border border-slate-800 bg-slate-900 p-4 text-sm text-slate-400">
-                Enter plain text, with one domain or pattern per line. Leave optional fields empty
-                to use their defaults. Each rule needs either a domain or a domain regex. Saved
-                rules are validated before they take effect.
-            </p>
-            {save.error && (
-                <p role="alert" className="text-red-400">
-                    {save.error.message}
-                </p>
-            )}
-            {rules.length === 0 && (
-                <p className="py-8 text-slate-400">
-                    No rules in 05-web.toml yet. Add an allow rule to get started.
-                </p>
-            )}
-            {rules.map((rule, index) => (
-                <fieldset
-                    key={rule.index ?? `new-${index}`}
-                    disabled={save.isPending}
-                    className="rounded-2xl border border-slate-800 bg-slate-900 p-6"
-                >
-                    <legend className="px-2 font-semibold">Allow rule {index + 1}</legend>
-                    <div className="grid gap-5 md:grid-cols-2">
-                        {fields.map((key) => (
-                            <div
-                                key={key}
-                                className={`block text-sm text-slate-300 ${key === "inject_headers" ? "md:col-span-2" : ""}`}
-                            >
-                                {key.replaceAll("_", " ")}
-                                <RuleField
-                                    name={`Rule ${index + 1} ${key}`}
-                                    field={key}
-                                    value={rule.fields[key]}
-                                    onChange={(value) => update(index, key, value)}
-                                />
-                            </div>
-                        ))}
-                    </div>
-                    <button
-                        type="button"
-                        className="mt-5 text-sm text-red-400 hover:text-red-300"
-                        onClick={() => {
-                            onEdit();
-                            setRules(rules.filter((_, position) => position !== index));
+                <section className="panel p-6 shadow-2xl shadow-black/40">
+                    <h1 className="text-xl font-semibold text-white">Sign in</h1>
+                    <p className="mt-1 text-sm text-zinc-400">
+                        Use the account configured for this firewall.
+                    </p>
+                    <form
+                        className="mt-6 space-y-4"
+                        onSubmit={(event) => {
+                            event.preventDefault();
+                            login.mutate();
                         }}
                     >
-                        Remove rule
-                    </button>
-                </fieldset>
-            ))}
-            <button
-                type="button"
-                className="rounded-lg border border-slate-700 px-4 py-2 hover:bg-slate-800"
-                disabled={save.isPending}
-                onClick={() => {
-                    onEdit();
-                    setRules([...rules, { index: null, fields: { domain: "example.com" } }]);
-                }}
-            >
-                Add rule
-            </button>
-        </form>
-    );
-}
-
-/** Load rules with TanStack Query and offer login when the session has expired. */
-function RulesPage() {
-    const [generation, setGeneration] = useState(0);
-    const [saved, setSaved] = useState(false);
-    const client = useQueryClient();
-    const navigate = useNavigate();
-    const rules = useQuery({
-        queryKey: ["rules"],
-        queryFn: () => api<RulesDocument>("rules"),
-        retry: false,
-        refetchOnWindowFocus: false,
-    });
-    const logout = useMutation({
-        mutationFn: () => api("logout", "POST", {}),
-        onSuccess: async () => {
-            localStorage.removeItem(sessionKey);
-            client.clear();
-            await navigate({ to: "/login" });
-        },
-    });
-    if (rules.isPending) {
-        return (
-            <p role="status" className="text-slate-400">
-                Loading rules…
-            </p>
-        );
-    }
-    if (rules.error instanceof ApiError && rules.error.status === 401) {
-        return (
-            <section>
-                <h1 className="text-3xl font-semibold">Sign in to edit rules</h1>
-                <p className="my-4 text-slate-400">
-                    A configured account is required to access the firewall rules.
-                </p>
-                <Link className="button inline-block" to="/login">
-                    Sign in
-                </Link>
-            </section>
-        );
-    }
-    if (rules.error) {
-        return (
-            <p role="alert" className="text-red-400">
-                {rules.error.message}
-            </p>
-        );
-    }
-    return (
-        <>
-            <div className="mb-6 flex justify-end gap-5 text-sm">
-                <button
-                    onClick={() => {
-                        if (window.confirm("Reload 05-web.toml and discard unsaved edits?")) {
-                            setSaved(false);
-                            void rules.refetch().then(() => setGeneration((value) => value + 1));
-                        }
-                    }}
-                    className="text-slate-400 hover:text-white"
-                >
-                    Reload from file
-                </button>
-                <button
-                    disabled={logout.isPending}
-                    onClick={() => logout.mutate()}
-                    className="text-slate-400 hover:text-white"
-                >
-                    Sign out
-                </button>
+                        <label className="block">
+                            <span className="field-label">Username</span>
+                            <input
+                                className="input"
+                                autoComplete="username"
+                                autoFocus
+                                required
+                                value={username}
+                                onChange={(event) => setUsername(event.target.value)}
+                            />
+                        </label>
+                        <label className="block">
+                            <span className="field-label">Password</span>
+                            <input
+                                className="input"
+                                type="password"
+                                autoComplete="current-password"
+                                required
+                                value={password}
+                                onChange={(event) => setPassword(event.target.value)}
+                            />
+                        </label>
+                        {error && <ErrorBanner>{error}</ErrorBanner>}
+                        <button
+                            type="submit"
+                            className="btn btn-primary w-full py-2"
+                            disabled={login.isPending}
+                        >
+                            {login.isPending && <Spinner />}
+                            {login.isPending ? "Signing in…" : "Sign in"}
+                        </button>
+                    </form>
+                </section>
             </div>
-            {logout.error && (
-                <p role="alert" className="mb-4 text-red-400">
-                    {logout.error.message}
-                </p>
-            )}
-            {saved && (
-                <p role="status" className="mb-4 text-teal-400">
-                    Changes saved.
-                </p>
-            )}
-            <Editor
-                key={`${generation}:${rules.data.revision}`}
-                document={rules.data}
-                onEdit={() => setSaved(false)}
-                onSaved={() => {
-                    setGeneration((value) => value + 1);
-                    setSaved(true);
-                }}
-            />
-        </>
+        </main>
     );
 }
 
-/** Current counters for a domain, without individual request history. */
-interface DomainStats {
-    domain: string;
-    dns: { allow: number; block: number };
-    http: { allow: number; block: number };
-    last_updated: string;
-    last_allowed: string | null;
-    last_denied: string | null;
-}
-
-/** One retained policy denial, with the exact pathname and no query string. */
-interface HttpDenial {
-    domain: string;
-    method: string;
-    pathname: string;
-    timestamp: string;
-}
-
-/** Escape pathname characters so an allow rule matches exactly one literal path. */
-function exactPathRegex(pathname: string): string {
-    return `\\A${pathname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\z`;
-}
-
-/** Normalize domain fields the same way as the proxy's hostname matcher. */
-function normalizeDomain(domain: string): string {
-    return domain.trim().replace(/\.+$/, "").toLowerCase();
-}
-
-/** Remove DNS-only tables whose entire hostname scope is covered by an HTTP allowance. */
-function removeCoveredDnsRules(
-    document: RulesDocument,
-    domain: string,
-    includeSubdomains = false,
-): boolean {
-    const allowedDomain = normalizeDomain(domain);
-    const previousCount = document.rules.length;
-    document.rules = document.rules.filter((rule) => {
-        if (
-            rule.fields.dns_only !== true ||
-            rule.fields.domain_regex !== undefined ||
-            (!includeSubdomains && rule.fields.include_subdomains === true)
-        ) {
-            return true;
-        }
-        const domains = rule.fields.domain;
-        const names = typeof domains === "string" ? [domains] : domains;
-        if (!Array.isArray(names) || names.length === 0) {
-            return true;
-        }
-        return !names.every((name) => {
-            if (typeof name !== "string") {
-                return false;
-            }
-            const normalized = normalizeDomain(name);
-            return (
-                normalized === allowedDomain ||
-                (includeSubdomains && normalized.endsWith(`.${allowedDomain}`))
-            );
-        });
+/** Send the browser to the login page, remembering where it was. */
+function requireLogin(): never {
+    const { pathname, search } = window.location;
+    throw redirect({
+        to: "/login",
+        search: { redirect: pathname === "/login" ? undefined : `${pathname}${search}` },
     });
-    return document.rules.length !== previousCount;
 }
 
-/** Manually refresh the latest HTTP denials and allow their exact method and pathname. */
-function HttpDenialsTable() {
-    const client = useQueryClient();
-    const denials = useQuery({
-        queryKey: ["http-denials"],
-        queryFn: () => api<HttpDenial[]>("http-denials"),
-        refetchOnWindowFocus: false,
-        refetchOnReconnect: false,
-        retry: false,
-    });
-    const allow = useMutation({
-        mutationFn: async (denial: HttpDenial) => {
-            const document = await api<RulesDocument>("rules");
-            const pathnameRegex = exactPathRegex(denial.pathname);
-            let changed = removeCoveredDnsRules(document, denial.domain);
-            if (
-                !document.rules.some(
-                    (rule) =>
-                        rule.fields.domain === denial.domain &&
-                        rule.fields.dns_only !== true &&
-                        Array.isArray(rule.fields.methods) &&
-                        rule.fields.methods.some((method) => method === denial.method) &&
-                        rule.fields.pathname_regex === pathnameRegex &&
-                        rule.fields.pathname_pattern === undefined &&
-                        rule.fields.inject_headers === undefined,
-                )
-            ) {
-                document.rules.unshift({
-                    index: null,
-                    fields: {
-                        domain: denial.domain,
-                        methods: [denial.method],
-                        pathname_regex: pathnameRegex,
-                    },
-                });
-                changed = true;
-            }
-            return changed ? api<RulesDocument>("rules", "PUT", document) : document;
-        },
-        onSuccess: async () => {
-            await client.invalidateQueries({ queryKey: ["rules"] });
-        },
-    });
-    if (denials.error instanceof ApiError && denials.error.status === 401) {
-        return null;
-    }
-    return (
-        <section aria-labelledby="http-denials-heading" className="mt-10">
-            <div className="flex items-center justify-between gap-4">
-                <h2 id="http-denials-heading" className="text-2xl font-semibold">
-                    HTTP denials
-                </h2>
-                <button
-                    className="button"
-                    aria-label="Refresh HTTP denials"
-                    disabled={denials.isFetching}
-                    onClick={() => void denials.refetch()}
-                >
-                    {denials.isFetching ? "Refreshing…" : "Refresh"}
-                </button>
-            </div>
-            <p className="my-4 text-slate-400">
-                The latest 100 denied HTTP and HTTPS requests, newest first. Kept in memory until
-                restart.
-            </p>
-            {denials.isPending && <p role="status">Loading HTTP denials…</p>}
-            {denials.error && (
-                <p role="alert" className="text-red-400">
-                    {denials.error.message}
-                </p>
-            )}
-            {allow.error && (
-                <p role="alert" className="mb-4 text-red-400">
-                    {allow.error.message}
-                </p>
-            )}
-            {allow.isSuccess && (
-                <p role="status" className="mb-4 text-teal-400">
-                    Method and pathname allowed.
-                </p>
-            )}
-            {denials.data?.length === 0 && <p>No HTTP denials yet.</p>}
-            {denials.data && denials.data.length > 0 && (
-                <div className="overflow-x-auto rounded-xl border border-slate-800">
-                    <table className="w-full text-left text-sm">
-                        <caption className="sr-only">Latest HTTP denials</caption>
-                        <thead className="bg-slate-900 text-slate-400">
-                            <tr>
-                                {["Domain", "Method", "Pathname", "Denied at", "Action"].map(
-                                    (label) => (
-                                        <th key={label} className="p-3">
-                                            {label}
-                                        </th>
-                                    ),
-                                )}
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {denials.data.map((denial, index) => (
-                                <tr
-                                    key={`${denial.timestamp}:${index}`}
-                                    className="border-t border-slate-800"
-                                >
-                                    <th scope="row" className="p-3 font-medium">
-                                        {denial.domain}
-                                    </th>
-                                    <td className="p-3">{denial.method}</td>
-                                    <td className="p-3 font-mono">{denial.pathname}</td>
-                                    <td className="p-3">
-                                        <time dateTime={denial.timestamp}>{denial.timestamp}</time>
-                                    </td>
-                                    <td className="p-3">
-                                        <button
-                                            className="button whitespace-nowrap"
-                                            aria-label={`Allow ${denial.domain} ${denial.method} ${denial.pathname}`}
-                                            disabled={allow.isPending}
-                                            onClick={() => allow.mutate(denial)}
-                                        >
-                                            Allow method and pathname
-                                        </button>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            )}
-        </section>
-    );
-}
-
-/** Parameters shared by domain allowance actions in either outcome table. */
-interface DomainAllowance {
-    domain: string;
-    dnsOnly: boolean;
-    includeSubdomains?: boolean;
-}
-
-/** Show only one policy outcome, ordered by its own latest occurrence. */
-function DomainOutcomesTable({
-    domains,
-    outcome,
-    isPending,
-    onAllow,
-}: {
-    domains: DomainStats[];
-    outcome: "allow" | "block";
-    isPending: boolean;
-    onAllow: (allowance: DomainAllowance) => void;
-}) {
-    const title = outcome === "allow" ? "Domain allows" : "Domain denials";
-    const entries = domains.flatMap((entry) => {
-        const timestamp = outcome === "allow" ? entry.last_allowed : entry.last_denied;
-        return timestamp === null ? [] : [{ entry, timestamp }];
-    });
-    // The API emits UTC timestamps; omit Z so fractional seconds sort after whole seconds.
-    entries.sort(
-        (left, right) =>
-            right.timestamp.slice(0, -1).localeCompare(left.timestamp.slice(0, -1)) ||
-            left.entry.domain.localeCompare(right.entry.domain),
-    );
-    return (
-        <section aria-labelledby={`domain-${outcome}-heading`} className="mt-8">
-            <h2 id={`domain-${outcome}-heading`} className="mb-4 text-2xl font-semibold">
-                {title}
-            </h2>
-            {entries.length === 0 ? (
-                <p>{outcome === "allow" ? "No domain allows yet." : "No domain denials yet."}</p>
-            ) : (
-                <div className="overflow-x-auto rounded-xl border border-slate-800">
-                    <table className="w-full text-left text-sm">
-                        <caption className="sr-only">{title}, latest outcome first</caption>
-                        <thead className="bg-slate-900 text-slate-400">
-                            <tr>
-                                {[
-                                    "Domain",
-                                    "DNS",
-                                    "HTTP",
-                                    "Total",
-                                    outcome === "allow" ? "Last allowed" : "Last denied",
-                                    "Action",
-                                ].map((label) => (
-                                    <th key={label} className="p-3">
-                                        {label}
-                                    </th>
-                                ))}
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {entries.map(({ entry, timestamp }) => (
-                                <tr key={entry.domain} className="border-t border-slate-800">
-                                    <th scope="row" className="p-3 font-medium">
-                                        {entry.domain}
-                                    </th>
-                                    <td className="p-3">{entry.dns[outcome]}</td>
-                                    <td className="p-3">{entry.http[outcome]}</td>
-                                    <td className="p-3">
-                                        {entry.dns[outcome] + entry.http[outcome]}
-                                    </td>
-                                    <td className="p-3">
-                                        <time dateTime={timestamp}>{timestamp}</time>
-                                    </td>
-                                    <td className="p-3">
-                                        <div className="flex gap-2">
-                                            <button
-                                                className="button whitespace-nowrap"
-                                                aria-label={`Allow ${entry.domain} completely`}
-                                                disabled={isPending}
-                                                onClick={() =>
-                                                    onAllow({
-                                                        domain: entry.domain,
-                                                        dnsOnly: false,
-                                                    })
-                                                }
-                                            >
-                                                Allow completely
-                                            </button>
-                                            <button
-                                                className="button whitespace-nowrap"
-                                                aria-label={`Allow ${entry.domain} DNS only`}
-                                                disabled={isPending}
-                                                onClick={() =>
-                                                    onAllow({
-                                                        domain: entry.domain,
-                                                        dnsOnly: true,
-                                                    })
-                                                }
-                                            >
-                                                Allow DNS only
-                                            </button>
-                                            <button
-                                                className="button whitespace-nowrap"
-                                                aria-label={`Allow ${entry.domain} with subdomains`}
-                                                disabled={isPending}
-                                                onClick={() =>
-                                                    onAllow({
-                                                        domain: entry.domain,
-                                                        dnsOnly: false,
-                                                        includeSubdomains: true,
-                                                    })
-                                                }
-                                            >
-                                                Allow with subdomains
-                                            </button>
-                                        </div>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            )}
-        </section>
-    );
-}
-
-/** Show seen domains and allow an exact domain, DNS only, or a domain with subdomains. */
-function DomainsPage() {
-    const client = useQueryClient();
-    const domains = useQuery({
-        queryKey: ["domains"],
-        queryFn: () => api<DomainStats[]>("domains"),
-        refetchOnWindowFocus: false,
-        refetchOnReconnect: false,
-        retry: false,
-    });
-    const allow = useMutation({
-        mutationFn: async ({ domain, dnsOnly, includeSubdomains = false }: DomainAllowance) => {
-            const document = await api<RulesDocument>("rules");
-            let changed = !dnsOnly && removeCoveredDnsRules(document, domain, includeSubdomains);
-            if (
-                !document.rules.some(
-                    (rule) =>
-                        rule.fields.domain === domain &&
-                        (!includeSubdomains || rule.fields.include_subdomains === true) &&
-                        (dnsOnly ||
-                            (rule.fields.dns_only !== true &&
-                                rule.fields.methods === "ANY" &&
-                                rule.fields.pathname_pattern === undefined &&
-                                rule.fields.pathname_regex === undefined &&
-                                rule.fields.inject_headers === undefined)),
-                )
-            ) {
-                document.rules.unshift({
-                    index: null,
-                    fields: {
-                        domain,
-                        ...(dnsOnly ? { dns_only: true } : { methods: "ANY" }),
-                        ...(includeSubdomains ? { include_subdomains: true } : {}),
-                    },
-                });
-                changed = true;
-            }
-            return changed ? api<RulesDocument>("rules", "PUT", document) : document;
-        },
-        onSuccess: async () => {
-            await client.invalidateQueries({ queryKey: ["rules"] });
-        },
-    });
-    let successMessage = "Domain allowed on all routes and methods.";
-    if (allow.variables?.dnsOnly) {
-        successMessage = "Domain allowed for DNS only.";
-    } else if (allow.variables?.includeSubdomains) {
-        successMessage = "Domain and its subdomains allowed on all routes and methods.";
-    }
-    return (
-        <section>
-            <div className="flex items-center justify-between gap-4">
-                <h1 className="text-3xl font-semibold">Domains</h1>
-                <button
-                    className="button"
-                    aria-label="Refresh domains"
-                    disabled={domains.isFetching}
-                    onClick={() => void domains.refetch()}
-                >
-                    {domains.isFetching ? "Refreshing…" : "Refresh"}
-                </button>
-            </div>
-            <p className="my-4 text-slate-400">
-                Allows and denials since startup, each ordered by its latest occurrence. A domain
-                can appear in both tables. HTTP includes HTTPS.
-            </p>
-            {domains.isPending && <p role="status">Loading domains…</p>}
-            {domains.error instanceof ApiError && domains.error.status === 401 ? (
-                <Link className="button inline-block" to="/login">
-                    Sign in
-                </Link>
-            ) : (
-                domains.error && <p role="alert">{domains.error.message}</p>
-            )}
-            {allow.error && (
-                <p role="alert" className="mb-4 text-red-400">
-                    {allow.error.message}
-                </p>
-            )}
-            {allow.isSuccess && (
-                <p role="status" className="mb-4 text-teal-400">
-                    {successMessage}
-                </p>
-            )}
-            {domains.data && (
-                <>
-                    <DomainOutcomesTable
-                        domains={domains.data}
-                        outcome="block"
-                        isPending={allow.isPending}
-                        onAllow={allow.mutate}
-                    />
-                    <DomainOutcomesTable
-                        domains={domains.data}
-                        outcome="allow"
-                        isPending={allow.isPending}
-                        onAllow={allow.mutate}
-                    />
-                </>
-            )}
-            <HttpDenialsTable />
-        </section>
-    );
-}
-
-const rootRoute = createRootRoute({ component: Layout });
-const indexRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: "/",
-    component: RulesPage,
+const rootRoute = createRootRoute({
+    component: () => (
+        <ToastProvider>
+            <Outlet />
+        </ToastProvider>
+    ),
 });
 const loginRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/login",
+    validateSearch: (search: Record<string, unknown>): { redirect?: string } => {
+        const destination = safeRedirect(search.redirect);
+        return destination ? { redirect: destination } : {};
+    },
     component: LoginPage,
+});
+const appRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    id: "app",
+    beforeLoad: () => {
+        if (!hasSession()) {
+            requireLogin();
+        }
+    },
+    component: AppShell,
+});
+const trafficRoute = createRoute({
+    getParentRoute: () => appRoute,
+    path: "/",
+    validateSearch: (search: Record<string, unknown>): { view?: string } =>
+        search.view === undefined ? {} : { view: parseTrafficView(search.view) },
+    component: () => <TrafficPage view={parseTrafficView(trafficRoute.useSearch().view)} />,
+});
+const rulesRoute = createRoute({
+    getParentRoute: () => appRoute,
+    path: "/rules",
+    component: RulesPage,
 });
 const domainsRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/domains",
-    component: DomainsPage,
+    beforeLoad: () => {
+        throw redirect({ to: "/", search: {} });
+    },
 });
 const router = createRouter({
-    routeTree: rootRoute.addChildren([indexRoute, loginRoute, domainsRoute]),
+    routeTree: rootRoute.addChildren([
+        loginRoute,
+        domainsRoute,
+        appRoute.addChildren([trafficRoute, rulesRoute]),
+    ]),
 });
-const queryClient = new QueryClient();
+
+/** Return to the login page when the server rejects the stored session. */
+function onApiError(error: Error) {
+    if (error instanceof ApiError && error.status === 401 && !hasSession()) {
+        const { pathname, search } = window.location;
+        if (pathname !== "/login") {
+            void router.navigate({ to: "/login", search: { redirect: `${pathname}${search}` } });
+        }
+    }
+}
+
+const queryClient = new QueryClient({
+    queryCache: new QueryCache({ onError: onApiError }),
+    mutationCache: new MutationCache({ onError: onApiError }),
+});
 
 declare module "@tanstack/react-router" {
     interface Register {

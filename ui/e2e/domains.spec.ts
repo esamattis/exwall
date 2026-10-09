@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import type { RulesDocument } from "#playwright_helpers/test_fixtures.mts";
 import {
     test,
@@ -11,6 +12,11 @@ import { join } from "node:path";
 import { fixtureOperation, fixtureRules, networkRequest } from "#playwright_helpers/client.mts";
 import { queryDns } from "#playwright_helpers/dns.mts";
 import { exchange, tlsExchange } from "#playwright_helpers/proxy_fixture.mts";
+
+/** Select one view of the Traffic page by its tab label. */
+async function showTab(page: Page, label: string) {
+    await page.getByRole("tab", { name: new RegExp(`^${label}`) }).click();
+}
 
 /** Domain snapshots contain only current protocol totals and the latest update. */
 interface DomainStats {
@@ -56,9 +62,10 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
     await page.getByRole("textbox", { name: "Username" }).fill("admin");
     await page.getByLabel("Password", { exact: true }).fill("integration-password");
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
-    await page.getByRole("link", { name: "Domains", exact: true }).click();
-    await expect(page.getByText("No domain allows yet.")).toBeVisible();
-    await expect(page.getByText("No domain denials yet.")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Traffic", exact: true })).toBeVisible();
+    await expect(page.getByText("No blocked domains yet")).toBeVisible();
+    await showTab(page, "Allowed domains");
+    await expect(page.getByText("No allowed domains yet")).toBeVisible();
 
     expect(await queryDns("127.0.0.1", fixture.dnsPort, "LOCALHOST")).toBe(0);
     expect(await queryDns("127.0.0.1", fixture.dnsPort, "denied.test")).toBe(5);
@@ -107,12 +114,13 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
     }
     // Traffic and elapsed time must not update the page without a refresh.
     await page.clock.runFor(3000);
-    await expect(page.getByText("No domain allows yet.")).toBeVisible();
-    await expect(page.getByText("No domain denials yet.")).toBeVisible();
+    await expect(page.getByText("No allowed domains yet")).toBeVisible();
+    await showTab(page, "Blocked domains");
+    await expect(page.getByText("No blocked domains yet")).toBeVisible();
     expect(domainRequests).toBe(1);
-    await page.getByRole("button", { name: "Refresh domains", exact: true }).click();
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
     const rows = page
-        .getByRole("table", { name: "Domain denials, latest outcome first" })
+        .getByRole("table", { name: "Blocked domains, latest first" })
         .locator("tbody tr");
     await expect(rows).toHaveCount(3);
     await expect(rows.nth(0).getByRole("rowheader")).toHaveText("denied.test");
@@ -122,18 +130,20 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
     await expect(denied.getByRole("cell").nth(0)).toHaveText("2");
     await expect(denied.getByRole("cell").nth(1)).toHaveText("0");
     await expect(denied.getByRole("cell").nth(2)).toHaveText("2");
+    await expect(denied.locator("time")).toHaveAttribute("datetime", before[0]!.last_updated);
     const allowedRows = page
-        .getByRole("table", { name: "Domain allows, latest outcome first" })
+        .getByRole("table", { name: "Allowed domains, latest first" })
         .locator("tbody tr");
+    await showTab(page, "Allowed domains");
     await expect(allowedRows).toHaveCount(2);
     await expect(allowedRows.getByRole("rowheader")).toHaveText(["localhost", "127.0.0.1"]);
     await expect(allowedRows.nth(0).getByRole("cell").nth(0)).toHaveText("1");
     await expect(allowedRows.nth(0).getByRole("cell").nth(1)).toHaveText("1");
     await expect(allowedRows.nth(0).getByRole("cell").nth(2)).toHaveText("2");
-    await expect(denied.locator("time")).toHaveAttribute("datetime", before[0]!.last_updated);
 
+    await showTab(page, "Blocked domains");
     await page
-        .getByRole("region", { name: "Domain denials", exact: true })
+        .getByRole("tabpanel")
         .getByRole("button", { name: "Allow 127.0.0.1 completely", exact: true })
         .click();
     await expect(page.getByRole("status")).toHaveText("Domain allowed on all routes and methods.");
@@ -154,9 +164,11 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
     }
     await expect(rows.nth(0).getByRole("rowheader")).toHaveText("denied.test");
     expect(domainRequests).toBe(2);
-    await page.getByRole("button", { name: "Refresh domains", exact: true }).click();
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await showTab(page, "Allowed domains");
     await expect(allowedRows.nth(0).getByRole("rowheader")).toHaveText("127.0.0.1");
     await expect(allowedRows.nth(0).getByRole("cell").nth(1)).toHaveText("4");
+    await showTab(page, "Blocked domains");
     await expect(rows.getByRole("rowheader")).toHaveText(["denied.test", "localhost", "127.0.0.1"]);
     await expect(rows.nth(2).locator("time")).toHaveAttribute("datetime", before[2]!.last_denied!);
     const after = await snapshot();
@@ -166,17 +178,18 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
     expect(Date.parse(after[0]!.last_updated)).toBeGreaterThan(Date.parse(before[2]!.last_updated));
     expect(after.find((entry) => entry.domain === "denied.test")).toEqual(before[0]);
     await page
-        .getByRole("region", { name: "Domain denials", exact: true })
+        .getByRole("tabpanel")
         .getByRole("button", { name: "Allow 127.0.0.1 completely", exact: true })
         .click();
     await expect(
         page
-            .getByRole("region", { name: "Domain denials", exact: true })
+            .getByRole("tabpanel")
             .getByRole("button", { name: "Allow 127.0.0.1 completely", exact: true }),
     ).toBeEnabled();
     expect(await readFile(join(fixture.rules, "05-web.toml"), "utf8")).toBe(persisted);
     await page.reload();
     await expect(rows).toHaveCount(3);
+    await showTab(page, "Allowed domains");
     await expect(allowedRows.nth(0).getByRole("cell").nth(1)).toHaveText("4");
 });
 
@@ -205,16 +218,13 @@ firewallTest(
         };
         /** Wait for a button's save to finish before checking persisted and active policy. */
         const allow = async (name: string, message: string) => {
-            await page
-                .getByRole("region", { name: "Domain denials", exact: true })
-                .getByRole("button", { name, exact: true })
-                .click();
+            await page.getByRole("tabpanel").getByRole("button", { name, exact: true }).click();
             await expect(page.getByRole("status")).toHaveText(message);
         };
         await expect.poll(() => dns("openai.com")).toEqual({ result: 5 });
         expect(await dns("api.openai.com")).toEqual({ result: 5 });
         expect(await http("openai.com")).toBe(403);
-        await page.goto("/domains");
+        await page.goto("/");
         await allow("Allow openai.com DNS only", "Domain allowed for DNS only.");
         const dnsOnly = await fixtureRules();
         expect(dnsOnly).toContain('domain = "openai.com"');
@@ -230,10 +240,11 @@ firewallTest(
         await allow("Allow openai.com DNS only", "Domain allowed for DNS only.");
         expect(await fixtureRules()).toBe(dnsOnly);
         await page.getByRole("link", { name: "Rules", exact: true }).click();
+        await page.getByRole("button", { name: "Rule 1", exact: true }).click();
         await expect(
-            page.getByRole("combobox", { name: "Rule 1 dns_only", exact: true }),
-        ).toHaveValue("true");
-        await page.getByRole("link", { name: "Domains", exact: true }).click();
+            page.getByRole("switch", { name: "Rule 1 DNS only", exact: true }),
+        ).toBeChecked();
+        await page.getByRole("link", { name: "Traffic", exact: true }).click();
 
         await allow("Allow openai.com completely", "Domain allowed on all routes and methods.");
         expect(await fixtureRules()).not.toContain("dns_only");
@@ -267,7 +278,7 @@ firewallTest(
         await page.reload();
         await expect(
             page
-                .getByRole("region", { name: "Domain denials", exact: true })
+                .getByRole("tabpanel")
                 .getByRole("button", { name: "Allow openai.com with subdomains", exact: true }),
         ).toBeVisible();
         expect(await http("api.openai.com", "https", "DELETE")).toBe(200);
@@ -307,9 +318,9 @@ test("last 100 HTTP denials refresh manually and allow only an exact method and 
     };
     expect((await page.request.get(`${ui}/api/http-denials`)).status()).toBe(401);
     await loginBrowser(page, ui, "integration-password");
-    await page.goto(`${ui}/domains`);
-    const section = page.getByRole("region", { name: "HTTP denials", exact: true });
-    await expect(section.getByText("No HTTP denials yet.")).toBeVisible();
+    await page.goto(`${ui}/?view=requests`);
+    const section = page.getByRole("tabpanel");
+    await expect(section.getByText("No blocked requests yet")).toBeVisible();
     expect(await queryDns("127.0.0.1", fixture.dnsPort, "denied.test")).toBe(5);
     expect((await http("/allowed?upstream_status=502", "GET")).status).toBe(502);
     for (let index = 0; index < 104; index += 1) {
@@ -329,9 +340,11 @@ test("last 100 HTTP denials refresh manually and allow only an exact method and 
     expect(before[1]).toMatchObject({ domain: "127.0.0.1", method: "POST", pathname });
     expect(before[99]!.pathname).toBe("/denied/6");
     expect(JSON.stringify(before)).not.toContain("secret");
-    await expect(section.getByText("No HTTP denials yet.")).toBeVisible();
-    await section.getByRole("button", { name: "Refresh HTTP denials", exact: true }).click();
-    const rows = section.getByRole("table", { name: "Latest HTTP denials" }).locator("tbody tr");
+    await expect(section.getByText("No blocked requests yet")).toBeVisible();
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    const rows = section
+        .getByRole("table", { name: "Blocked requests, latest first" })
+        .locator("tbody tr");
     await expect(rows).toHaveCount(100);
     await expect(rows.nth(0).getByRole("rowheader")).toHaveText("localhost");
     await expect(rows.nth(1).getByRole("cell").nth(1)).toHaveText(pathname);
@@ -340,7 +353,7 @@ test("last 100 HTTP denials refresh manually and allow only an exact method and 
         exact: true,
     });
     await button.click();
-    await expect(section.getByRole("status")).toHaveText("Method and pathname allowed.");
+    await expect(page.getByRole("status")).toHaveText("Method and pathname allowed.");
     const document: RulesDocument = await (
         await page.request.get(`${ui}/api/rules`, { headers: await sessionHeaders(page) })
     ).json();
@@ -373,7 +386,7 @@ test("last 100 HTTP denials refresh manually and allow only an exact method and 
     expect(after).toHaveLength(100);
     expect(after[0]).toMatchObject({ method: "POST", pathname: "/denied/103" });
     await expect(rows.nth(0).getByRole("rowheader")).toHaveText("localhost");
-    await section.getByRole("button", { name: "Refresh HTTP denials", exact: true }).click();
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
     await expect(rows.nth(0).getByRole("cell").nth(1)).toHaveText("/denied/103");
     await page.reload();
     await expect(rows).toHaveCount(100);
@@ -459,7 +472,7 @@ test("HTTP allow actions remove only fully covered DNS-only rules, including dup
                 })
             ).status(),
         ).toBe(200);
-        await page.goto(`${ui}/domains`);
+        await page.goto(entry.button === denial ? `${ui}/?view=requests` : `${ui}/`);
         await page.getByRole("button", { name: entry.button, exact: true }).click();
         let message = "Domain allowed on all routes and methods.";
         if (entry.button === denial) {

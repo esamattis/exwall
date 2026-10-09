@@ -13,10 +13,10 @@ test("browser sessions persist only at the UI origin and logout revokes them", a
     const ui = `http://127.0.0.1:${fixture.uiPort}`;
     await loginBrowser(page, ui, "integration-password");
     await page.goto(ui);
-    await expect(page.getByRole("heading", { name: "Rules", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Traffic", exact: true })).toBeVisible();
     const headers = await sessionHeaders(page);
     await page.reload();
-    await expect(page.getByRole("heading", { name: "Rules", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Traffic", exact: true })).toBeVisible();
 
     const received: { cookie: string | undefined; authorization: string | undefined }[] = [];
     const other = createServer((request, response) => {
@@ -42,7 +42,7 @@ test("browser sessions persist only at the UI origin and logout revokes them", a
         expect(received.length).toBeGreaterThanOrEqual(2);
         expect(received.every((request) => !request.cookie && !request.authorization)).toBe(true);
         await page.goto(ui);
-        await expect(page.getByRole("heading", { name: "Rules", exact: true })).toBeVisible();
+        await expect(page.getByRole("heading", { name: "Traffic", exact: true })).toBeVisible();
         await page.getByRole("button", { name: "Sign out", exact: true }).click();
         await expect(page.getByRole("heading", { name: "Sign in", exact: true })).toBeVisible();
         expect(await page.evaluate(() => localStorage.getItem("exwall.session"))).toBeNull();

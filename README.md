@@ -68,7 +68,7 @@ not required.
 
 ## Web UI development
 
-The login and rules editor use React, TypeScript, TanStack Router and Query, Tailwind
+The web UI uses React, TypeScript, TanStack Router and Query, Tailwind
 CSS, and Vite. TypeScript is strict with `noUncheckedIndexedAccess`. Oxlint runs
 with type-aware checks, and oxfmt formats the frontend. Package versions are
 pinned in `package.json` and `pnpm-lock.yaml`. Node and pnpm versions are defined
@@ -124,26 +124,35 @@ proxy account (`exwall` by default) with mode `0600`. The rules directory remain
 owned by root; the UI writes this file without needing permission to replace
 other rule files.
 
-The Domains page shows separate allows and denials tables for domains encountered
-since startup. Each table has DNS, HTTP, and total counts and is ordered by the
-latest occurrence of its own outcome. Domains with both outcomes appear in both
-tables; new allows do not change a domain's last denial time or vice versa.
-Use the Refresh button to update both tables; they do not poll automatically.
+Opening the UI without a session redirects to the login page, which returns to
+the requested page after signing in. The Traffic page (the start page) shows
+summary counters and three tabs: Blocked domains, Allowed domains, and Blocked
+requests. The domain tabs list domains encountered since startup with DNS, HTTP,
+and total counts, ordered by the latest occurrence of their own outcome. Domains
+with both outcomes appear in both tabs; new allows do not change a domain's last
+denial time or vice versa. Each tab can be filtered by domain. Use the Refresh
+button to update all tabs; they do not poll automatically.
 HTTP includes HTTPS. Counters and the latest timestamps are retained in memory
 and reset when exwall restarts. At most 1000 domains are tracked; when a new
-domain arrives at the limit, the domain updated least recently is dropped. “Allow completely” saves an exact
+domain arrives at the limit, the domain updated least recently is dropped.
+Each blocked domain has three actions. “Allow” saves an exact
 domain rule in `05-web.toml` with `methods = "ANY"` and no pathname restrictions,
-allowing DNS and every HTTP route and method. “Allow DNS only” instead saves
+allowing DNS and every HTTP route and method. “DNS only” instead saves
 `dns_only = true`, allowing DNS queries without authorizing HTTP, HTTPS, or CONNECT.
-“Allow with subdomains” saves `include_subdomains = true` and `methods = "ANY"`,
+“+ Subdomains” saves `include_subdomains = true` and `methods = "ANY"`,
 authorizing the domain and its subdomains for DNS and all HTTP routes and methods.
-Adding an HTTP allowance from the Domains page also removes DNS-only rules in
+Adding an HTTP allowance from the Traffic page also removes DNS-only rules in
 `05-web.toml` whose entire domain and subdomain scope it covers. Broader DNS-only
 rules, multi-domain rules with uncovered domains, and regex rules are retained.
 
-The rules page lists the allow tables in `05-web.toml` under the configured rules
-directory, with plain-text fields, boolean and method selectors, header rows, and add/remove controls.
-Enter one domain or pattern per line; quotes and TOML escaping are handled automatically.
+The Rules page lists the allow tables in `05-web.toml` under the configured rules
+directory as collapsible cards that summarize each rule's domains, methods, and
+paths. Expanding a card shows exact-name or regex domain matching, subdomain and
+DNS-only switches, method choices, path patterns and regexes, and injected
+header rows. Enter one domain or pattern per line; quotes and TOML escaping are
+handled automatically. Edits are collected until saved from the bar at the
+bottom of the page, which can also discard them; a rule named in a validation
+error is opened and highlighted.
 Saving uses `toml_edit` to retain unchanged formatting and comments, validates the
 rules, and writes the service-owned file. Concurrent file edits return a conflict;
 reload the file before retrying. Other TOML rule files are unaffected. Every save
@@ -153,7 +162,7 @@ the save is still written but the previous policy stays active: the API returns
 HTTP 500 saying the rules could not be activated, and the saved rules take effect
 once the complete ruleset loads again.
 
-A separate HTTP denials table keeps the latest 100 denied HTTP/HTTPS requests
+The Blocked requests tab keeps the latest 100 denied HTTP/HTTPS requests
 in memory, newest first, including repeated requests. Refresh it manually.
 Each row can allow the exact domain, method, and pathname; query strings are
 excluded and pathname metacharacters are matched literally. This list resets
