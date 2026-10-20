@@ -122,9 +122,12 @@ pub enum HookError {
     /// Ownership could not be restored.
     #[error("failed to restore file ownership")]
     Chown(#[source] io::Error),
-    /// The UI rules path is not a regular file.
-    #[error("UI rules must be a regular file")]
-    WebRulesNotFile,
+    /// A rules path is not a regular file.
+    #[error("rules file {} must be a regular file", path.display())]
+    RulesNotFile {
+        /// The rules path.
+        path: PathBuf,
+    },
     /// Installation failed after the guard was installed.
     #[error("startup failed; enforcement retained; repair and retry or explicitly run hook stop")]
     StartFailed(#[source] Box<HookError>),

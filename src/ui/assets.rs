@@ -11,12 +11,13 @@ fn find(name: &str) -> Option<&'static (&'static str, &'static [u8])> {
 
 /// Report whether a missing path is an HTML navigation that should receive the SPA.
 ///
-/// Missing assets and API paths must stay 404; only extensionless routes fall back.
+/// Missing assets and API paths must stay 404; only extensionless routes and
+/// rule file editors, whose file names end in `.toml`, fall back.
 fn is_navigation(path: &str) -> bool {
-    !path.starts_with("assets/")
-        && path != "api"
-        && !path.starts_with("api/")
-        && !path.rsplit('/').next().unwrap_or_default().contains('.')
+    if path.starts_with("assets/") || path == "api" || path.starts_with("api/") {
+        return false;
+    }
+    path.starts_with("rules/") || !path.rsplit('/').next().unwrap_or_default().contains('.')
 }
 
 /// Serve GET/HEAD assets and HTML navigation fallbacks without touching disk.
@@ -96,8 +97,10 @@ mod tests {
         assert_eq!(index.headers()[header::CACHE_CONTROL], "no-cache");
         let bytes = index.into_body().collect().await.unwrap().to_bytes();
         assert!(String::from_utf8_lossy(&bytes).contains("<title>exwall</title>"));
-        let navigation = response(&request(Method::GET, "/future/page?query=value"));
-        assert_eq!(navigation.into_body().collect().await.unwrap().to_bytes(), bytes);
+        for path in ["/future/page?query=value", "/rules/05-web.toml"] {
+            let navigation = response(&request(Method::GET, path));
+            assert_eq!(navigation.into_body().collect().await.unwrap().to_bytes(), bytes);
+        }
         let (name, expected) = ASSETS.iter().find(|(name, _)| name.ends_with(".js")).unwrap();
         let asset = response(&request(Method::GET, &format!("/{name}")));
         assert_eq!(asset.headers()[header::CONTENT_TYPE], "text/javascript; charset=utf-8");

@@ -1,16 +1,21 @@
 import { useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import {
     api,
+    rulesPath,
+    webRulesFile,
     type FieldValue,
     type InjectedHeader,
     type RuleDraft,
+    type RuleFileSummary,
     type RulesDocument,
 } from "./api.ts";
 import {
     ChevronIcon,
     EmptyState,
     ErrorBanner,
+    FilePath,
     FilterInput,
     PageHeader,
     PlusIcon,
@@ -64,17 +69,118 @@ function invalidRuleNumber(message: string | undefined): number | null {
     return match?.[1] ? Number(match[1]) : null;
 }
 
-/** Load the rules file and remount the editor whenever a new revision arrives. */
-export function RulesPage() {
+/** Describe a rule file's allow table count, or flag a file that cannot be read as rules. */
+function RuleCount({ rules }: { rules: number | null }) {
+    if (rules === null) {
+        return <span className="badge badge-warn">Unreadable</span>;
+    }
+    return (
+        <span className="badge badge-neutral">
+            {rules} {rules === 1 ? "rule" : "rules"}
+        </span>
+    );
+}
+
+/** The query listing every rule file, shared by the list and the editor's path display. */
+const ruleFilesQuery = {
+    queryKey: ["rules"],
+    queryFn: () => api<RuleFileSummary[]>("rules"),
+    retry: false,
+    refetchOnWindowFocus: false,
+};
+
+/** List every rule file in the rules directory with a link to its editor. */
+export function RuleFilesPage() {
+    const files = useQuery(ruleFilesQuery);
+    let content: ReactNode;
+    if (files.isPending) {
+        content = (
+            <p role="status" className="flex items-center gap-2 text-sm text-zinc-400">
+                <Spinner /> Loading rule files…
+            </p>
+        );
+    } else if (files.error) {
+        content = <ErrorBanner>{files.error.message}</ErrorBanner>;
+    } else if (files.data.length === 0) {
+        content = (
+            <div className="panel">
+                <EmptyState title="No rule files yet">
+                    Add <code className="text-zinc-300">*.toml</code> files to the rules directory,
+                    or allow blocked domains from the Traffic page.
+                </EmptyState>
+            </div>
+        );
+    } else {
+        content = (
+            <ul aria-label="Rule files" className="panel divide-y divide-white/10">
+                {files.data.map((file) => (
+                    <li key={file.name} className="flex items-center gap-2 pr-2">
+                        <div className="flex min-w-0 flex-1 flex-col gap-0.5 py-2 pl-4">
+                            <Link
+                                to="/rules/$file"
+                                params={{ file: file.name }}
+                                className="flex items-center gap-3 rounded-md transition hover:text-white focus-visible:ring-2 focus-visible:ring-emerald-400/60 focus-visible:outline-none"
+                            >
+                                <span className="min-w-0 truncate font-mono text-[13px] font-medium text-zinc-100">
+                                    {file.name}
+                                </span>
+                                <RuleCount rules={file.rules} />
+                            </Link>
+                            <FilePath path={file.path} />
+                        </div>
+                        <Link
+                            to="/rules/$file"
+                            params={{ file: file.name }}
+                            aria-label={`Edit ${file.name}`}
+                            className="btn btn-icon btn-ghost"
+                        >
+                            <ChevronIcon className="size-4 -rotate-90" />
+                        </Link>
+                    </li>
+                ))}
+            </ul>
+        );
+    }
+    return (
+        <div>
+            <PageHeader
+                title="Rules"
+                description={
+                    <>
+                        Rule files in the rules directory, loaded in name order. Domains allowed
+                        from the Traffic page are added to{" "}
+                        <code className="text-zinc-300">{webRulesFile}</code>.
+                    </>
+                }
+                actions={
+                    <button
+                        type="button"
+                        className="btn btn-secondary"
+                        disabled={files.isFetching}
+                        onClick={() => void files.refetch()}
+                    >
+                        <RefreshIcon />
+                        Refresh
+                    </button>
+                }
+            />
+            {content}
+        </div>
+    );
+}
+
+/** Load one rule file and remount the editor whenever a new revision arrives. */
+export function RulesPage({ file }: { file: string }) {
     const [generation, setGeneration] = useState(0);
     const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
     const [filter, setFilter] = useState("");
     const rules = useQuery({
-        queryKey: ["rules"],
-        queryFn: () => api<RulesDocument>("rules"),
+        queryKey: ["rules", file],
+        queryFn: () => api<RulesDocument>(rulesPath(file)),
         retry: false,
         refetchOnWindowFocus: false,
     });
+    const files = useQuery(ruleFilesQuery);
     if (rules.isPending) {
         return (
             <p role="status" className="flex items-center gap-2 text-sm text-zinc-400">
@@ -83,11 +189,18 @@ export function RulesPage() {
         );
     }
     if (rules.error) {
-        return <ErrorBanner>{rules.error.message}</ErrorBanner>;
+        return (
+            <div>
+                <BackToFiles />
+                <ErrorBanner>{rules.error.message}</ErrorBanner>
+            </div>
+        );
     }
     return (
         <Editor
             key={`${generation}:${rules.data.revision}`}
+            file={file}
+            path={files.data?.find((summary) => summary.name === file)?.path}
             document={rules.data}
             expanded={expanded}
             setExpanded={setExpanded}
@@ -102,8 +215,23 @@ export function RulesPage() {
     );
 }
 
-/** Edit the allow tables of 05-web.toml and save them as one revision-checked document. */
+/** Link back to the list of rule files. */
+function BackToFiles() {
+    return (
+        <Link
+            to="/rules"
+            className="mb-3 inline-flex items-center gap-1 text-sm text-zinc-400 transition hover:text-zinc-100"
+        >
+            <ChevronIcon className="size-4 rotate-90" />
+            All rule files
+        </Link>
+    );
+}
+
+/** Edit the allow tables of one rule file and save them as one revision-checked document. */
 function Editor({
+    file,
+    path,
     document,
     expanded,
     setExpanded,
@@ -112,6 +240,8 @@ function Editor({
     onReload,
     onDiscard,
 }: {
+    file: string;
+    path: string | undefined;
     document: RulesDocument;
     expanded: Set<number>;
     setExpanded: (update: (previous: Set<number>) => Set<number>) => void;
@@ -130,10 +260,11 @@ function Editor({
     const toast = useToast();
     const save = useMutation({
         mutationFn: () =>
-            api<RulesDocument>("rules", "PUT", { revision: document.revision, rules }),
-        onSuccess: (result) => {
-            client.setQueryData(["rules"], result);
+            api<RulesDocument>(rulesPath(file), "PUT", { revision: document.revision, rules }),
+        onSuccess: async (result) => {
+            client.setQueryData(["rules", file], result);
             toast("Changes saved.");
+            await client.invalidateQueries({ queryKey: ["rules"], exact: true });
         },
         onError: (error) => {
             const number = invalidRuleNumber(error.message);
@@ -186,7 +317,7 @@ function Editor({
 
     /** Ask before discarding edits, then load the file again. */
     function reload() {
-        if (!dirty || window.confirm("Reload 05-web.toml and discard unsaved edits?")) {
+        if (!dirty || window.confirm(`Reload ${file} and discard unsaved edits?`)) {
             void onReload();
         }
     }
@@ -207,11 +338,16 @@ function Editor({
                 save.mutate();
             }}
         >
+            <BackToFiles />
             <PageHeader
-                title="Rules"
+                title={file}
                 description={
                     <>
-                        Allow rules stored in <code className="text-zinc-300">05-web.toml</code>.
+                        {path && (
+                            <span className="mb-1 block">
+                                <FilePath path={path} />
+                            </span>
+                        )}
                         Rules in other files stay active and are not shown here. Saved rules are
                         validated and enforced immediately.
                     </>
@@ -277,8 +413,10 @@ function Editor({
             )}
             {rules.length === 0 && (
                 <div className="panel">
-                    <EmptyState title="No rules in 05-web.toml yet">
-                        Add a rule here, or allow blocked domains from the Traffic page.
+                    <EmptyState title={`No rules in ${file} yet`}>
+                        {file === webRulesFile
+                            ? "Add a rule here, or allow blocked domains from the Traffic page."
+                            : "Add a rule here."}
                     </EmptyState>
                 </div>
             )}

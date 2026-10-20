@@ -53,17 +53,23 @@ test("local proxy protocols, TLS trust, streaming, DNS, reloads, UI API, and acc
     expect(
         (await readdir(join(fixture.root, "sessions"))).filter((name) => name.endsWith(".json")),
     ).toHaveLength(1);
-    let document = await (await request.get(`${ui}/api/rules`, { headers })).json();
+    expect(await (await request.get(`${ui}/api/rules`, { headers })).json()).toEqual([
+        { name: "05-web.toml", path: join(fixture.rules, "05-web.toml"), rules: 0 },
+        { name: "1-test.toml", path: join(fixture.rules, "1-test.toml"), rules: 2 },
+    ]);
+    const webRules = `${ui}/api/rules/05-web.toml`;
+    expect((await request.get(`${ui}/api/rules/missing.toml`, { headers })).status()).toBe(404);
+    let document = await (await request.get(webRules, { headers })).json();
     expect(document.rules).toEqual([]);
     document.rules = [{ index: null, fields: { domain: "ui.test" } }];
-    const saved = await request.put(`${ui}/api/rules`, { headers, data: document });
+    const saved = await request.put(webRules, { headers, data: document });
     expect(saved.status()).toBe(200);
     document = await saved.json();
     expect(await readFile(join(fixture.rules, "05-web.toml"), "utf8")).toContain(
         'domain = "ui.test"',
     );
     await expect.poll(() => queryDns("127.0.0.1", dnsPort, "ui.test")).toBe(0);
-    const basic = await request.get(`${ui}/api/rules`, {
+    const basic = await request.get(webRules, {
         headers: {
             Authorization: `Basic ${Buffer.from("admin:integration-password").toString("base64")}`,
             Cookie: "",
@@ -72,7 +78,7 @@ test("local proxy protocols, TLS trust, streaming, DNS, reloads, UI API, and acc
     expect(basic.status()).toBe(200);
     expect((await basic.json()).revision).toBe(document.revision);
     document.rules = [];
-    expect((await request.put(`${ui}/api/rules`, { headers, data: document })).status()).toBe(200);
+    expect((await request.put(webRules, { headers, data: document })).status()).toBe(200);
     expect((await request.post(`${ui}/api/logout`, { headers, data: {} })).status()).toBe(200);
     expect(
         (await readdir(join(fixture.root, "sessions"))).filter((name) => name.endsWith(".json")),

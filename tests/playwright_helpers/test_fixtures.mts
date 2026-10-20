@@ -97,17 +97,17 @@ export const test = base.extend<Fixtures>({
         expect(login.status()).toBe(200);
         const { token }: { token: string } = await login.json();
         const headers = { Authorization: `Bearer ${token}` };
-        const originalResponse = await request.get("/api/rules", { headers });
+        const originalResponse = await request.get("/api/rules/05-web.toml", { headers });
         expect(originalResponse.status()).toBe(200);
         const original: RulesDocument = await originalResponse.json();
         await use();
         try {
             await attachPolicy(testInfo);
         } finally {
-            const currentResponse = await request.get("/api/rules", { headers });
+            const currentResponse = await request.get("/api/rules/05-web.toml", { headers });
             expect(currentResponse.status()).toBe(200);
             const current: RulesDocument = await currentResponse.json();
-            const restored = await request.put("/api/rules", {
+            const restored = await request.put("/api/rules/05-web.toml", {
                 headers,
                 data: {
                     revision: current.revision,

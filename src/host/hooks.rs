@@ -2,7 +2,7 @@
 
 use super::{
     error::HookError,
-    files::{ResolverPaths, prepare_web_rules_file, replace_resolver, restore_resolver},
+    files::{ResolverPaths, prepare_rule_files, replace_resolver, restore_resolver},
     firewall::Firewall,
     iptables::{BUILTIN_OUTPUT, Family, GUARD_CHAIN, OUTPUT_CHAIN, Table},
     plan::{
@@ -19,7 +19,7 @@ use std::{fs, os::unix::io::AsRawFd, path::PathBuf};
 /// Host paths and listener settings used by privileged service hooks.
 #[derive(Clone, Debug)]
 pub struct HookSettings {
-    /// Directory containing administrator rules and the private UI rules file.
+    /// Directory containing the rule files, all private to the proxy account.
     pub rules_dir: PathBuf,
     /// Private directory for state snapshots and the lifecycle lock.
     pub state_dir: PathBuf,
@@ -213,7 +213,7 @@ impl<'a> Hooks<'a> {
         for firewall in &firewalls {
             firewall.apply_all(&setup_guard_steps())?;
         }
-        self.prepare_web_rules()?;
+        self.prepare_rule_files()?;
         if self.mode == Mode::Live {
             if config.manage_resolv_conf {
                 replace_resolver(self.system, &self.state(), &self.settings.resolver)?;
@@ -230,21 +230,20 @@ impl<'a> Hooks<'a> {
         Ok(())
     }
 
-    /// Create the UI rules file owned by the proxy account with mode 0600.
-    fn prepare_web_rules(&self) -> Result<(), HookError> {
-        let path = self.settings.rules_dir.join(WEB_RULES_FILE);
+    /// Create the UI rules file and make every rule file owned by the proxy account with mode 0600.
+    fn prepare_rule_files(&self) -> Result<(), HookError> {
+        let directory = &self.settings.rules_dir;
         if self.mode == Mode::DryRun {
             (self.notes)(&format!(
-                "Create/retain {} owned by {} with mode 0600",
-                path.display(),
+                "Create/retain {} and make every *.toml file in {} owned by {} with mode 0600",
+                directory.join(WEB_RULES_FILE).display(),
+                directory.display(),
                 self.settings.proxy_user
             ));
             return Ok(());
         }
         let (uid, gid) = self.system.user_ids(&self.settings.proxy_user)?;
-        fs::create_dir_all(&self.settings.rules_dir)
-            .map_err(super::error::io_error("create rules directory", &self.settings.rules_dir))?;
-        prepare_web_rules_file(&path, uid, gid)
+        prepare_rule_files(directory, WEB_RULES_FILE, uid, gid)
     }
 
     /// Save original sysctls once, guard newly enabled forwarding, and enable interception.
@@ -506,6 +505,10 @@ mod tests {
         let system = FakeSystem::new();
         let hooks = Hooks::new(settings(root.path()), &system, Mode::Live, &silent);
         let config = config("[[iptables.bypass]]\nnetwork = '192.0.2.19/24'\nport = 443\n");
+        let admin_rules = root.path().join("rules").join("10-admin.toml");
+        fs::create_dir_all(root.path().join("rules")).unwrap();
+        fs::write(&admin_rules, "").unwrap();
+        fs::set_permissions(&admin_rules, fs::Permissions::from_mode(0o644)).unwrap();
         hooks.state().prepare().unwrap();
         hooks.guard().unwrap();
         hooks.start(&config.startup).unwrap();
@@ -543,6 +546,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&state).unwrap(), "{\"values\":[0,1,1]}\n");
         let web = root.path().join("rules").join(WEB_RULES_FILE);
         assert_eq!(fs::metadata(&web).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(fs::metadata(&admin_rules).unwrap().mode() & 0o777, 0o600);
     }
 
     /// Repeated starts are idempotent, guard preserves installed policy, and stop restores exactly.

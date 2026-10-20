@@ -78,6 +78,13 @@ test("real login, edits, validation, persistence, and HTTP/TLS interception", as
     await page.getByLabel("Password", { exact: true }).fill("browser-password");
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Rules", exact: true })).toBeVisible();
+    const files = page.getByRole("list", { name: "Rule files", exact: true });
+    await expect(files.getByRole("link", { name: /^10-admin\.toml/ })).toHaveText(
+        "10-admin.toml1 rule",
+    );
+    await files.getByRole("link", { name: /^05-web\.toml/ }).click();
+    await expect(page).toHaveURL(/\/rules\/05-web\.toml$/);
+    await expect(page.getByRole("heading", { name: "05-web.toml", exact: true })).toBeVisible();
 
     await page.getByRole("button", { name: "Add rule", exact: true }).click();
     await page.getByRole("textbox", { name: "Rule 1 domains", exact: true }).fill("example.com");
@@ -102,7 +109,8 @@ test("real login, edits, validation, persistence, and HTTP/TLS interception", as
     await page.getByRole("textbox", { name: "Rule 1 path regexes", exact: true }).fill("[");
     const rejected = page.waitForResponse(
         (response) =>
-            response.url().endsWith("/api/rules") && response.request().method() === "PUT",
+            response.url().endsWith("/api/rules/05-web.toml") &&
+            response.request().method() === "PUT",
     );
     await page.getByRole("button", { name: "Save changes" }).click();
     expect((await rejected).status()).toBe(400);
@@ -130,7 +138,7 @@ test("real login, edits, validation, persistence, and HTTP/TLS interception", as
 
     // Two authenticated tabs must not silently overwrite each other's saved revisions.
     const stale = await context.newPage();
-    await stale.goto("/rules");
+    await stale.goto("/rules/05-web.toml");
     await stale.getByRole("button", { name: "Rule 1", exact: true }).click();
     await expect(stale.getByRole("textbox", { name: "Rule 1 domains", exact: true })).toHaveValue(
         "example.com\nfd00:7261::2",
@@ -164,8 +172,8 @@ test("real login, edits, validation, persistence, and HTTP/TLS interception", as
 test("pathname patterns, regexes, query strings, and POST bodies reach an HTTP/2 upstream", async ({
     authenticatedPage: page,
 }) => {
-    await page.goto("/rules");
-    await expect(page.getByRole("heading", { name: "Rules", exact: true })).toBeVisible();
+    await page.goto("/rules/05-web.toml");
+    await expect(page.getByRole("heading", { name: "05-web.toml", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Add rule", exact: true }).click();
     await page.getByRole("textbox", { name: "Rule 1 domains", exact: true }).fill("pathname.test");
     await page

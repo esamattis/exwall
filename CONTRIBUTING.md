@@ -110,6 +110,7 @@ not need it.
 ```sh
 mkdir -p /tmp/exwall-dev/rules
 cp example-rules.toml /tmp/exwall-dev/rules/10-examples.toml
+touch /tmp/exwall-dev/rules/05-web.toml  # the start hook creates this in production
 cargo run -- init-ca --ca-dir /tmp/exwall-dev/ca
 cargo run -- --rules-dir /tmp/exwall-dev/rules serve \
   --listen 127.0.0.1:58080 --dns-listen 127.0.0.1:58053 \

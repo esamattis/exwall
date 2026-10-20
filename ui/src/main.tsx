@@ -21,7 +21,7 @@ import {
 } from "@tanstack/react-router";
 import { api, ApiError, hasSession, sessionKey, type Session } from "./api.ts";
 import { ErrorBanner, ShieldIcon, SignOutIcon, Spinner, ToastProvider } from "./components.tsx";
-import { RulesPage } from "./rules.tsx";
+import { RuleFilesPage, RulesPage } from "./rules.tsx";
 import { parseTrafficView, TrafficPage } from "./traffic.tsx";
 import "./style.css";
 
@@ -242,8 +242,19 @@ const trafficRoute = createRoute({
 const rulesRoute = createRoute({
     getParentRoute: () => appRoute,
     path: "/rules",
-    component: RulesPage,
+    component: RuleFilesPage,
 });
+const ruleFileRoute = createRoute({
+    getParentRoute: () => appRoute,
+    path: "/rules/$file",
+    component: RuleFileEditor,
+});
+
+/** Open the editor for the rule file named in the route, resetting its state per file. */
+function RuleFileEditor() {
+    const { file } = ruleFileRoute.useParams();
+    return <RulesPage key={file} file={file} />;
+}
 const domainsRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/domains",
@@ -255,7 +266,7 @@ const router = createRouter({
     routeTree: rootRoute.addChildren([
         loginRoute,
         domainsRoute,
-        appRoute.addChildren([trafficRoute, rulesRoute]),
+        appRoute.addChildren([trafficRoute, rulesRoute, ruleFileRoute]),
     ]),
 });
 

@@ -19,6 +19,23 @@ export interface RulesDocument {
     rules: RuleDraft[];
 }
 
+/** One rule file in the rules directory. */
+export interface RuleFileSummary {
+    name: string;
+    /** The absolute path on the host. */
+    path: string;
+    /** The number of allow tables, or null when the file cannot be read as rules. */
+    rules: number | null;
+}
+
+/** The rule file that Traffic page allowances extend; the service always creates it. */
+export const webRulesFile = "05-web.toml";
+
+/** The API path of one rule file. */
+export function rulesPath(file: string): string {
+    return `rules/${encodeURIComponent(file)}`;
+}
+
 /** Current counters for a domain, without individual request history. */
 export interface DomainStats {
     domain: string;
@@ -160,7 +177,7 @@ export async function allowDomain({
     dnsOnly,
     includeSubdomains = false,
 }: DomainAllowance): Promise<RulesDocument> {
-    const document = await api<RulesDocument>("rules");
+    const document = await api<RulesDocument>(rulesPath(webRulesFile));
     let changed = !dnsOnly && removeCoveredDnsRules(document, domain, includeSubdomains);
     if (
         !document.rules.some(
@@ -185,12 +202,12 @@ export async function allowDomain({
         });
         changed = true;
     }
-    return changed ? api<RulesDocument>("rules", "PUT", document) : document;
+    return changed ? api<RulesDocument>(rulesPath(webRulesFile), "PUT", document) : document;
 }
 
 /** Add a rule allowing one denied request's exact method and pathname. */
 export async function allowRequest(denial: HttpDenial): Promise<RulesDocument> {
-    const document = await api<RulesDocument>("rules");
+    const document = await api<RulesDocument>(rulesPath(webRulesFile));
     const pathnameRegex = exactPathRegex(denial.pathname);
     let changed = removeCoveredDnsRules(document, denial.domain);
     if (
@@ -215,5 +232,5 @@ export async function allowRequest(denial: HttpDenial): Promise<RulesDocument> {
         });
         changed = true;
     }
-    return changed ? api<RulesDocument>("rules", "PUT", document) : document;
+    return changed ? api<RulesDocument>(rulesPath(webRulesFile), "PUT", document) : document;
 }

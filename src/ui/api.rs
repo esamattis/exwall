@@ -2,14 +2,15 @@
 
 use super::{
     auth::{AuthError, Authenticator},
+    rule_files::{RuleFiles, WriteOutcome},
     rules_doc::{RulesDocError, RulesDocument, edit_document, read_document},
-    web_rules::{WebRulesFile, WriteOutcome},
 };
 use crate::{
     error::ErrorChain,
     runtime::{ReloadError, ReloadHandle},
     telemetry::DomainStats,
 };
+use percent_encoding::percent_decode_str;
 use rama::http::{
     Body, HeaderMap, HeaderValue, Method, Request, Response, StatusCode, body::util::BodyExt,
     header,
@@ -25,11 +26,8 @@ const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 const BODY_LIMIT: usize = 1024 * 1024;
 /// Expire the legacy cookie without ever using it to authenticate a request.
 pub const CLEAR_COOKIE: &str = "exwall_session=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0";
-/// The message shown when the file changed underneath an edit.
-const CONFLICT_MESSAGE: &str = "05-web.toml changed. Reload before saving.";
-/// The message shown when a save was written but the ruleset could not be activated.
-const NOT_ACTIVATED_MESSAGE: &str = "05-web.toml was saved, but the rules could not be activated; \
-     the previous rules remain active. Check the other rule files and the service log.";
+/// The path prefix addressing one rule file by its percent-encoded name.
+const RULE_FILE_PREFIX: &str = "/api/rules/";
 
 /// Credentials accepted by the login endpoint.
 #[derive(Deserialize)]
@@ -47,12 +45,27 @@ pub enum InternalError {
     /// Session storage failed.
     #[error("session storage")]
     Auth(#[from] AuthError),
-    /// The rules file could not be read or written.
-    #[error("access 05-web.toml")]
-    RulesFile(#[source] io::Error),
-    /// The stored rules file is unreadable.
-    #[error("read 05-web.toml")]
-    Document(#[source] RulesDocError),
+    /// The rules directory could not be listed.
+    #[error("list rules directory")]
+    RulesDirectory(#[source] io::Error),
+    /// A rules file could not be read or written.
+    #[error("access rules file {name}")]
+    RulesFile {
+        /// The rules file name.
+        name: String,
+        /// The filesystem error.
+        #[source]
+        source: io::Error,
+    },
+    /// A stored rules file is unreadable.
+    #[error("read rules file {name}")]
+    Document {
+        /// The rules file name.
+        name: String,
+        /// The parse failure.
+        #[source]
+        source: RulesDocError,
+    },
     /// A blocking file task failed.
     #[error("file task failed")]
     Task(#[from] tokio::task::JoinError),
@@ -82,9 +95,12 @@ pub enum ApiError {
     /// No such endpoint.
     #[error("Endpoint not found")]
     NotFound,
+    /// The requested rules file does not exist or cannot be edited.
+    #[error("Rules file not found")]
+    UnknownRulesFile,
     /// The rules file changed since the client read it.
-    #[error("{CONFLICT_MESSAGE}")]
-    Conflict,
+    #[error("{0} changed. Reload before saving.")]
+    Conflict(String),
     /// The edited rules are invalid.
     #[error("{0}")]
     Validation(String),
@@ -92,8 +108,17 @@ pub enum ApiError {
     ///
     /// Typically another rule file is invalid; the previous policy stays active
     /// and the saved rules take effect once the ruleset loads again.
-    #[error("{NOT_ACTIVATED_MESSAGE}")]
-    NotActivated(#[source] Arc<ReloadError>),
+    #[error(
+        "{name} was saved, but the rules could not be activated; \
+         the previous rules remain active. Check the other rule files and the service log."
+    )]
+    NotActivated {
+        /// The saved rules file name.
+        name: String,
+        /// The reload failure.
+        #[source]
+        source: Arc<ReloadError>,
+    },
     /// A server-side failure.
     #[error("Server operation failed")]
     Internal(#[from] InternalError),
@@ -110,9 +135,12 @@ impl ApiError {
                 StatusCode::BAD_REQUEST
             }
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::NotFound => StatusCode::NOT_FOUND,
-            Self::Conflict => StatusCode::CONFLICT,
-            Self::NotActivated(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::NotFound | Self::UnknownRulesFile => StatusCode::NOT_FOUND,
+            Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::NotActivated {
+                ..
+            }
+            | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -124,9 +152,12 @@ impl ApiError {
             Self::Internal(error) => {
                 tracing::error!(error = %ErrorChain(error), "UI API request failed");
             }
-            Self::NotActivated(error) => {
+            Self::NotActivated {
+                source,
+                ..
+            } => {
                 tracing::error!(
-                    error = %ErrorChain(error.as_ref()),
+                    error = %ErrorChain(source.as_ref()),
                     "saved UI rules could not be activated; keeping previous policy"
                 );
             }
@@ -143,6 +174,17 @@ impl From<AuthError> for ApiError {
     }
 }
 
+/// One rule file in the directory listing.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct RuleFileSummary {
+    /// The file name inside the rules directory.
+    name: String,
+    /// The file's absolute path on the host.
+    path: String,
+    /// The number of allow tables, or `None` when the file cannot be read as rules.
+    rules: Option<usize>,
+}
+
 /// Why a JSON body could not be decoded.
 enum BodyError {
     /// The body did not arrive within the deadline.
@@ -155,8 +197,8 @@ enum BodyError {
 pub struct Api {
     /// Credential and session checks.
     auth: Authenticator,
-    /// The editable rules file.
-    rules: WebRulesFile,
+    /// The editable rule files.
+    rules: RuleFiles,
     /// Activates saved rules.
     reload: ReloadHandle,
     /// Domain counters, transfer totals, and denials.
@@ -169,7 +211,7 @@ impl Api {
     /// Assemble the API from its services.
     pub fn new(
         auth: Authenticator,
-        rules: WebRulesFile,
+        rules: RuleFiles,
         reload: ReloadHandle,
         stats: DomainStats,
     ) -> Self {
@@ -206,6 +248,20 @@ impl Api {
         if !self.auth.authenticate(request.headers()).await? {
             return Err(ApiError::Unauthorized);
         }
+        if let Some(encoded) = path.strip_prefix(RULE_FILE_PREFIX) {
+            let name = percent_decode_str(encoded)
+                .decode_utf8()
+                .map_err(|_| ApiError::UnknownRulesFile)?
+                .into_owned();
+            return match method {
+                Method::GET => {
+                    let _guard = self.lock.lock().await;
+                    Ok(json(StatusCode::OK, &self.read_rules(&name).await?))
+                }
+                Method::PUT => self.save_rules(&name, request).await,
+                _ => Err(ApiError::MethodNotAllowed),
+            };
+        }
         match (method, path.as_str()) {
             (Method::GET, "/api/session") => {
                 Ok(json(StatusCode::OK, &serde_json::json!({ "username": self.auth.username() })))
@@ -224,9 +280,8 @@ impl Api {
             }
             (Method::GET, "/api/rules") => {
                 let _guard = self.lock.lock().await;
-                Ok(json(StatusCode::OK, &self.read_rules().await?))
+                Ok(json(StatusCode::OK, &self.list_rule_files().await?))
             }
-            (Method::PUT, "/api/rules") => self.save_rules(request).await,
             _ => Err(ApiError::NotFound),
         }
     }
@@ -244,46 +299,94 @@ impl Api {
         Ok(with_cleared_cookie(json(StatusCode::OK, &body)))
     }
 
-    /// Validate and write edited rules, then activate them before responding.
+    /// List every editable rule file with its number of allow tables.
+    async fn list_rule_files(&self) -> Result<Vec<RuleFileSummary>, InternalError> {
+        let rules = self.rules.clone();
+        tokio::task::spawn_blocking(move || {
+            let names = rules.list().map_err(InternalError::RulesDirectory)?;
+            let summaries = names
+                .into_iter()
+                .map(|name| {
+                    let count = rules
+                        .read(&name)
+                        .ok()
+                        .and_then(|text| read_document(text).ok())
+                        .map(|document| document.rules.len());
+                    RuleFileSummary {
+                        path: rules.path(&name).to_string_lossy().into_owned(),
+                        name,
+                        rules: count,
+                    }
+                })
+                .collect();
+            Ok(summaries)
+        })
+        .await?
+    }
+
+    /// Validate and write edited rules to the file `name`, then activate them before responding.
     ///
     /// The response is sent only after the complete ruleset has been published,
     /// so a successful save is already enforced. If publishing fails, the write
     /// is kept and reported as not activated.
-    async fn save_rules(&self, request: Request) -> Result<Response, ApiError> {
+    async fn save_rules(&self, name: &str, request: Request) -> Result<Response, ApiError> {
         // No shared lock is held while waiting for client-controlled bytes.
         let draft: RulesDocument = read_json(request).await.map_err(|error| match error {
             BodyError::Timeout => ApiError::BodyTimeout,
             BodyError::Invalid => ApiError::InvalidRules,
         })?;
         let _guard = self.lock.lock().await;
-        let current = self.read_rules().await?;
+        let current = self.read_rules(name).await?;
         if draft.revision != current.revision {
-            return Err(ApiError::Conflict);
+            return Err(ApiError::Conflict(name.to_owned()));
         }
-        let edited = edit_document(&draft)
+        let edited = edit_document(&draft, name)
             .map_err(|error| ApiError::Validation(ErrorChain(&error).to_string()))?;
         let rules = self.rules.clone();
+        let file = name.to_owned();
         let revision = draft.revision.clone();
-        let outcome =
-            tokio::task::spawn_blocking(move || rules.replace_if_unchanged(&revision, &edited))
-                .await
-                .map_err(InternalError::Task)?
-                .map_err(InternalError::RulesFile)?;
+        let outcome = tokio::task::spawn_blocking(move || {
+            rules.replace_if_unchanged(&file, &revision, &edited)
+        })
+        .await
+        .map_err(InternalError::Task)?
+        .map_err(|source| rules_file_error(name, source))?;
         if outcome == WriteOutcome::Conflict {
-            return Err(ApiError::Conflict);
+            return Err(ApiError::Conflict(name.to_owned()));
         }
-        self.reload.reload_rules().await.map_err(ApiError::NotActivated)?;
-        Ok(json(StatusCode::OK, &self.read_rules().await?))
+        self.reload.reload_rules().await.map_err(|source| ApiError::NotActivated {
+            name: name.to_owned(),
+            source,
+        })?;
+        Ok(json(StatusCode::OK, &self.read_rules(name).await?))
     }
 
-    /// Read the rules file into editable drafts off the async runtime.
-    async fn read_rules(&self) -> Result<RulesDocument, InternalError> {
+    /// Read the rules file `name` into editable drafts off the async runtime.
+    async fn read_rules(&self, name: &str) -> Result<RulesDocument, ApiError> {
         let rules = self.rules.clone();
-        let text = tokio::task::spawn_blocking(move || rules.read())
-            .await?
-            .map_err(InternalError::RulesFile)?;
-        read_document(text).map_err(InternalError::Document)
+        let file = name.to_owned();
+        let text = tokio::task::spawn_blocking(move || rules.read(&file))
+            .await
+            .map_err(InternalError::Task)?
+            .map_err(|source| rules_file_error(name, source))?;
+        read_document(text).map_err(|source| {
+            ApiError::Internal(InternalError::Document {
+                name: name.to_owned(),
+                source,
+            })
+        })
     }
+}
+
+/// Report a missing or uneditable rules file as not found and other failures as internal.
+fn rules_file_error(name: &str, source: io::Error) -> ApiError {
+    if source.kind() == io::ErrorKind::NotFound {
+        return ApiError::UnknownRulesFile;
+    }
+    ApiError::Internal(InternalError::RulesFile {
+        name: name.to_owned(),
+        source,
+    })
 }
 
 /// Require a JSON content type and a same-origin (or absent) Origin for state changes.
@@ -347,6 +450,9 @@ mod tests {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use std::{fs, path::Path};
 
+    /// The API path of the UI-managed rules file.
+    const WEB_RULES_PATH: &str = "/api/rules/05-web.toml";
+
     /// An API wired to a running reloader over temporary directories.
     struct Harness {
         /// The API under test.
@@ -374,7 +480,7 @@ mod tests {
             Arc::new(FileSessionStore::new(sessions.clone())),
             Arc::new(RandomTokens),
         );
-        let api = Api::new(auth, WebRulesFile::new(rules.clone()), handle, DomainStats::default());
+        let api = Api::new(auth, RuleFiles::new(rules.clone()), handle, DomainStats::default());
         Harness {
             api,
             store,
@@ -454,7 +560,7 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let harness = harness(temporary.path(), "secret");
         let bearer = login(&harness.api, "secret").await;
-        for (method, path) in [(Method::POST, "/api/login"), (Method::PUT, "/api/rules")] {
+        for (method, path) in [(Method::POST, "/api/login"), (Method::PUT, WEB_RULES_PATH)] {
             let mut stalled = request(method, path, Some(("authorization", &bearer)), &());
             *stalled.body_mut() = Body::from_stream(rama::stream::pending::<
                 Result<rama::bytes::Bytes, std::io::Error>,
@@ -541,30 +647,33 @@ mod tests {
         fs::write(harness.rules.join("other.toml"), "[[allow]]\ndomain = 'other.test'\n").unwrap();
         let basic = format!("Basic {}", STANDARD.encode("admin:secret:password"));
         let auth = Some(("authorization", basic.as_str()));
-        let response = harness.api.response(request(Method::GET, "/api/rules", auth, &())).await;
+        let response = harness.api.response(request(Method::GET, WEB_RULES_PATH, auth, &())).await;
         assert_eq!(response.status(), StatusCode::OK);
         let mut draft: RulesDocument = decode(response).await;
         draft.rules[0].fields.insert("domain".into(), "new.test".into());
-        let response = harness.api.response(request(Method::PUT, "/api/rules", auth, &draft)).await;
+        let response =
+            harness.api.response(request(Method::PUT, WEB_RULES_PATH, auth, &draft)).await;
         assert_eq!(response.status(), StatusCode::OK);
         let allows = |host: &str| harness.store.load().rules.dns_rule(&Host::new(host)).is_some();
         assert!(allows("new.test"));
         assert!(allows("other.test"));
         let saved = fs::read_to_string(harness.rules.join("05-web.toml")).unwrap();
         assert!(saved.contains("# Keep this"));
-        let stale = harness.api.response(request(Method::PUT, "/api/rules", auth, &draft)).await;
+        let stale = harness.api.response(request(Method::PUT, WEB_RULES_PATH, auth, &draft)).await;
         assert_eq!(stale.status(), StatusCode::CONFLICT);
         let body: serde_json::Value = decode(stale).await;
-        assert_eq!(body["error"], CONFLICT_MESSAGE);
-        let mut draft = harness.api.read_rules().await.unwrap();
+        assert_eq!(body["error"], "05-web.toml changed. Reload before saving.");
+        let mut draft = harness.api.read_rules("05-web.toml").await.unwrap();
         draft.rules[0].fields.insert("domain_regex".into(), "[".into());
-        let invalid = harness.api.response(request(Method::PUT, "/api/rules", auth, &draft)).await;
+        let invalid =
+            harness.api.response(request(Method::PUT, WEB_RULES_PATH, auth, &draft)).await;
         assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
         let body: serde_json::Value = decode(invalid).await;
         assert!(body["error"].as_str().unwrap().starts_with("05-web.toml:allow#1"));
         assert_eq!(fs::read_to_string(harness.rules.join("05-web.toml")).unwrap(), saved);
         draft.rules.clear();
-        let cleared = harness.api.response(request(Method::PUT, "/api/rules", auth, &draft)).await;
+        let cleared =
+            harness.api.response(request(Method::PUT, WEB_RULES_PATH, auth, &draft)).await;
         assert_eq!(cleared.status(), StatusCode::OK);
         assert!(!allows("new.test"));
         assert!(allows("other.test"));
@@ -576,24 +685,83 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let harness = harness(temporary.path(), "secret");
         fs::create_dir_all(&harness.rules).unwrap();
+        fs::write(harness.rules.join("05-web.toml"), "").unwrap();
         fs::write(harness.rules.join("other.toml"), "[[allow]]\nunknown = 1\n").unwrap();
         let basic = format!("Basic {}", STANDARD.encode("admin:secret"));
         let auth = Some(("authorization", basic.as_str()));
         let mut draft: RulesDocument =
-            decode(harness.api.response(request(Method::GET, "/api/rules", auth, &())).await).await;
+            decode(harness.api.response(request(Method::GET, WEB_RULES_PATH, auth, &())).await)
+                .await;
         draft.rules.push(Draft {
             index: None,
             fields: [("domain".to_owned(), "saved.test".into())].into(),
         });
         let before = harness.store.snapshot();
-        let response = harness.api.response(request(Method::PUT, "/api/rules", auth, &draft)).await;
+        let response =
+            harness.api.response(request(Method::PUT, WEB_RULES_PATH, auth, &draft)).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body: serde_json::Value = decode(response).await;
-        assert_eq!(body["error"], NOT_ACTIVATED_MESSAGE);
-        assert!(!body["error"].as_str().unwrap().contains("other.toml"));
+        let message = body["error"].as_str().unwrap();
+        assert!(message.starts_with("05-web.toml was saved, but the rules could not be activated"));
+        assert!(!message.contains("other.toml"));
         let saved = fs::read_to_string(harness.rules.join("05-web.toml")).unwrap();
         assert!(saved.contains("saved.test"));
         assert!(Arc::ptr_eq(&before, &harness.store.snapshot()));
+    }
+
+    /// List rule files with their rule counts and edit any of them by percent-encoded name.
+    #[tokio::test]
+    async fn lists_and_edits_every_rule_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let harness = harness(temporary.path(), "secret");
+        fs::create_dir_all(&harness.rules).unwrap();
+        fs::write(harness.rules.join("05-web.toml"), "").unwrap();
+        let two_rules = "[[allow]]\ndomain = 'a.test'\n[[allow]]\ndomain = 'b.test'\n";
+        fs::write(harness.rules.join("10 admin.toml"), two_rules).unwrap();
+        fs::write(harness.rules.join("20-broken.toml"), "[[allow").unwrap();
+        fs::write(harness.rules.join("notes.txt"), "").unwrap();
+        fs::write(temporary.path().join("outside.toml"), "").unwrap();
+        let basic = format!("Basic {}", STANDARD.encode("admin:secret"));
+        let auth = Some(("authorization", basic.as_str()));
+        let response = harness.api.response(request(Method::GET, "/api/rules", auth, &())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let files: Vec<RuleFileSummary> = decode(response).await;
+        let summary = |name: &str, rules| RuleFileSummary {
+            name: name.to_owned(),
+            path: harness.rules.join(name).to_string_lossy().into_owned(),
+            rules,
+        };
+        assert_eq!(
+            files,
+            [
+                summary("05-web.toml", Some(0)),
+                summary("10 admin.toml", Some(2)),
+                summary("20-broken.toml", None)
+            ]
+        );
+        fs::remove_file(harness.rules.join("20-broken.toml")).unwrap();
+        let path = "/api/rules/10%20admin.toml";
+        let response = harness.api.response(request(Method::GET, path, auth, &())).await;
+        let mut draft: RulesDocument = decode(response).await;
+        draft.rules[1].fields.insert("domain".into(), "changed.test".into());
+        let response = harness.api.response(request(Method::PUT, path, auth, &draft)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(harness.store.load().rules.dns_rule(&Host::new("changed.test")).is_some());
+        let saved = fs::read_to_string(harness.rules.join("10 admin.toml")).unwrap();
+        assert!(saved.contains("changed.test"));
+        for missing in [
+            "/api/rules/missing.toml",
+            "/api/rules/notes.txt",
+            "/api/rules/..%2Foutside.toml",
+            "/api/rules/%FF.toml",
+            "/api/rules/",
+        ] {
+            let response = harness.api.response(request(Method::GET, missing, auth, &())).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{missing}");
+            let response = harness.api.response(request(Method::PUT, missing, auth, &draft)).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{missing}");
+        }
+        assert_eq!(fs::read_to_string(temporary.path().join("outside.toml")).unwrap(), "");
     }
 
     /// Resetting traffic requires authentication and clears domains and denials.
@@ -657,10 +825,23 @@ mod tests {
             (ApiError::InvalidRules, 400),
             (ApiError::Unauthorized, 401),
             (ApiError::NotFound, 404),
-            (ApiError::Conflict, 409),
+            (ApiError::UnknownRulesFile, 404),
+            (ApiError::Conflict("web.toml".into()), 409),
             (ApiError::Validation("bad".into()), 400),
-            (ApiError::NotActivated(Arc::new(ReloadError::Unavailable)), 500),
-            (ApiError::Internal(InternalError::RulesFile(io::Error::other("secret path"))), 500),
+            (
+                ApiError::NotActivated {
+                    name: "web.toml".into(),
+                    source: Arc::new(ReloadError::Unavailable),
+                },
+                500,
+            ),
+            (
+                ApiError::Internal(InternalError::RulesFile {
+                    name: "web.toml".into(),
+                    source: io::Error::other("secret path"),
+                }),
+                500,
+            ),
         ] {
             let message = error.to_string();
             let response = error.into_response();

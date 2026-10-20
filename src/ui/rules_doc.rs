@@ -1,13 +1,10 @@
-//! Pure, comment-preserving conversion between `05-web.toml` and the UI's rule drafts.
+//! Pure, comment-preserving conversion between rule files and the UI's rule drafts.
 
 use crate::policy::{RuleFileError, RuleSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use thiserror::Error;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
-
-/// The label used for rule identifiers when validating UI edits.
-const WEB_RULES_LABEL: &str = "05-web.toml";
 
 /// One editable allow table, referencing its original table to retain comments.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -33,10 +30,10 @@ pub struct RulesDocument {
 #[derive(Debug, Error)]
 pub enum RulesDocError {
     /// The document is not valid TOML for format-preserving editing.
-    #[error("parse 05-web.toml")]
+    #[error("parse rules document")]
     Syntax(#[from] toml_edit::TomlError),
     /// The document's values could not be decoded.
-    #[error("decode 05-web.toml")]
+    #[error("decode rules document")]
     Values(#[from] toml::de::Error),
     /// `allow` is not an array of tables.
     #[error("allow must be an array of rule tables")]
@@ -104,7 +101,9 @@ fn render(field: &toml::Value) -> Result<Item, RulesDocError> {
 }
 
 /// Rebuild edited tables while preserving unchanged items, then validate the result.
-pub fn edit_document(draft: &RulesDocument) -> Result<String, RulesDocError> {
+///
+/// `label` names the file in the identifiers of rules that fail validation.
+pub fn edit_document(draft: &RulesDocument, label: &str) -> Result<String, RulesDocError> {
     let mut document = draft.revision.parse::<DocumentMut>()?;
     let original = allow_tables(&document)?;
     let original_values: toml::Value = toml::from_str(&draft.revision)?;
@@ -149,7 +148,7 @@ pub fn edit_document(draft: &RulesDocument) -> Result<String, RulesDocError> {
         document["allow"] = Item::ArrayOfTables(tables);
     }
     let edited = document.to_string();
-    RuleSet::parse(&edited, WEB_RULES_LABEL)?;
+    RuleSet::parse(&edited, label)?;
     Ok(edited)
 }
 
@@ -173,19 +172,19 @@ mod tests {
             "rules": [{"index": null, "fields": fields}]
         }))
         .unwrap();
-        let saved = edit_document(&draft).unwrap();
+        let saved = edit_document(&draft, "test.toml").unwrap();
         let parsed: toml::Value = toml::from_str(&saved).unwrap();
         assert_eq!(serde_json::to_value(&parsed["allow"][0]).unwrap(), fields);
         let read = read_document(saved.clone()).unwrap();
         assert_eq!(serde_json::to_value(&read.rules[0].fields).unwrap(), fields);
-        assert_eq!(edit_document(&read).unwrap(), saved);
+        assert_eq!(edit_document(&read, "test.toml").unwrap(), saved);
 
         let mut changed = read;
         changed.rules[0].fields.insert("methods".into(), "ANY".into());
         changed.rules[0].fields.remove("domain_regex");
         changed.rules[0].fields.insert("domain".into(), "example.com".into());
         changed.rules[0].fields.insert("include_subdomains".into(), true.into());
-        let saved = edit_document(&changed).unwrap();
+        let saved = edit_document(&changed, "test.toml").unwrap();
         let parsed: toml::Value = toml::from_str(&saved).unwrap();
         assert_eq!(parsed["allow"][0]["methods"].as_str(), Some("ANY"));
         assert_eq!(parsed["allow"][0]["domain"].as_str(), Some("example.com"));
@@ -200,7 +199,7 @@ mod tests {
         assert_eq!(draft.rules[0].fields["domain"].as_str(), Some("old.test"));
         assert_eq!(draft.rules[0].fields["inject_headers"][0]["name"].as_str(), Some("X-Example"));
         draft.rules[0].fields.insert("domain".into(), "new.test".into());
-        let saved = edit_document(&draft).unwrap();
+        let saved = edit_document(&draft, "test.toml").unwrap();
         assert!(saved.contains("# Web rules"));
         assert!(saved.contains("# Host comment"));
         assert!(saved.contains("domain = \"new.test\" # Keep this"));
@@ -214,16 +213,19 @@ mod tests {
         let original = "[[allow]]\ndomain = 'a.test'\n";
         let mut draft = read_document(original.into()).unwrap();
         draft.rules[0].fields.insert("domain_regex".into(), "[".into());
-        assert!(matches!(edit_document(&draft), Err(RulesDocError::Invalid(_))));
+        assert!(matches!(edit_document(&draft, "test.toml"), Err(RulesDocError::Invalid(_))));
         let mut duplicate = read_document(original.into()).unwrap();
         duplicate.rules.push(duplicate.rules[0].clone());
-        assert!(matches!(edit_document(&duplicate), Err(RulesDocError::DuplicateIndex)));
+        assert!(matches!(
+            edit_document(&duplicate, "test.toml"),
+            Err(RulesDocError::DuplicateIndex)
+        ));
         let mut unknown = read_document(original.into()).unwrap();
         unknown.rules[0].index = Some(5);
-        assert!(matches!(edit_document(&unknown), Err(RulesDocError::UnknownIndex)));
+        assert!(matches!(edit_document(&unknown, "test.toml"), Err(RulesDocError::UnknownIndex)));
         assert!(matches!(read_document("allow = 1".into()), Err(RulesDocError::NotTables)));
         let mut cleared = read_document(original.into()).unwrap();
         cleared.rules.clear();
-        assert_eq!(edit_document(&cleared).unwrap(), "");
+        assert_eq!(edit_document(&cleared, "test.toml").unwrap(), "");
     }
 }

@@ -31,6 +31,7 @@ toml_edit = { version = "0.25", features = ["serde"] }
 base64 = "0.22"
 sha2 = "0.10"
 subtle = "2"
+percent-encoding = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

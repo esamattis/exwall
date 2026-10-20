@@ -13,7 +13,7 @@ use crate::{
     runtime::{PolicyStore, ReloadHandle, Reloader, RulesWatcher, WatchError},
     telemetry::{self, AccessLogError, AccessLogTask},
     ui::{
-        self, Api, UiError, WebRulesFile,
+        self, Api, RuleFiles, UiError,
         auth::{Authenticator, Credentials, FileSessionStore, RandomTokens},
     },
 };
@@ -361,7 +361,7 @@ fn build_api(config: &Config, cli: &Cli, reload: ReloadHandle, sink: &telemetry:
         Arc::new(FileSessionStore::new(ui.sessions_dir.clone())),
         Arc::new(RandomTokens),
     );
-    Api::new(auth, WebRulesFile::new(cli.rules_dir.clone()), reload, sink.stats().clone())
+    Api::new(auth, RuleFiles::new(cli.rules_dir.clone()), reload, sink.stats().clone())
 }
 
 /// Wait for a stop signal or the first failure, forwarding SIGHUP to the reloader.

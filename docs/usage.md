@@ -170,15 +170,20 @@ ssh -L 58000:127.0.0.1:58000 your-server
   HTTP(S) body bytes sent up and received down, and the latest blocked
   requests. Allow a blocked domain, its subdomains, a DNS-only lookup, or one
   exact request with a single click.
-- **Rules** edits the rules created from the UI. They are stored in
-  `/etc/exwall/rules.d/05-web.toml`; your other rule files are never touched.
+- **Rules** lists every `*.toml` file in `/etc/exwall/rules.d/` and edits any
+  of them; comments and formatting are kept. Rules allowed from the Traffic
+  page are added to `05-web.toml`, which the service creates on start. Each
+  start also makes every rule file owned by `exwall` with mode `0600` so the
+  UI can save it; symlinked rule files are left untouched and not shown.
+  Create new rule files with `sudo`; the UI cannot add files.
 
 Counters reset when exwall restarts or when you press **Reset** on the Traffic
 page. The same data is available as JSON:
 
 ```sh
 curl --user admin http://127.0.0.1:58000/api/domains
-curl --user admin http://127.0.0.1:58000/api/rules
+curl --user admin http://127.0.0.1:58000/api/rules               # list rule files
+curl --user admin http://127.0.0.1:58000/api/rules/05-web.toml   # one file's rules
 ```
 
 ## Day-to-day commands

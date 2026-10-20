@@ -1,4 +1,4 @@
-//! Resolver replacement and restoration, and the service-owned UI rules file.
+//! Resolver replacement and restoration, and the service-owned rule files.
 
 use super::{
     error::{HookError, io_error},
@@ -178,28 +178,61 @@ pub fn replace_symlink(
     fs::rename(&temporary, path).map_err(io_error("install symlink", path))
 }
 
-/// Create the UI rules file if needed and make it private to the service account.
+/// Create the UI rules file if needed and make every rule file private to the service account.
 ///
-/// Existing rules are retained, and a file descriptor opened with `O_NOFOLLOW`
-/// prevents ownership changes through symlinks.
-pub fn prepare_web_rules_file(path: &Path, uid: u32, gid: u32) -> Result<(), HookError> {
+/// Every regular `*.toml` file directly inside `directory` becomes mode 0600
+/// and owned by `uid`/`gid` so the UI can edit it in place. Existing rules are
+/// retained, symlinks and other non-regular entries are skipped, and file
+/// descriptors opened with `O_NOFOLLOW` prevent ownership changes through
+/// symlinks.
+pub fn prepare_rule_files(
+    directory: &Path,
+    web_file: &str,
+    uid: u32,
+    gid: u32,
+) -> Result<(), HookError> {
+    fs::create_dir_all(directory).map_err(io_error("create rules directory", directory))?;
+    prepare_rule_file(&directory.join(web_file), true, uid, gid)?;
+    let entries = fs::read_dir(directory).map_err(io_error("read rules directory", directory))?;
+    for entry in entries {
+        let entry = entry.map_err(io_error("read rules directory", directory))?;
+        let path = entry.path();
+        if entry.file_name() == web_file
+            || path.extension().is_none_or(|extension| extension != "toml")
+        {
+            continue;
+        }
+        let file_type = entry.file_type().map_err(io_error("inspect rules file", &path))?;
+        if file_type.is_file() {
+            prepare_rule_file(&path, false, uid, gid)?;
+        } else if file_type.is_symlink() {
+            tracing::warn!(path = %path.display(), "skipping symlinked rules file");
+        }
+    }
+    Ok(())
+}
+
+/// Restrict one rule file to mode 0600 owned by `uid`/`gid`, creating it if `create` is set.
+fn prepare_rule_file(path: &Path, create: bool, uid: u32, gid: u32) -> Result<(), HookError> {
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
+        .create(create)
         .truncate(false)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
-        .map_err(io_error("open UI rules", path))?;
-    let metadata = file.metadata().map_err(io_error("inspect UI rules", path))?;
+        .map_err(io_error("open rules file", path))?;
+    let metadata = file.metadata().map_err(io_error("inspect rules file", path))?;
     if !metadata.is_file() {
-        return Err(HookError::WebRulesNotFile);
+        return Err(HookError::RulesNotFile {
+            path: path.to_owned(),
+        });
     }
     file.set_permissions(fs::Permissions::from_mode(0o600))
-        .map_err(io_error("restrict UI rules", path))?;
+        .map_err(io_error("restrict rules file", path))?;
     chown_fd(&file, uid, gid)?;
-    file.sync_all().map_err(io_error("sync UI rules", path))
+    file.sync_all().map_err(io_error("sync rules file", path))
 }
 
 #[cfg(test)]
@@ -212,27 +245,46 @@ mod tests {
         unsafe { (libc::geteuid(), libc::getegid()) }
     }
 
-    /// Verify private UI file creation, repeated-start preservation, and symlink rejection.
+    /// The file mode bits of `path`.
+    fn mode(path: &Path) -> u32 {
+        fs::symlink_metadata(path).unwrap().mode() & 0o777
+    }
+
+    /// Verify UI file creation, private rule files, repeated-start preservation, and symlinks.
     #[test]
-    fn private_web_rules_file() {
+    fn private_rule_files() {
         let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("05-web.toml");
+        let rules = temporary.path().join("rules");
+        let web = rules.join("05-web.toml");
         let (uid, gid) = ids();
-        prepare_web_rules_file(&path, uid, gid).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "");
-        fs::write(&path, "[[allow]]\ndomain = 'retained.test'\n").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        prepare_web_rules_file(&path, uid, gid).unwrap();
-        let metadata = fs::metadata(&path).unwrap();
-        assert_eq!(metadata.mode() & 0o777, 0o600);
-        assert_eq!((metadata.uid(), metadata.gid()), (uid, gid));
-        assert!(fs::read_to_string(&path).unwrap().contains("retained.test"));
-        let target = temporary.path().join("untouched");
-        fs::write(&target, "target").unwrap();
-        fs::remove_file(&path).unwrap();
-        symlink(&target, &path).unwrap();
-        assert!(prepare_web_rules_file(&path, uid, gid).is_err());
-        assert_eq!(fs::read_to_string(target).unwrap(), "target");
+        prepare_rule_files(&rules, "05-web.toml", uid, gid).unwrap();
+        assert_eq!(fs::read_to_string(&web).unwrap(), "");
+        assert_eq!(mode(&web), 0o600);
+        fs::write(&web, "[[allow]]\ndomain = 'retained.test'\n").unwrap();
+        let admin = rules.join("10-admin.toml");
+        let notes = rules.join("notes.txt");
+        let target = temporary.path().join("target.toml");
+        let link = rules.join("20-link.toml");
+        for path in [&admin, &notes, &target] {
+            fs::write(path, "").unwrap();
+        }
+        for path in [&web, &admin, &notes, &target] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        symlink(&target, &link).unwrap();
+        prepare_rule_files(&rules, "05-web.toml", uid, gid).unwrap();
+        for path in [&web, &admin] {
+            let metadata = fs::metadata(path).unwrap();
+            assert_eq!(metadata.mode() & 0o777, 0o600);
+            assert_eq!((metadata.uid(), metadata.gid()), (uid, gid));
+        }
+        assert!(fs::read_to_string(&web).unwrap().contains("retained.test"));
+        assert_eq!(mode(&notes), 0o644);
+        assert_eq!(mode(&target), 0o644);
+        fs::remove_file(&web).unwrap();
+        symlink(&target, &web).unwrap();
+        assert!(prepare_rule_files(&rules, "05-web.toml", uid, gid).is_err());
+        assert_eq!(mode(&target), 0o644);
     }
 
     /// Verify resolver restoration and preservation of administrator replacements.

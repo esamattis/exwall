@@ -808,6 +808,7 @@ dependencies = [
  "jiff",
  "libc",
  "notify",
+ "percent-encoding",
  "rama",
  "rcgen",
  "regex",

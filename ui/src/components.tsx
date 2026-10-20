@@ -91,6 +91,11 @@ export function CheckIcon(props: IconProps) {
     return <Icon {...props} paths={["m5 12 5 5L20 7"]} />;
 }
 
+/** Two overlapping sheets for copying text. */
+export function CopyIcon(props: IconProps) {
+    return <Icon {...props} paths={["M9 9h11v11H9z", "M5 15H4V4h11v1"]} />;
+}
+
 /** A warning triangle for errors. */
 export function AlertIcon(props: IconProps) {
     return <Icon {...props} paths={["M12 4 2.5 20h19z", "M12 10v4", "M12 17h.01"]} />;
@@ -122,6 +127,77 @@ export function Spinner({ className = "size-4" }: IconProps) {
                 strokeLinecap="round"
             />
         </svg>
+    );
+}
+
+/** Copy text, falling back to a selection copy where the Clipboard API is unavailable. */
+async function copyText(text: string): Promise<void> {
+    // The UI is often served over plain HTTP on a LAN address, which is not a secure context.
+    if (window.isSecureContext && navigator.clipboard) {
+        await navigator.clipboard.writeText(text);
+        return;
+    }
+    const field = document.createElement("textarea");
+    field.value = text;
+    field.readOnly = true;
+    field.style.position = "fixed";
+    field.style.opacity = "0";
+    document.body.append(field);
+    field.select();
+    const copied = document.execCommand("copy");
+    field.remove();
+    if (!copied) {
+        throw new Error("Copy failed");
+    }
+}
+
+/** An icon button that copies text and briefly confirms the result. */
+export function CopyButton({ text, label }: { text: string; label: string }) {
+    const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+    useEffect(() => {
+        if (state === "idle") {
+            return undefined;
+        }
+        const timer = window.setTimeout(() => setState("idle"), 2000);
+        return () => window.clearTimeout(timer);
+    }, [state]);
+    let title = label;
+    if (state === "copied") {
+        title = "Copied";
+    } else if (state === "failed") {
+        title = "Copy failed";
+    }
+    return (
+        <button
+            type="button"
+            className={`btn btn-icon btn-ghost shrink-0 ${state === "failed" ? "text-rose-300" : ""}`}
+            aria-label={label}
+            title={title}
+            onClick={() => {
+                copyText(text).then(
+                    () => setState("copied"),
+                    () => setState("failed"),
+                );
+            }}
+        >
+            {state === "copied" ? (
+                <CheckIcon className="size-3.5 text-emerald-400" />
+            ) : (
+                <CopyIcon className="size-3.5" />
+            )}
+        </button>
+    );
+}
+
+/** A host file path in monospace with a button that copies it. */
+export function FilePath({ path }: { path: string }) {
+    return (
+        <span className="flex min-w-0 items-center gap-1">
+            <code className="truncate font-mono text-xs text-zinc-500" title={path}>
+                {path}
+            </code>
+            <CopyButton text={path} label={`Copy path ${path}`} />
+        </span>
     );
 }
 

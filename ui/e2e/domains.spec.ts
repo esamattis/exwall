@@ -259,6 +259,7 @@ firewallTest(
         await allow("Allow openai.com DNS only", "Domain allowed for DNS only.");
         expect(await fixtureRules()).toBe(dnsOnly);
         await page.getByRole("link", { name: "Rules", exact: true }).click();
+        await page.getByRole("link", { name: /^05-web\.toml/ }).click();
         await page.getByRole("button", { name: "Rule 1", exact: true }).click();
         await expect(
             page.getByRole("switch", { name: "Rule 1 DNS only", exact: true }),
@@ -374,7 +375,9 @@ test("last 100 HTTP denials refresh manually and allow only an exact method and 
     await button.click();
     await expect(page.getByRole("status")).toHaveText("Method and pathname allowed.");
     const document: RulesDocument = await (
-        await page.request.get(`${ui}/api/rules`, { headers: await sessionHeaders(page) })
+        await page.request.get(`${ui}/api/rules/05-web.toml`, {
+            headers: await sessionHeaders(page),
+        })
     ).json();
     expect(document.rules).toHaveLength(1);
     expect(document.rules[0]!.fields).toEqual({
@@ -397,7 +400,9 @@ test("last 100 HTTP denials refresh manually and allow only an exact method and 
     expect(
         (
             await (
-                await page.request.get(`${ui}/api/rules`, { headers: await sessionHeaders(page) })
+                await page.request.get(`${ui}/api/rules/05-web.toml`, {
+                    headers: await sessionHeaders(page),
+                })
             ).json()
         ).rules,
     ).toHaveLength(1);
@@ -478,7 +483,9 @@ test("HTTP allow actions remove only fully covered DNS-only rules, including dup
     ];
     for (const entry of cases) {
         const current: RulesDocument = await (
-            await page.request.get(`${ui}/api/rules`, { headers: await sessionHeaders(page) })
+            await page.request.get(`${ui}/api/rules/05-web.toml`, {
+                headers: await sessionHeaders(page),
+            })
         ).json();
         current.rules = [{ index: null, fields: { ...entry.fields, dns_only: true } }];
         if (entry.existingHttp) {
@@ -486,7 +493,7 @@ test("HTTP allow actions remove only fully covered DNS-only rules, including dup
         }
         expect(
             (
-                await page.request.put(`${ui}/api/rules`, {
+                await page.request.put(`${ui}/api/rules/05-web.toml`, {
                     headers: await sessionHeaders(page),
                     data: current,
                 })
@@ -502,7 +509,9 @@ test("HTTP allow actions remove only fully covered DNS-only rules, including dup
         }
         await expect(page.getByRole("status")).toHaveText(message);
         const saved: RulesDocument = await (
-            await page.request.get(`${ui}/api/rules`, { headers: await sessionHeaders(page) })
+            await page.request.get(`${ui}/api/rules/05-web.toml`, {
+                headers: await sessionHeaders(page),
+            })
         ).json();
         expect(saved.rules.filter((rule) => rule.fields.dns_only === true)).toEqual(
             entry.retained
@@ -515,4 +524,29 @@ test("HTTP allow actions remove only fully covered DNS-only rules, including dup
         await expect(page.getByRole("button", { name: entry.button, exact: true })).toBeEnabled();
         expect(await readFile(join(fixture.rules, "05-web.toml"), "utf8")).toBe(persisted);
     }
+});
+
+test("rule files show absolute paths that copy to the clipboard", async ({
+    page,
+    context,
+    protocolProxy: fixture,
+}) => {
+    const ui = `http://127.0.0.1:${fixture.uiPort}`;
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: ui });
+    await loginBrowser(page, ui, "integration-password");
+    await page.goto(`${ui}/rules`);
+    const files = page.getByRole("list", { name: "Rule files", exact: true });
+    const path = join(fixture.rules, "1-test.toml");
+    await expect(files.getByText(path, { exact: true })).toBeVisible();
+    await expect(
+        files.getByText(join(fixture.rules, "05-web.toml"), { exact: true }),
+    ).toBeVisible();
+    await files.getByRole("button", { name: `Copy path ${path}`, exact: true }).click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(path);
+    await files.getByRole("link", { name: "Edit 1-test.toml", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "1-test.toml", exact: true })).toBeVisible();
+    await expect(page.getByText(path, { exact: true })).toBeVisible();
+    await expect(
+        page.getByRole("button", { name: `Copy path ${path}`, exact: true }),
+    ).toBeVisible();
 });

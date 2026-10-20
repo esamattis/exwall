@@ -200,6 +200,8 @@ export async function startProtocolFixture() {
     try {
         await mkdir(rules);
         await writeFile(rule, ruleText);
+        // The start hook always creates the UI rules file; this fixture runs without hooks.
+        await writeFile(join(rules, "05-web.toml"), "");
         await writeFile(
             config,
             `log_level = 'debug'\nblock_dns = true\nmanage_resolv_conf = false\n${accessConfig}`,
