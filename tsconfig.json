@@ -3,7 +3,8 @@
         "ui/**/*.ts",
         "ui/**/*.tsx",
         "playwright.e2e.config.ts",
-        "tests/playwright_helpers/**/*.mts"
+        "tests/playwright_helpers/**/*.mts",
+        "scripts/**/*.mts"
     ],
     "compilerOptions": {
         "target": "ES2022",
