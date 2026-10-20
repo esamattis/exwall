@@ -10,6 +10,11 @@ allow rules.
 
 ```sh
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/esamattis/exwall/refs/heads/main/install.sh)"
+```
+
+Start the systemd service
+
+```sh
 sudo systemctl enable --now exwall
 ```
 
