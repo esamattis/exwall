@@ -21,6 +21,7 @@ import { hostSnapshot } from "#playwright_helpers/namespace_safety.mts";
 import type { UiBridge } from "#playwright_helpers/ui_bridge.mts";
 import { startUiBridge } from "#playwright_helpers/ui_bridge.mts";
 import type { FixtureReady } from "#playwright_helpers/protocol.mts";
+import { debugBinaryPath } from "#playwright_helpers/fixture_constants.mts";
 
 /** Build the production app and run host Playwright against private namespace transports. */
 async function main(): Promise<void> {
@@ -89,7 +90,7 @@ async function main(): Promise<void> {
                 "private",
                 process.execPath,
                 script,
-                join(repository, "target/debug/exwall"),
+                join(repository, debugBinaryPath),
                 sockets,
                 output,
                 String(process.getuid?.()),

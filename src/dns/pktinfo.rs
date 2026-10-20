@@ -91,7 +91,9 @@ fn receive_ready(socket: &UdpSocket, buffer: &mut [u8]) -> Result<Packet, Receiv
     message.msg_iov = ptr::from_mut(&mut data);
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = mem::size_of_val(&control);
+    // Control lengths are `size_t` on glibc but `socklen_t` on musl; the
+    // 64-byte buffer fits both, so inferred casts keep one portable code path.
+    message.msg_controllen = mem::size_of_val(&control) as _;
     // SAFETY: every output buffer is writable and lives until recvmsg returns.
     let length = unsafe { libc::recvmsg(socket.as_raw_fd(), &mut message, 0) };
     if length == -1 {
@@ -100,6 +102,7 @@ fn receive_ready(socket: &UdpSocket, buffer: &mut [u8]) -> Result<Packet, Receiv
     if message.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0 {
         return Err(ReceiveError::Datagram("truncated UDP packet or destination metadata"));
     }
+    let control_length: usize = message.msg_controllen as _;
     // SAFETY: recvmsg filled the aligned control buffer and reported its valid length.
     let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
     if header.is_null() {
@@ -108,11 +111,12 @@ fn receive_ready(socket: &UdpSocket, buffer: &mut [u8]) -> Result<Packet, Receiv
     // SAFETY: CMSG_FIRSTHDR returned a header within the initialized control buffer.
     let (level, kind, header_length) =
         unsafe { ((*header).cmsg_level, (*header).cmsg_type, (*header).cmsg_len) };
+    let header_length: usize = header_length as _;
     match (level, kind) {
         (libc::IPPROTO_IP, libc::IP_PKTINFO) => {
             // SAFETY: CMSG_LEN only computes the storage length of this fixed type.
             let required = unsafe { libc::CMSG_LEN(mem::size_of::<libc::in_pktinfo>() as u32) };
-            if header_length < required as usize || header_length > message.msg_controllen {
+            if header_length < required as usize || header_length > control_length {
                 return Err(ReceiveError::Datagram("invalid IPv4 UDP destination metadata"));
             }
             // SAFETY: the checked header covers a complete in_pktinfo inside control.
@@ -125,7 +129,7 @@ fn receive_ready(socket: &UdpSocket, buffer: &mut [u8]) -> Result<Packet, Receiv
         (libc::IPPROTO_IPV6, libc::IPV6_PKTINFO) => {
             // SAFETY: CMSG_LEN only computes the storage length of this fixed type.
             let required = unsafe { libc::CMSG_LEN(mem::size_of::<libc::in6_pktinfo>() as u32) };
-            if header_length < required as usize || header_length > message.msg_controllen {
+            if header_length < required as usize || header_length > control_length {
                 return Err(ReceiveError::Datagram("invalid IPv6 UDP destination metadata"));
             }
             // SAFETY: the checked header covers a complete in6_pktinfo inside control.
@@ -142,7 +146,7 @@ fn receive_ready(socket: &UdpSocket, buffer: &mut [u8]) -> Result<Packet, Receiv
         length: length as usize,
         peer,
         control,
-        control_length: message.msg_controllen,
+        control_length,
     })
 }
 
@@ -164,7 +168,7 @@ fn reply_ready(socket: &UdpSocket, bytes: &[u8], packet: &Packet) -> io::Result<
     message.msg_iov = ptr::from_mut(&mut data);
     message.msg_iovlen = 1;
     message.msg_control = packet.control.as_ptr().cast_mut().cast();
-    message.msg_controllen = packet.control_length;
+    message.msg_controllen = packet.control_length as _;
     // SAFETY: sendmsg only reads the valid address, bytes, and aligned control data.
     let sent = unsafe { libc::sendmsg(socket.as_raw_fd(), &message, 0) };
     if sent == -1 {

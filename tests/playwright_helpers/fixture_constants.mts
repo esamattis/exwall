@@ -1,3 +1,6 @@
+/** Debug exwall binary built for the musl target set in `.cargo/config.toml`. */
+export const debugBinaryPath = "target/x86_64-unknown-linux-musl/debug/exwall";
+
 /** Public names resolve only to peer namespace fixtures; there is no internet route. */
 export const fixtureHosts = [
     "github.com",

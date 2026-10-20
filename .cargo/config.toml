@@ -1,0 +1,11 @@
+# Build the same static musl binaries that releases ship, also for local
+# development, tests, and the E2E suite. Release CI overrides this with an
+# explicit `--target` per architecture; on an aarch64 host, set
+# CARGO_BUILD_TARGET=aarch64-unknown-linux-musl.
+[build]
+target = "x86_64-unknown-linux-musl"
+
+# ring compiles C code, which must be built against musl rather than glibc.
+[env]
+CC_x86_64_unknown_linux_musl = "musl-gcc"
+CC_aarch64_unknown_linux_musl = "musl-gcc"

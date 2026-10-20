@@ -10,6 +10,7 @@ import { once } from "node:events";
 import type { Socket } from "node:net";
 import type { RequestOptions, Server, RequestListener } from "node:http";
 import { startDns } from "#playwright_helpers/dns.mts";
+import { debugBinaryPath } from "#playwright_helpers/fixture_constants.mts";
 import {
     bounded,
     startProcess,
@@ -184,7 +185,7 @@ export async function tlsExchange(
 /** Start echo upstreams, DNS, and a real exwall server with its production file watcher. */
 export async function startProtocolFixture() {
     const root = await mkdtemp(join(tmpdir(), "exwall-protocol-"));
-    const binary = resolve("target/debug/exwall");
+    const binary = resolve(debugBinaryPath);
     const ca = join(root, "ca");
     const config = join(root, "config.toml");
     const rules = join(root, "rules");

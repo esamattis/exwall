@@ -27,7 +27,7 @@ mise exec -- pnpm test:e2e
 ```
 
 The launcher builds the embedded frontend and Rust binary first. After a build,
-`./e2e_tests.sh --no-build` reuses `target/debug/exwall`. The full
+`./e2e_tests.sh --no-build` reuses `target/x86_64-unknown-linux-musl/debug/exwall`. The full
 `./integration_tests.sh` runs this same unified Playwright suite. Both scripts
 accept Playwright arguments after the optional `--no-build`, for example:
 
