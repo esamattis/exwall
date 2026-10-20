@@ -148,7 +148,7 @@ mod tests {
         assert_eq!(cli.config, PathBuf::from(DEFAULT_CONFIG));
     }
 
-    /// Hook options precede the action, matching the systemd unit and README.
+    /// Hook options precede the action, matching the systemd unit and docs/usage.md.
     #[test]
     fn parses_hook_options_before_action() {
         let cli = Cli::parse_from([
