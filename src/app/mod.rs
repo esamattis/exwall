@@ -1,5 +1,6 @@
 //! Command dispatch: each CLI operation wires adapters together and reports failures.
 
+mod credentials;
 mod hook;
 mod serve;
 
@@ -31,6 +32,7 @@ pub fn main() -> ExitCode {
 pub fn run(cli: &Cli) -> Result<(), Error> {
     match cli.command_or_default() {
         Command::Hook(args) => hook::run(cli, &args),
+        Command::UiCredentials(args) => credentials::run(cli, &args),
         Command::InitCa(args) => {
             ca::init(&args.ca_dir)?;
             println!("CA certificate: {}", args.ca_dir.join(ca::CERT_FILE).display());

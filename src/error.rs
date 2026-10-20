@@ -19,6 +19,9 @@ pub enum Error {
     /// CA material could not be created or validated.
     #[error(transparent)]
     Ca(#[from] crate::ca::CaError),
+    /// Web UI credentials could not be generated or saved.
+    #[error(transparent)]
+    Credentials(#[from] crate::credentials::CredentialsError),
     /// A privileged lifecycle hook failed.
     #[error(transparent)]
     Hook(#[from] crate::host::HookError),

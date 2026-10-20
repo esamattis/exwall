@@ -84,8 +84,16 @@ shipping a placeholder. Rebuild the frontend after changing its source.
 
 ## Installing a local build
 
-`install.sh` never builds exwall. Build as your normal user, then install the
-debug binary together with the config, rules, and unit files from the checkout:
+Run without arguments from a git checkout, `install.sh` builds the UI and a
+static release binary as your normal user, then installs it together with the
+config, rules, and unit files from the checkout:
+
+```sh
+./install.sh
+```
+
+To install a binary you built yourself, such as a debug build, pass it with
+`--binary`; the installer then builds nothing:
 
 ```sh
 mise exec -- pnpm build

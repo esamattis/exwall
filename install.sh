@@ -4,13 +4,15 @@
 #
 # Usage:
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/esamattis/exwall/refs/heads/main/install.sh)"
-#   ./install.sh                  # install the latest release
+#   ./install.sh                  # install the latest release, or build a git checkout
 #   ./install.sh v0.1.0           # install a specific release tag
 #   ./install.sh --binary PATH    # install a locally built binary
 #
 # Release installs download the archive for the host architecture and run the
-# install.sh shipped inside it, which installs the binary next to it. The
-# system installation runs as root and uses sudo when started as another user.
+# install.sh shipped inside it, which installs the binary next to it. Run
+# without arguments from a git checkout, the installer instead builds a release
+# binary from that checkout as the current user and installs it. The system
+# installation runs as root and uses sudo when started as another user.
 #
 set -euo pipefail
 
@@ -91,6 +93,55 @@ resolve_tag() {
     echo "$tag"
 }
 
+# Map the host architecture to the musl Rust target that release archives use.
+rust_target_for() {
+    local arch
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64) echo "x86_64-unknown-linux-musl" ;;
+        aarch64 | arm64) echo "aarch64-unknown-linux-musl" ;;
+        *)
+            err "no musl Rust target for arch '$arch' (only x86_64 and aarch64 are supported)"
+            return 1
+            ;;
+    esac
+}
+
+# Report whether a directory is the root of an exwall git checkout.
+is_git_checkout() {
+    local dir="$1"
+    # .git is a directory in a clone and a file in a worktree.
+    [[ -n "$dir" && -f "${dir}/Cargo.toml" && -e "${dir}/.git" ]]
+}
+
+# Build the UI bundle and a static release binary in a git checkout, then
+# install that binary. The build runs as the current user so build outputs
+# stay owned by the checkout's owner; only the installation uses root.
+install_checkout() {
+    local checkout="$1"
+    if [[ "${EUID}" -eq 0 && "$(stat -c %U "$checkout")" != root ]]; then
+        die "run ./install.sh as the owner of ${checkout}, not as root; it builds as that user and then uses sudo"
+    fi
+    require_tools cargo mise uname
+
+    local target
+    target="${CARGO_BUILD_TARGET:-}"
+    if [[ -z "$target" ]]; then
+        target="$(rust_target_for)" || exit 1
+    fi
+
+    info "building exwall from ${checkout} for ${target}"
+    # build.rs embeds ui/dist, so rebuild it to match the checked-out sources.
+    (
+        cd "$checkout"
+        mise exec -- pnpm install --frozen-lockfile
+        mise exec -- pnpm build:ui
+        cargo build --locked --release --target "$target"
+    ) || die "build failed"
+
+    install_local "${checkout}/target/${target}/release/${BINARY_NAME}"
+}
+
 # Map the host architecture to the archive name produced by
 # .github/workflows/build.yml. Only targets built in CI are supported.
 archive_name_for() {
@@ -158,7 +209,7 @@ install_system() {
     local binary="$1"
     local support_dir="$2"
 
-    [[ -x "$binary" ]] || die "missing executable: $binary; install.sh never builds exwall"
+    [[ -x "$binary" ]] || die "missing executable: $binary; --binary installs an existing build"
     for file in config-default.toml example-rules.toml systemd/exwall.service; do
         [[ -f "${support_dir}/${file}" ]] || die "missing installer file: ${support_dir}/${file}"
     done
@@ -204,6 +255,9 @@ install_system() {
         install -o root -g exwall -m 0640 "${support_dir}/example-rules.toml" /etc/exwall/rules.d/10-examples.toml
     fi
     runuser -u exwall -- /usr/local/bin/exwall check
+    # Generate web UI credentials on first install; later installs keep and show them.
+    local ui_info
+    ui_info="$(/usr/local/bin/exwall ui-credentials --if-missing)"
     runuser -u exwall -- /usr/local/bin/exwall init-ca
     install -m 0644 /var/lib/exwall/exwall-ca-cert.pem /usr/local/share/ca-certificates/exwall.crt
     update-ca-certificates
@@ -239,6 +293,8 @@ ENV
     printf 'Access log: /var/log/exwall/access.log\n'
     printf 'Reload rules: sudo systemctl reload exwall\n'
     printf 'Current shell CA settings: . /etc/profile.d/exwall.sh\n'
+    printf 'New UI password: sudo exwall ui-credentials\n'
+    printf '\n%s\n' "$ui_info"
 }
 
 # Install a local binary, re-running this script through sudo when needed.
@@ -247,7 +303,7 @@ install_local() {
     local support_dir
     support_dir="$(script_dir)"
     [[ -n "$support_dir" ]] || die "--binary requires running install.sh from a checkout or release archive"
-    [[ -x "$binary" ]] || die "missing executable: $binary; install.sh never builds exwall"
+    [[ -x "$binary" ]] || die "missing executable: $binary; --binary installs an existing build"
     binary="$(CDPATH="" cd -- "$(dirname -- "$binary")" && pwd)/$(basename -- "$binary")"
 
     if [[ "${EUID}" -ne 0 ]]; then
@@ -268,9 +324,19 @@ main() {
             ;;
         -h | --help)
             echo "usage: install.sh [TAG | --binary PATH]"
+            echo "Without arguments, a git checkout is built and installed; otherwise the latest release is."
+            ;;
+        "")
+            local dir
+            dir="$(script_dir)"
+            if is_git_checkout "$dir"; then
+                install_checkout "$dir"
+            else
+                install_release
+            fi
             ;;
         *)
-            install_release "${1:-}"
+            install_release "$1"
             ;;
     esac
 }

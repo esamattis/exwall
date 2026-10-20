@@ -127,6 +127,7 @@ mod tests {
         assert!(bind(&disabled).unwrap().is_empty());
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let config = UiConfig {
+            hosts: vec!["127.0.0.1".parse().unwrap()],
             port: occupied.local_addr().unwrap().port(),
             ..UiConfig::default()
         };

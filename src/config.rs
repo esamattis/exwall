@@ -117,10 +117,10 @@ pub struct UiConfig {
 }
 
 impl Default for UiConfig {
-    /// Restrict the UI to IPv4 loopback on port 58000 by default.
+    /// Listen on every IPv4 address on port 58000 by default.
     fn default() -> Self {
         Self {
-            hosts: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            hosts: vec![IpAddr::V4(Ipv4Addr::UNSPECIFIED)],
             port: 58000,
             username: String::new(),
             password: String::new(),

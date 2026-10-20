@@ -145,17 +145,22 @@ Apply `block_dns` and other rule-related changes with
 
 ## Web UI
 
-Set a username and password in `config.toml`, then restart:
+The installer generates a login, stores it in `config.toml`, and prints it with
+the UI URLs. To show the login again, or to generate a new password:
 
-```toml
-[ui]
-hosts = ["127.0.0.1"]
-port = 58000
-username = "admin"
-password = "replace-with-your-password"
+```sh
+sudo exwall ui-credentials --if-missing     # show the current login
+sudo exwall ui-credentials                  # new password, then restart
+sudo exwall ui-credentials --username ops   # new username and password
+sudo systemctl restart exwall
 ```
 
-Open <http://127.0.0.1:58000>. From another machine, use an SSH tunnel:
+You can also edit `username` and `password` under `[ui]` in `config.toml` directly.
+
+Open <http://localhost:58000>, or port 58000 on the machine's address. The UI
+listens on every IPv4 address by default and serves plain HTTP. To keep it
+local, set `hosts = ["127.0.0.1"]` under `[ui]` and use an SSH tunnel from
+another machine:
 
 ```sh
 ssh -L 58000:127.0.0.1:58000 your-server

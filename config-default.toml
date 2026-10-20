@@ -50,16 +50,15 @@ max_size_bytes = 10485760
 keep_entries = 1000
 
 # Embedded web UI. Restart to apply changes. Hosts are literal bind addresses.
-# Use ["127.0.0.1", "::1"] for both loopback families, ["0.0.0.0", "::"] for
-# all interfaces, or [] to disable the UI listener.
+# The default listens on every IPv4 address. Use ["127.0.0.1"] for localhost
+# only, ["0.0.0.0", "::"] to add IPv6, or [] to disable the UI listener.
 [ui]
-hosts = ["127.0.0.1"]
+hosts = ["0.0.0.0"]
 port = 58000
 # Set both credentials to enable login and HTTP Basic API authentication.
 # Empty credentials disable API access. Protect this configuration file.
-# Replace the empty values below with your credentials, for example:
-# username = "admin"
-# password = "replace-with-your-password"
+# install.sh fills these in; generate a new password with
+# `sudo exwall ui-credentials`, or replace the values by hand.
 # Changing credentials invalidates existing sessions after restart.
 username = ""
 password = ""

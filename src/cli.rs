@@ -60,6 +60,8 @@ pub enum Command {
     InitCa(CaArgs),
     /// Run a privileged systemd lifecycle hook.
     Hook(HookArgs),
+    /// Generate web UI credentials in the configuration file and print the login.
+    UiCredentials(UiCredentialsArgs),
 }
 
 /// Listener, upstream, and CA settings for the proxy service.
@@ -94,6 +96,17 @@ pub struct CaArgs {
     /// Directory receiving the CA certificate and key.
     #[arg(long, default_value = DEFAULT_CA_DIR)]
     pub ca_dir: PathBuf,
+}
+
+/// Settings for web UI credential generation.
+#[derive(Clone, Debug, Args)]
+pub struct UiCredentialsArgs {
+    /// Login name; defaults to the configured name, or "admin" when none is set.
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub username: Option<String>,
+    /// Keep existing complete credentials instead of generating a new password.
+    #[arg(long)]
+    pub if_missing: bool,
 }
 
 /// Settings shared by every privileged hook operation.
