@@ -19,6 +19,7 @@ mise exec -- pnpm build
 ./integration_tests.sh
 ```
 
+`pnpm test` runs both: `pnpm test:unit` (`test.sh`) and then `pnpm test:e2e`.
 `test.sh` builds and checks the frontend, then runs Rust formatting checks,
 Clippy, and unit tests. The rule tests include
 8,160 HTTP and 170 DNS decisions recorded from the original mitmwall Python

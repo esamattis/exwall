@@ -15,6 +15,8 @@
         "format": "oxfmt --write ui package.json tsconfig.json .oxlintrc.json .oxfmtrc.json playwright.e2e.config.ts tests/playwright_helpers scripts",
         "format:check": "oxfmt --check ui package.json tsconfig.json .oxlintrc.json .oxfmtrc.json playwright.e2e.config.ts tests/playwright_helpers scripts",
         "check": "pnpm types && pnpm lint && pnpm format:check",
+        "test": "pnpm test:unit && pnpm test:e2e",
+        "test:unit": "./test.sh",
         "test:e2e": "node tests/playwright_helpers/run_e2e.mts"
     },
     "dependencies": {
