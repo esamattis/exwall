@@ -4,11 +4,13 @@ import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
+import { isDeepStrictEqual } from "node:util";
 import { freePort } from "#playwright_helpers/proxy_fixture.mts";
 import { runCommand, startProcess, bounded, waitForPort } from "#playwright_helpers/processes.mts";
 import { firewallSnapshot, forwardingSnapshot } from "#playwright_helpers/namespace_safety.mts";
-import { restricted } from "#playwright_helpers/lifecycle.mts";
+import { fixtureClient, restricted } from "#playwright_helpers/lifecycle.mts";
 import type { LifecycleFixture } from "#playwright_helpers/lifecycle.mts";
+import type { NetworkOperation } from "#playwright_helpers/protocol.mts";
 
 /** Poll private manager properties with a deadline rather than waiting indefinitely. */
 async function waitUntil(predicate: () => Promise<boolean>, message: string): Promise<void> {
@@ -22,7 +24,23 @@ async function waitUntil(predicate: () => Promise<boolean>, message: string): Pr
     throw new Error(message);
 }
 
-/** Verify failed starts, retries, crashes, explicit stops, and exact hook cleanup. */
+/** Report whether the firewall and forwarding sysctls match the fixture's original state. */
+async function restored(fixture: LifecycleFixture): Promise<boolean> {
+    return (
+        isDeepStrictEqual(await firewallSnapshot(), fixture.baseline) &&
+        (await forwardingSnapshot()) === fixture.sysctls
+    );
+}
+
+/** Require exact host restoration and a working connection under the ordinary UID. */
+async function unrestricted(fixture: LifecycleFixture): Promise<void> {
+    assert.deepEqual(await firewallSnapshot(), fixture.baseline);
+    assert.equal(await forwardingSnapshot(), fixture.sysctls);
+    const operation: NetworkOperation = { operation: "tcp", host: "ftp.ubuntu-tw.org", port: 21 };
+    assert.deepEqual(await fixtureClient(fixture, operation), { result: true });
+}
+
+/** Verify that stops, failed starts, and crashes restore the host and restarts re-enforce. */
 export async function checkSystemd(fixture: LifecycleFixture): Promise<void> {
     const directory = join(fixture.root, "systemd");
     const runtime = join(directory, "runtime");
@@ -82,8 +100,9 @@ export async function checkSystemd(fixture: LifecycleFixture): Promise<void> {
             line = "User=root";
         } else if (line === "Group=exwall") {
             line = "Group=root";
-        } else if (line.startsWith("ExecStartPre=+")) {
-            line = `ExecStartPre=+${[...hook, line.split(" ").at(-1)!].map((argument) => JSON.stringify(argument)).join(" ")}`;
+        } else if (line.startsWith("ExecStartPre=+") || line.startsWith("ExecStopPost=+")) {
+            const key = line.slice(0, line.indexOf("="));
+            line = `${key}=+${[...hook, line.split(" ").at(-1)!].map((argument) => JSON.stringify(argument)).join(" ")}`;
         } else if (line.startsWith("ExecStartPre=")) {
             line = `ExecStartPre=${[...args, "check"].map((argument) => JSON.stringify(argument)).join(" ")}`;
         } else if (line.startsWith("ExecStart=")) {
@@ -138,18 +157,17 @@ export async function checkSystemd(fixture: LifecycleFixture): Promise<void> {
             "Proxy did not start",
         );
         await waitForPort(proxyPort, manager);
-        const saved = await readFile(join(fixture.root, "state/forwarding.json"));
+        await restricted(fixture);
         for (const path of [config, rule]) {
             const text = await readFile(path, "utf8");
             await writeFile(path, "not valid TOML");
             await control(["restart", "exwall.service"]);
-            await restricted(fixture);
             await waitUntil(
                 async () => Number(await property("NRestarts")) >= 1,
                 "Invalid policy was not retried",
             );
-            await restricted(fixture);
-            assert.deepEqual(await readFile(join(fixture.root, "state/forwarding.json")), saved);
+            // Each failed attempt runs ExecStopPost cleanup before the next retry.
+            await waitUntil(() => restored(fixture), "Failed start did not restore the host");
             await writeFile(path, text);
             await checked("reset-failed", "exwall.service");
             await checked("restart", "exwall.service");
@@ -159,9 +177,9 @@ export async function checkSystemd(fixture: LifecycleFixture): Promise<void> {
             );
             await waitForPort(proxyPort, manager);
         }
+        await restricted(fixture);
         const restarts = Number(await property("NRestarts"));
         await checked("kill", "--signal=KILL", "--kill-whom=main", "exwall.service");
-        await restricted(fixture);
         await waitUntil(
             async () =>
                 Number(await property("NRestarts")) > restarts &&
@@ -171,6 +189,7 @@ export async function checkSystemd(fixture: LifecycleFixture): Promise<void> {
         await waitForPort(proxyPort, manager);
         await restricted(fixture);
         await checked("stop", "exwall.service");
+        await unrestricted(fixture);
         const occupied = createServer();
         await new Promise<void>((resolve, reject) => {
             occupied.once("error", reject);
@@ -182,15 +201,15 @@ export async function checkSystemd(fixture: LifecycleFixture): Promise<void> {
                 async () => (await property("ExecMainStatus")) === "1",
                 "Startup failure missing",
             );
-            await restricted(fixture);
+            await waitUntil(() => restored(fixture), "Failed start did not restore the host");
         } finally {
             await new Promise<void>((resolve) => occupied.close(() => resolve()));
         }
         await checked("stop", "exwall.service");
-        await restricted(fixture);
+        await unrestricted(fixture);
+        // Manual cleanup after a stop is an idempotent no-op.
         await runCommand([...hook, "stop"]);
-        assert.deepEqual(await firewallSnapshot(), fixture.baseline);
-        assert.equal(await forwardingSnapshot(), fixture.sysctls);
+        await unrestricted(fixture);
     } catch (error) {
         console.error(manager.output?.stderr ?? "Private manager still running");
         console.error(

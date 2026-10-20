@@ -153,7 +153,7 @@ impl<'a> Hooks<'a> {
         let mut users = None;
         for firewall in self.firewalls() {
             if firewall.chain_exists(Table::Filter, OUTPUT_CHAIN)? {
-                // A restart must retain the complete previous policy and its exceptions.
+                // A start after a failed cleanup retains the complete previous policy.
                 continue;
             }
             if firewall.chain_exists(Table::Filter, GUARD_CHAIN)?
@@ -172,8 +172,8 @@ impl<'a> Hooks<'a> {
 
     /// Install egress policy, saving the resolver and forwarding state first.
     ///
-    /// Failures retain enforcement and the original snapshots; only an explicit
-    /// stop removes policy and restores host state.
+    /// Failures retain enforcement and the original snapshots until `stop`
+    /// removes policy and restores host state.
     pub fn start(&self, config: &StaticConfig) -> Result<(), HookError> {
         if self.mode == Mode::Live {
             let required = config

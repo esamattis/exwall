@@ -139,7 +139,7 @@ for (const [name, scenario] of [
     ["initial invalid configuration installs a bootstrap guard", "bootstrap"],
     ["corrupt forwarding state retains diagnostics and sysctls", "corrupt-state"],
     ["full installed hooks intercept IPv6 domain traffic", "ipv6-hosts"],
-    ["production systemd failures and automatic restarts remain closed", "systemd"],
+    ["production systemd stops and failures restore the host; restarts re-enforce", "systemd"],
     [
         "transparent original destinations and authorized-host routing avoid attackers",
         "transparent",

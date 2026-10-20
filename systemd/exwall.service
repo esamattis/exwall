@@ -16,8 +16,10 @@ ExecStartPre=/usr/local/bin/exwall check
 ExecStartPre=+/usr/local/bin/exwall hook start
 ExecStart=/usr/local/bin/exwall serve
 ExecReload=/bin/kill -HUP $MAINPID
-# Enforcement survives stop, restart, and failed starts.
-# To remove it intentionally: systemctl stop exwall; exwall hook stop
+# Every stop, including failed starts and crashes, removes enforcement and
+# restores the original resolver and sysctls. ExecStopPost also runs when an
+# ExecStartPre command fails, so a partial start is always cleaned up.
+ExecStopPost=+/usr/local/bin/exwall hook stop
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=30

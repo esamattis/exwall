@@ -309,8 +309,8 @@ exwall check
 exwall --config /etc/mitmwall/config.toml --rules-dir /etc/mitmwall/rules.d check
 sudo systemctl reload exwall
 sudo systemctl restart exwall
-sudo systemctl stop exwall
-sudo exwall hook stop       # intentionally remove enforcement and restore host state
+sudo systemctl stop exwall  # remove enforcement and restore host state
+sudo exwall hook stop       # manual cleanup when the unit is not in use
 exwall hook --dry-run start
 exwall hook --dry-run stop
 ```
@@ -443,18 +443,18 @@ hook saves the original file or symlink and temporarily replaces it with
 systemd-resolved's loopback stub. `hook stop` restores contents/target, permissions,
 and ownership, while preserving replacements made by an administrator. Failed
 restoration retains snapshots and guards for repair and retry. The unit's
-resolved lifecycle dependencies stop the proxy with the resolver. Enforcement
-and saved state remain in place until an explicit `hook stop`.
+resolved lifecycle dependencies stop the proxy with the resolver.
 
-The firewall survives systemd stops, failed starts, and automatic or manual
-restarts. A valid existing policy, including its bypass exceptions, remains
-active if configuration or rules cannot be parsed. On first start, `hook guard`
+Enforcement lasts only while the unit is active. The unit runs `hook stop` as
+`ExecStopPost` whenever it leaves the active state: `systemctl stop`, crashes,
+failed starts, and the stop half of a restart all remove the managed chains and
+restore the resolver and sysctls. Restarts therefore briefly leave egress
+unfiltered between cleanup and the next `hook guard`. On start, `hook guard`
 installs a minimal deny policy before parsing, preserving root, the proxy,
 resolver, DNS/NTP service exceptions, loopback, inbound replies, and ICMPv6.
-An incomplete installation retains guards and the original snapshots for retry.
-To intentionally disable enforcement, stop the service and run
-`sudo exwall hook stop`; uninstall does both. Resolver and sysctl restoration
-occurs only on that explicit cleanup, which works with malformed TOML.
+If a previous cleanup failed, `hook guard` keeps the remaining policy. Cleanup
+works with malformed TOML; `sudo exwall hook stop` can also be run manually,
+and uninstall runs it after stopping the service.
 As in mitmwall, it governs local processes and relies on unprivileged applications lacking firewall-changing
 capabilities. Container forwarding policy that was enabled before startup is
 preserved. Historical Python-hook migrations are not run; stop/uninstall the old
