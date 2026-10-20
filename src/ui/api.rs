@@ -159,7 +159,7 @@ pub struct Api {
     rules: WebRulesFile,
     /// Activates saved rules.
     reload: ReloadHandle,
-    /// Domain counters and denials.
+    /// Domain counters, transfer totals, and denials.
     stats: DomainStats,
     /// Serializes rule reads and writes.
     lock: Mutex<()>,
@@ -218,6 +218,10 @@ impl Api {
                 Ok(json(StatusCode::OK, &self.stats.denials_snapshot()))
             }
             (Method::GET, "/api/domains") => Ok(json(StatusCode::OK, &self.stats.snapshot())),
+            (Method::POST, "/api/traffic/reset") => {
+                self.stats.reset();
+                Ok(json(StatusCode::OK, &serde_json::json!({})))
+            }
             (Method::GET, "/api/rules") => {
                 let _guard = self.lock.lock().await;
                 Ok(json(StatusCode::OK, &self.read_rules().await?))
@@ -590,6 +594,28 @@ mod tests {
         let saved = fs::read_to_string(harness.rules.join("05-web.toml")).unwrap();
         assert!(saved.contains("saved.test"));
         assert!(Arc::ptr_eq(&before, &harness.store.snapshot()));
+    }
+
+    /// Resetting traffic requires authentication and clears domains and denials.
+    #[tokio::test]
+    async fn resets_traffic_statistics() {
+        let temporary = tempfile::tempdir().unwrap();
+        let harness = harness(temporary.path(), "secret");
+        let stats = &harness.api.stats;
+        stats.record(&Host::new("example.com"), crate::telemetry::Protocol::Dns, true);
+        stats.record_denial(&Host::new("example.com"), "GET", "/denied");
+        let body = serde_json::json!({});
+        let anonymous = request(Method::POST, "/api/traffic/reset", None, &body);
+        let response = harness.api.response(anonymous).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(stats.snapshot().len(), 1);
+        let bearer = login(&harness.api, "secret").await;
+        let auth = Some(("authorization", bearer.as_str()));
+        let reset = request(Method::POST, "/api/traffic/reset", auth, &body);
+        let response = harness.api.response(reset).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(stats.snapshot().is_empty());
+        assert!(stats.denials_snapshot().is_empty());
     }
 
     /// Reject cross-origin mutations, unknown endpoints, methods, and disabled credentials.

@@ -23,6 +23,7 @@ interface DomainStats {
     domain: string;
     dns: { allow: number; block: number };
     http: { allow: number; block: number };
+    bytes: { up: number; down: number };
     last_updated: string;
     last_allowed: string | null;
     last_denied: string | null;
@@ -88,6 +89,7 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
             domain: "denied.test",
             dns: { allow: 0, block: 2 },
             http: { allow: 0, block: 0 },
+            bytes: { up: 0, down: 0 },
             last_updated: expect.any(String),
             last_allowed: null,
             last_denied: expect.any(String),
@@ -96,6 +98,7 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
             domain: "localhost",
             dns: { allow: 1, block: 0 },
             http: { allow: 1, block: 1 },
+            bytes: { up: 0, down: expect.any(Number) },
             last_updated: expect.any(String),
             last_allowed: expect.any(String),
             last_denied: expect.any(String),
@@ -104,6 +107,7 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
             domain: "127.0.0.1",
             dns: { allow: 0, block: 0 },
             http: { allow: 1, block: 1 },
+            bytes: { up: 0, down: expect.any(Number) },
             last_updated: expect.any(String),
             last_allowed: expect.any(String),
             last_denied: expect.any(String),
@@ -112,6 +116,9 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
     for (const entry of before) {
         expect(Number.isNaN(Date.parse(entry.last_updated))).toBe(false);
     }
+    // Only forwarded responses carry body bytes; local denials transfer nothing upstream.
+    expect(before[1]!.bytes.down).toBeGreaterThan(0);
+    expect(before[2]!.bytes.down).toBeGreaterThan(0);
     // Traffic and elapsed time must not update the page without a refresh.
     await page.clock.runFor(3000);
     await expect(page.getByText("No allowed domains yet")).toBeVisible();
@@ -140,6 +147,8 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
     await expect(allowedRows.nth(0).getByRole("cell").nth(0)).toHaveText("1");
     await expect(allowedRows.nth(0).getByRole("cell").nth(1)).toHaveText("1");
     await expect(allowedRows.nth(0).getByRole("cell").nth(2)).toHaveText("2");
+    await expect(allowedRows.nth(0).getByRole("cell").nth(3)).toHaveText("0 B");
+    await expect(allowedRows.nth(0).getByRole("cell").nth(4)).toHaveText(/^\d+(\.\d)? k?B$/i);
 
     await showTab(page, "Blocked domains");
     await page
@@ -191,6 +200,16 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
     await expect(rows).toHaveCount(3);
     await showTab(page, "Allowed domains");
     await expect(allowedRows.nth(0).getByRole("cell").nth(1)).toHaveText("4");
+
+    page.once("dialog", (dialog) => void dialog.accept());
+    await page.getByRole("button", { name: "Reset", exact: true }).click();
+    await expect(page.getByRole("status")).toHaveText("Traffic statistics reset.");
+    await expect(page.getByText("No allowed domains yet")).toBeVisible();
+    expect(await snapshot()).toEqual([]);
+    const denials = await page.request.get(`${ui}/api/http-denials`, {
+        headers: await sessionHeaders(page),
+    });
+    expect(await denials.json()).toEqual([]);
 });
 
 firewallTest(
@@ -406,6 +425,7 @@ test("HTTP allow actions remove only fully covered DNS-only rules, including dup
                     domain: "example.com",
                     dns: { allow: 0, block: 1 },
                     http: { allow: 0, block: 1 },
+                    bytes: { up: 0, down: 0 },
                     last_updated: new Date().toISOString(),
                     last_allowed: null,
                     last_denied: new Date().toISOString(),

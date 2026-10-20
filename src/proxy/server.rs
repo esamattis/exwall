@@ -2,6 +2,7 @@
 
 use super::{
     authorize::{Target, apply_plan, authorize, authorize_connect, initial_event, record_plan},
+    metered::MeteredBody,
     original_dst::redirected_destination,
     upstream::Upstream,
 };
@@ -10,7 +11,7 @@ use crate::{
     error::ErrorChain,
     policy::{Decision, MatchSource},
     runtime::PolicyStore,
-    telemetry::{EventSink, Failure},
+    telemetry::{Direction, EventSink, Failure},
 };
 use rama::{
     Layer, Service,
@@ -129,6 +130,8 @@ impl Proxy {
     }
 
     /// Apply policy and relay an allowed request as a streaming HTTP response.
+    ///
+    /// Forwarded request and response body bytes count toward the authorized host.
     pub async fn http(&self, mut request: Request, target: Target) -> Result<Response, Infallible> {
         let mut event = self.sink.track(initial_event(&request, &target));
         let decision = {
@@ -144,10 +147,16 @@ impl Proxy {
         };
         record_plan(event.event(), &plan);
         apply_plan(&mut request, &plan);
+        let stats = self.sink.stats().clone();
+        let host = plan.host;
+        let request =
+            request.map(|body| MeteredBody::wrap(body, stats.clone(), host.clone(), Direction::Up));
         let failure = match timeout(self.upstream_timeout, self.upstream.send(request)).await {
             Ok(Ok(upstream)) => {
                 event.event().respond_http(upstream.status().as_u16());
-                return Ok(upstream);
+                return Ok(
+                    upstream.map(|body| MeteredBody::wrap(body, stats, host, Direction::Down))
+                );
             }
             Ok(Err(error)) => {
                 tracing::warn!(error = %ErrorChain(&*error), "upstream HTTP request failed");
@@ -318,7 +327,7 @@ mod tests {
         BoxFuture,
         config::RuntimeSettings,
         policy::{Policy, RuleSet},
-        telemetry::{EventReceiver, format},
+        telemetry::{EventReceiver, Transferred, format},
     };
     use rama::http::body::util::BodyExt;
     use std::sync::Mutex;
@@ -343,7 +352,7 @@ mod tests {
     }
 
     impl Upstream for FakeUpstream {
-        /// Record the request and respond according to the behaviour.
+        /// Record the request, read its body, and respond according to the behaviour.
         fn send(&self, request: Request) -> BoxFuture<'_, Result<Response, BoxError>> {
             let authorization = request
                 .headers()
@@ -351,6 +360,7 @@ mod tests {
                 .map(|value| value.to_str().unwrap().to_owned());
             self.received.lock().unwrap().push((request.uri().to_string(), authorization));
             Box::pin(async move {
+                request.into_body().collect().await?;
                 match self.behaviour {
                     Behaviour::Status(status) => {
                         let mut reply = Response::new(Body::from("upstream"));
@@ -400,7 +410,7 @@ mod tests {
         let request = Request::builder()
             .uri(uri)
             .header("Authorization", "client-secret")
-            .body(Body::empty())
+            .body(Body::from("payload"))
             .unwrap();
         let target = Target {
             tls,
@@ -431,6 +441,15 @@ mod tests {
         assert_eq!(upstream.received.lock().unwrap().len(), 1);
         let denials = proxy.sink.stats().denials_snapshot();
         assert_eq!(denials[0].pathname, "/denied");
+        let summary = proxy.sink.stats().snapshot().remove(0);
+        assert_eq!(summary.domain, "allowed.test");
+        assert_eq!(
+            summary.bytes,
+            Transferred {
+                up: "payload".len() as u64,
+                down: "upstream".len() as u64
+            }
+        );
     }
 
     /// Upstream failures and timeouts become 502 with a failure category.

@@ -1,4 +1,4 @@
-//! Bounded domain counters and a bounded, process-local list of HTTP denials.
+//! Bounded domain counters, transfer totals, and a bounded, process-local list of HTTP denials.
 
 use super::event::{Protocol, RequestEvent};
 use crate::policy::{Decision, Host};
@@ -22,6 +22,24 @@ pub struct Counts {
     pub block: u64,
 }
 
+/// Which way forwarded body bytes travelled through the proxy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    /// From the client to the upstream: request bodies.
+    Up,
+    /// From the upstream to the client: response bodies.
+    Down,
+}
+
+/// Body bytes forwarded for allowed HTTP and HTTPS requests.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct Transferred {
+    /// Request body bytes sent upstream.
+    pub up: u64,
+    /// Response body bytes returned to clients.
+    pub down: u64,
+}
+
 /// The latest aggregate state for one normalized domain.
 #[derive(Clone, Debug, Serialize)]
 pub struct DomainSummary {
@@ -31,6 +49,8 @@ pub struct DomainSummary {
     pub dns: Counts,
     /// HTTP and HTTPS totals.
     pub http: Counts,
+    /// Forwarded HTTP and HTTPS body bytes.
+    pub bytes: Transferred,
     /// The latest allow, if any.
     #[serde(serialize_with = "serialize_optional_timestamp")]
     pub last_allowed: Option<jiff::Timestamp>,
@@ -97,6 +117,7 @@ impl Domains {
                         domain: host.to_string(),
                         dns: Counts::default(),
                         http: Counts::default(),
+                        bytes: Transferred::default(),
                         last_allowed: None,
                         last_denied: None,
                         last_updated: timestamp,
@@ -160,6 +181,31 @@ impl DomainStats {
             summary.last_denied = Some(timestamp);
         }
         summary.last_updated = timestamp;
+    }
+
+    /// Add forwarded body bytes to a domain without changing its outcome timestamps.
+    ///
+    /// The domain is created if needed because request bodies are forwarded before
+    /// the request's policy outcome is recorded.
+    pub fn record_transfer(&self, host: &Host, direction: Direction, bytes: u64) {
+        if host.is_empty() || bytes == 0 {
+            return;
+        }
+        let mut domains = self.domains.lock().expect("domain counter lock poisoned");
+        let summary = domains.touch(host, jiff::Timestamp::now());
+        let total = match direction {
+            Direction::Up => &mut summary.bytes.up,
+            Direction::Down => &mut summary.bytes.down,
+        };
+        *total = total.saturating_add(bytes);
+    }
+
+    /// Forget every domain summary and retained denial.
+    ///
+    /// Transfers still in flight continue to count toward fresh summaries.
+    pub fn reset(&self) {
+        *self.domains.lock().expect("domain counter lock poisoned") = Domains::default();
+        self.denials.lock().expect("HTTP denial lock poisoned").clear();
     }
 
     /// Retain the latest denied requests without writing request history to disk.
@@ -309,6 +355,61 @@ mod tests {
         let latest = stats.snapshot();
         assert_eq!(latest[0].domain, "other.test");
         assert_eq!(latest[1].last_updated, first[0].last_updated);
+    }
+
+    /// Accumulate transfers per direction without touching outcome timestamps.
+    #[test]
+    fn tracks_transferred_bytes_per_domain() {
+        let stats = DomainStats::default();
+        stats.record_transfer(&host("Example.COM."), Direction::Up, 10);
+        stats.record_transfer(&host("example.com"), Direction::Down, 0);
+        let pending = stats.snapshot().remove(0);
+        assert_eq!(
+            pending.bytes,
+            Transferred {
+                up: 10,
+                down: 0
+            }
+        );
+        assert_eq!(pending.last_allowed, None);
+        assert_eq!(pending.last_denied, None);
+        stats.record(&host("example.com"), Protocol::Https, true);
+        stats.record_transfer(&host("example.com"), Direction::Down, 1500);
+        stats.record_transfer(&host("example.com"), Direction::Up, 5);
+        let latest = stats.snapshot().remove(0);
+        assert_eq!(
+            latest.bytes,
+            Transferred {
+                up: 15,
+                down: 1500
+            }
+        );
+        assert_eq!(latest.last_allowed, Some(latest.last_updated));
+        let serialized = serde_json::to_value(&latest).unwrap();
+        assert_eq!(serialized["bytes"], serde_json::json!({ "up": 15, "down": 1500 }));
+    }
+
+    /// Clear domains and denials while continuing to accept new traffic.
+    #[test]
+    fn reset_clears_domains_and_denials() {
+        let stats = DomainStats::default();
+        stats.record(&host("example.com"), Protocol::Dns, true);
+        stats.record_transfer(&host("example.com"), Direction::Down, 100);
+        stats.record_denial(&host("example.com"), "GET", "/denied");
+        stats.reset();
+        assert!(stats.snapshot().is_empty());
+        assert!(stats.denials_snapshot().is_empty());
+        assert!(stats.domains.lock().unwrap().order.is_empty());
+        stats.record_transfer(&host("example.com"), Direction::Up, 1);
+        let fresh = stats.snapshot().remove(0);
+        assert_eq!(fresh.dns, Counts::default());
+        assert_eq!(
+            fresh.bytes,
+            Transferred {
+                up: 1,
+                down: 0
+            }
+        );
     }
 
     /// Evict the least recently updated domain once the limit is reached.

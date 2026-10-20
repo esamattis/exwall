@@ -166,13 +166,15 @@ another machine:
 ssh -L 58000:127.0.0.1:58000 your-server
 ```
 
-- **Traffic** lists blocked and allowed domains with request counts, and the
-  latest blocked requests. Allow a blocked domain, its subdomains, a DNS-only
-  lookup, or one exact request with a single click.
+- **Traffic** lists blocked and allowed domains with request counts and the
+  HTTP(S) body bytes sent up and received down, and the latest blocked
+  requests. Allow a blocked domain, its subdomains, a DNS-only lookup, or one
+  exact request with a single click.
 - **Rules** edits the rules created from the UI. They are stored in
   `/etc/exwall/rules.d/05-web.toml`; your other rule files are never touched.
 
-Counters reset when exwall restarts. The same data is available as JSON:
+Counters reset when exwall restarts or when you press **Reset** on the Traffic
+page. The same data is available as JSON:
 
 ```sh
 curl --user admin http://127.0.0.1:58000/api/domains

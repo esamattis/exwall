@@ -24,6 +24,8 @@ export interface DomainStats {
     domain: string;
     dns: { allow: number; block: number };
     http: { allow: number; block: number };
+    /** HTTP(S) body bytes forwarded upstream (up) and back to clients (down). */
+    bytes: { up: number; down: number };
     last_updated: string;
     last_allowed: string | null;
     last_denied: string | null;
@@ -100,6 +102,11 @@ export async function api<T>(
         throw new ApiError(response.status, result.error ?? "Request failed");
     }
     return result;
+}
+
+/** Forget all domain counters, transfer totals, and retained denials. */
+export async function resetTraffic(): Promise<void> {
+    await api("traffic/reset", "POST", {});
 }
 
 /** Escape pathname characters so an allow rule matches exactly one literal path. */

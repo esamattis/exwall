@@ -1,6 +1,7 @@
 //! The HTTP(S) proxy: pure authorization, a shared upstream client, and connection handling.
 
 mod authorize;
+mod metered;
 mod original_dst;
 mod server;
 mod upstream;

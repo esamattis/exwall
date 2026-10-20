@@ -5,6 +5,7 @@ import {
     allowDomain,
     allowRequest,
     api,
+    resetTraffic,
     type DomainAllowance,
     type DomainStats,
     type HttpDenial,
@@ -18,6 +19,7 @@ import {
     RefreshIcon,
     RelativeTime,
     Spinner,
+    TrashIcon,
     useNow,
     useToast,
 } from "./components.tsx";
@@ -59,6 +61,21 @@ function domainEntries(domains: DomainStats[], outcome: "allow" | "block"): Doma
             left.entry.domain.localeCompare(right.entry.domain),
     );
     return entries;
+}
+
+/** Units used when formatting transferred byte counts. */
+const byteUnits = ["B", "kB", "MB", "GB", "TB", "PB"];
+
+/** Format a byte count with a decimal unit, such as `1.5 MB`. */
+function formatBytes(bytes: number): string {
+    let value = bytes;
+    let unit = 0;
+    while (value >= 1000 && unit < byteUnits.length - 1) {
+        value /= 1000;
+        unit += 1;
+    }
+    const digits = unit === 0 || value >= 100 ? 0 : 1;
+    return `${value.toFixed(digits)} ${byteUnits[unit]}`;
 }
 
 /** Describe a completed domain allowance for the confirmation toast. */
@@ -118,6 +135,15 @@ export function TrafficPage({ view }: { view: TrafficView }) {
             await client.invalidateQueries({ queryKey: ["rules"] });
         },
     });
+    const reset = useMutation({
+        mutationFn: resetTraffic,
+        onSuccess: async () => {
+            setAllowedDomains({});
+            setAllowedRequests({});
+            toast("Traffic statistics reset.");
+            await Promise.all([domains.refetch(), denials.refetch()]);
+        },
+    });
     const refreshing = domains.isFetching || denials.isFetching;
     const blocked = domainEntries(domains.data ?? [], "block");
     const allowed = domainEntries(domains.data ?? [], "allow");
@@ -128,7 +154,7 @@ export function TrafficPage({ view }: { view: TrafficView }) {
         { id: "requests", label: "Blocked requests", count: denials.data?.length },
     ];
     const updatedAt = Math.max(domains.dataUpdatedAt, denials.dataUpdatedAt);
-    const actionError = domainAllow.error ?? requestAllow.error;
+    const actionError = domainAllow.error ?? requestAllow.error ?? reset.error;
     const loadError = domains.error ?? denials.error;
     let panel: ReactNode = (
         <p role="status" className="flex items-center gap-2 px-4 py-10 text-sm text-zinc-400">
@@ -168,7 +194,7 @@ export function TrafficPage({ view }: { view: TrafficView }) {
         <>
             <PageHeader
                 title="Traffic"
-                description="DNS lookups and HTTP(S) requests checked since exwall started. Counters live in memory and reset on restart."
+                description="DNS lookups and HTTP(S) requests checked since exwall started or the last reset. Counters live in memory and reset on restart."
                 actions={
                     <>
                         {updatedAt > 0 && (
@@ -187,6 +213,24 @@ export function TrafficPage({ view }: { view: TrafficView }) {
                         >
                             {refreshing ? <Spinner /> : <RefreshIcon />}
                             Refresh
+                        </button>
+                        <button
+                            type="button"
+                            className="btn btn-secondary"
+                            title="Clear all domain counters, transferred bytes, and blocked requests"
+                            disabled={reset.isPending}
+                            onClick={() => {
+                                if (
+                                    window.confirm(
+                                        "Reset all traffic counters, transferred bytes, and blocked requests?",
+                                    )
+                                ) {
+                                    reset.mutate();
+                                }
+                            }}
+                        >
+                            {reset.isPending ? <Spinner /> : <TrashIcon />}
+                            Reset
                         </button>
                     </>
                 }
@@ -358,6 +402,18 @@ function DomainsTable({
                         <th className={`${headerCell} text-right`}>DNS</th>
                         <th className={`${headerCell} text-right`}>HTTP</th>
                         <th className={`${headerCell} text-right`}>Total</th>
+                        <th
+                            className={`${headerCell} text-right`}
+                            title="HTTP(S) request body bytes sent upstream"
+                        >
+                            Up
+                        </th>
+                        <th
+                            className={`${headerCell} text-right`}
+                            title="HTTP(S) response body bytes received from upstream"
+                        >
+                            Down
+                        </th>
                         <th className={headerCell}>
                             {outcome === "allow" ? "Last allowed" : "Last blocked"}
                         </th>
@@ -388,6 +444,18 @@ function DomainsTable({
                                 </td>
                                 <td className="px-4 py-2.5 text-right font-medium text-white tabular-nums">
                                     {entry.dns[outcome] + entry.http[outcome]}
+                                </td>
+                                <td
+                                    className="px-4 py-2.5 text-right whitespace-nowrap text-zinc-300 tabular-nums"
+                                    title={`${entry.bytes.up.toLocaleString()} bytes`}
+                                >
+                                    {formatBytes(entry.bytes.up)}
+                                </td>
+                                <td
+                                    className="px-4 py-2.5 text-right whitespace-nowrap text-zinc-300 tabular-nums"
+                                    title={`${entry.bytes.down.toLocaleString()} bytes`}
+                                >
+                                    {formatBytes(entry.bytes.down)}
                                 </td>
                                 <td className="px-4 py-2.5 text-zinc-400">
                                     <RelativeTime timestamp={timestamp} now={now} />
