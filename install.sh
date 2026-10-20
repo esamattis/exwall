@@ -285,16 +285,24 @@ ENV
     install -m 0644 "${TMP_DIR}/profile" /etc/profile.d/exwall.sh
     systemctl daemon-reload
     if [[ "$was_active" -eq 1 ]]; then
+        info "restarting exwall.service"
         systemctl start exwall.service
-        systemctl is-active --quiet exwall.service
+        if ! systemctl is-active --quiet exwall.service; then
+            die "exwall.service failed to restart; see: sudo journalctl -u exwall"
+        fi
     fi
-    printf '\nInstalled. Start with: sudo systemctl enable --now exwall\n'
+    printf '\nInstalled.\n'
     printf 'Logs: sudo journalctl -u exwall -f\n'
     printf 'Access log: /var/log/exwall/access.log\n'
     printf 'Reload rules: sudo systemctl reload exwall\n'
     printf 'Current shell CA settings: . /etc/profile.d/exwall.sh\n'
     printf 'New UI password: sudo exwall ui-credentials\n'
     printf '\n%s\n' "$ui_info"
+    if [[ "$was_active" -eq 1 ]]; then
+        printf '\nexwall.service was restarted and is running.\n'
+    else
+        printf '\nexwall.service is not running. Start it with: sudo systemctl enable --now exwall\n'
+    fi
 }
 
 # Install a local binary, re-running this script through sudo when needed.
