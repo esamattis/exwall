@@ -8,7 +8,7 @@ use super::{
 use crate::{
     error::ErrorChain,
     policy::RuleSet,
-    runtime::{ReloadError, ReloadHandle},
+    runtime::{PolicyStore, ReloadError, ReloadHandle},
     telemetry::DomainStats,
 };
 use percent_encoding::percent_decode_str;
@@ -29,6 +29,8 @@ const BODY_LIMIT: usize = 1024 * 1024;
 pub const CLEAR_COOKIE: &str = "exwall_session=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0";
 /// The path prefix addressing one rule file by its percent-encoded name.
 const RULE_FILE_PREFIX: &str = "/api/rules/";
+/// The longest blocking pause the UI may request, one day.
+const MAX_PAUSE_MINUTES: u64 = 24 * 60;
 
 /// Credentials accepted by the login endpoint.
 #[derive(Deserialize)]
@@ -38,6 +40,31 @@ struct Login {
     username: String,
     /// The submitted password.
     password: String,
+}
+
+/// A request to pause blocking for a number of minutes.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PauseRequest {
+    /// How long blocking stays paused.
+    minutes: u64,
+}
+
+/// Whether blocking is enforced, as reported to the UI.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct BlockingStatus {
+    /// Whole seconds, rounded up, until blocking resumes; `None` while blocking is enforced.
+    paused_seconds_remaining: Option<u64>,
+}
+
+impl BlockingStatus {
+    /// Describe the current state of a policy store's blocking pause.
+    fn of(policy: &PolicyStore) -> Self {
+        let remaining = policy.pause().remaining();
+        Self {
+            paused_seconds_remaining: remaining.map(|left| left.as_millis().div_ceil(1000) as u64),
+        }
+    }
 }
 
 /// Server-side failures reported to clients only as a generic 500.
@@ -81,6 +108,9 @@ pub enum ApiError {
     /// The rules body is malformed or too large.
     #[error("Invalid rules request")]
     InvalidRules,
+    /// The pause request is malformed or its duration is out of range.
+    #[error("Pause must be a whole number of minutes from 1 to {MAX_PAUSE_MINUTES}")]
+    InvalidPause,
     /// Authentication is missing or invalid.
     #[error("Authentication required")]
     Unauthorized,
@@ -123,7 +153,7 @@ impl ApiError {
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             Self::CrossOrigin => StatusCode::FORBIDDEN,
             Self::BodyTimeout => StatusCode::REQUEST_TIMEOUT,
-            Self::InvalidLogin | Self::InvalidRules | Self::Validation(_) => {
+            Self::InvalidLogin | Self::InvalidRules | Self::InvalidPause | Self::Validation(_) => {
                 StatusCode::BAD_REQUEST
             }
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
@@ -244,6 +274,8 @@ pub struct Api {
     reload: ReloadHandle,
     /// Domain counters, transfer totals, and denials.
     stats: DomainStats,
+    /// The active policy, whose blocking the UI can pause.
+    policy: Arc<PolicyStore>,
     /// Serializes rule reads and writes.
     lock: Mutex<()>,
 }
@@ -255,12 +287,14 @@ impl Api {
         rules: RuleFiles,
         reload: ReloadHandle,
         stats: DomainStats,
+        policy: Arc<PolicyStore>,
     ) -> Self {
         Self {
             auth,
             rules,
             reload,
             stats,
+            policy,
             lock: Mutex::new(()),
         }
     }
@@ -323,6 +357,16 @@ impl Api {
                 let _guard = self.lock.lock().await;
                 Ok(json(StatusCode::OK, &self.list_rule_files().await?))
             }
+            (Method::GET, "/api/blocking") => {
+                Ok(json(StatusCode::OK, &BlockingStatus::of(&self.policy)))
+            }
+            (Method::POST, "/api/blocking/pause") => self.pause_blocking(request).await,
+            (Method::POST, "/api/blocking/resume") => {
+                if self.policy.pause().resume() {
+                    tracing::warn!("blocking resumed from the web UI");
+                }
+                Ok(json(StatusCode::OK, &BlockingStatus::of(&self.policy)))
+            }
             _ => Err(ApiError::NotFound),
         }
     }
@@ -338,6 +382,20 @@ impl Api {
         };
         let body = serde_json::json!({ "username": self.auth.username(), "token": token });
         Ok(with_cleared_cookie(json(StatusCode::OK, &body)))
+    }
+
+    /// Pause blocking for the requested number of minutes, replacing any earlier pause.
+    async fn pause_blocking(&self, request: Request) -> Result<Response, ApiError> {
+        let pause: PauseRequest = read_json(request).await.map_err(|error| match error {
+            BodyError::Timeout => ApiError::BodyTimeout,
+            BodyError::Invalid => ApiError::InvalidPause,
+        })?;
+        if !(1..=MAX_PAUSE_MINUTES).contains(&pause.minutes) {
+            return Err(ApiError::InvalidPause);
+        }
+        self.policy.pause().pause(Duration::from_secs(pause.minutes * 60));
+        tracing::warn!(minutes = pause.minutes, "blocking paused from the web UI");
+        Ok(json(StatusCode::OK, &BlockingStatus::of(&self.policy)))
     }
 
     /// List every editable rule file with its number of allow tables, if it is valid.
@@ -520,7 +578,13 @@ mod tests {
             Arc::new(FileSessionStore::new(sessions.clone())),
             Arc::new(RandomTokens),
         );
-        let api = Api::new(auth, RuleFiles::new(rules.clone()), handle, DomainStats::default());
+        let api = Api::new(
+            auth,
+            RuleFiles::new(rules.clone()),
+            handle,
+            DomainStats::default(),
+            store.clone(),
+        );
         Harness {
             api,
             store,
@@ -674,6 +738,63 @@ mod tests {
             .response(request(Method::GET, "/api/session", Some(("authorization", &bearer)), &()))
             .await;
         assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Blocking pauses for the requested minutes, rejects invalid durations, and resumes on request.
+    #[tokio::test]
+    async fn pauses_and_resumes_blocking() {
+        let temporary = tempfile::tempdir().unwrap();
+        let harness = harness(temporary.path(), "secret");
+        let bearer = login(&harness.api, "secret").await;
+        let auth = Some(("authorization", bearer.as_str()));
+        let status = |response: Response| async move {
+            assert_eq!(response.status(), StatusCode::OK);
+            decode::<BlockingStatus>(response).await.paused_seconds_remaining
+        };
+        let initial = harness.api.response(request(Method::GET, "/api/blocking", auth, &())).await;
+        assert_eq!(status(initial).await, None);
+        for body in [
+            serde_json::json!({"minutes": 0}),
+            serde_json::json!({"minutes": MAX_PAUSE_MINUTES + 1}),
+            serde_json::json!({"minutes": 1.5}),
+            serde_json::json!({}),
+        ] {
+            let rejected = harness
+                .api
+                .response(request(Method::POST, "/api/blocking/pause", auth, &body))
+                .await;
+            assert_eq!(rejected.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+        assert_eq!(harness.store.enforcement(), crate::policy::Enforcement::Enforced);
+        let paused = harness
+            .api
+            .response(request(
+                Method::POST,
+                "/api/blocking/pause",
+                auth,
+                &serde_json::json!({"minutes": 5}),
+            ))
+            .await;
+        let remaining = status(paused).await.unwrap();
+        assert!((299..=300).contains(&remaining), "{remaining}");
+        assert_eq!(harness.store.enforcement(), crate::policy::Enforcement::Paused);
+        let resumed = harness
+            .api
+            .response(request(Method::POST, "/api/blocking/resume", auth, &serde_json::json!({})))
+            .await;
+        assert_eq!(status(resumed).await, None);
+        assert_eq!(harness.store.enforcement(), crate::policy::Enforcement::Enforced);
+        let anonymous = harness
+            .api
+            .response(request(
+                Method::POST,
+                "/api/blocking/pause",
+                None,
+                &serde_json::json!({"minutes": 5}),
+            ))
+            .await;
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(harness.store.enforcement(), crate::policy::Enforcement::Enforced);
     }
 
     /// Verify Basic authentication, comment retention, validation, conflicts, and activation.

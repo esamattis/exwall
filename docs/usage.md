@@ -188,6 +188,13 @@ ssh -L 58000:127.0.0.1:58000 your-server
   start also makes every rule file owned by `exwall` with mode `0600` so the
   UI can save it; symlinked rule files are left untouched and not shown.
   Create new rule files with `sudo`; the UI cannot add files.
+- **Pause blocking** in the header lets every HTTP(S) request and DNS lookup
+  through for the number of minutes you choose (5 by default, up to a day), then
+  blocking resumes on its own. A banner counts down the remaining time, and
+  **Resume blocking** ends the pause early. Rules that inject headers still
+  apply to the requests they match; other requests are forwarded unchanged.
+  Non-HTTP(S) traffic stays blocked, and a restart ends the pause. Requests let
+  through by a pause are logged with the rule `@paused`.
 
 Counters reset when exwall restarts or when you press **Reset** on the Traffic
 page. The same data is available as JSON:
@@ -222,7 +229,8 @@ TIMESTAMP PROTOCOL RESULT RULE HTTP_METHOD URL HTTP_STATUS DNS_RCODE ERROR
 2026-10-07T12:34:58Z dns DENY - - dns://denied.test/A - REFUSED - x3
 ```
 
-`RULE` is the file and rule number that allowed the request. A trailing `x3`
+`RULE` is the file and rule number that allowed the request, or `@paused` when
+blocking was paused from the web UI. A trailing `x3`
 means the same request was repeated three times within a second. `ERROR` explains
 failures such as `UPSTREAM_TIMEOUT` or `UPSTREAM_FAILURE`.
 

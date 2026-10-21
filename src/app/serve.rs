@@ -292,7 +292,7 @@ pub async fn run(cli: &Cli, args: ServeArgs) -> Result<(), ServeError> {
         );
         supervisor.spawn("DNS", async move { Ok(dns.serve(dns_udp, dns_tcp).await?) });
         if !ui_listeners.is_empty() {
-            let api = Arc::new(build_api(&config, cli, reload.clone(), &sink));
+            let api = Arc::new(build_api(&config, cli, reload.clone(), &sink, store.clone()));
             supervisor.spawn("UI", async move { Ok(ui::serve(ui_listeners, exec, api).await?) });
         }
         supervisor.spawn("policy reloader", async move {
@@ -369,14 +369,20 @@ fn local_hostname() -> LocalHostname {
 }
 
 /// Assemble the UI API from configuration and shared services.
-fn build_api(config: &Config, cli: &Cli, reload: ReloadHandle, sink: &telemetry::EventSink) -> Api {
+fn build_api(
+    config: &Config,
+    cli: &Cli,
+    reload: ReloadHandle,
+    sink: &telemetry::EventSink,
+    policy: Arc<PolicyStore>,
+) -> Api {
     let ui = &config.startup.ui;
     let auth = Authenticator::new(
         Credentials::new(&ui.username, &ui.password),
         Arc::new(FileSessionStore::new(ui.sessions_dir.clone())),
         Arc::new(RandomTokens),
     );
-    Api::new(auth, RuleFiles::new(cli.rules_dir.clone()), reload, sink.stats().clone())
+    Api::new(auth, RuleFiles::new(cli.rules_dir.clone()), reload, sink.stats().clone(), policy)
 }
 
 /// Wait for a stop signal or the first failure, forwarding SIGHUP to the reloader.

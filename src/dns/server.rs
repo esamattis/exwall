@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     error::ErrorChain,
-    policy::{Decision, DnsDecision, Host, LocalHostname, Policy},
+    policy::{Decision, DnsDecision, Enforcement, Host, LocalHostname, Policy},
     runtime::PolicyStore,
     telemetry::{EventSink, Failure, PendingEvent, RequestEvent},
 };
@@ -72,7 +72,14 @@ struct Inspected {
 }
 
 /// Decide a parsed message: only standard queries with questions can be authorized.
-pub fn decide_message(message: &Message, policy: &Policy, local: &LocalHostname) -> DnsDecision {
+///
+/// A blocking pause lifts rule denials but never authorizes non-query messages.
+pub fn decide_message(
+    message: &Message,
+    policy: &Policy,
+    local: &LocalHostname,
+    enforcement: Enforcement,
+) -> DnsDecision {
     let is_query =
         message.message_type() == MessageType::Query && message.op_code() == OpCode::Query;
     if message.queries().is_empty() || !is_query {
@@ -82,7 +89,7 @@ pub fn decide_message(message: &Message, policy: &Policy, local: &LocalHostname)
     }
     let hosts: Vec<Host> =
         message.queries().iter().map(|query| Host::new(&query.name().to_utf8())).collect();
-    policy.dns_decision(&hosts, local)
+    policy.dns_decision(&hosts, local, enforcement)
 }
 
 /// DNS policy and upstream settings shared by UDP and TCP sessions.
@@ -134,7 +141,8 @@ impl DnsService {
             .collect();
         let urls: Vec<String> =
             questions.iter().map(|(host, kind)| format!("dns://{host}/{kind}")).collect();
-        let decision = decide_message(&request, &self.policy.load(), &self.local);
+        let decision =
+            decide_message(&request, &self.policy.load(), &self.local, self.policy.enforcement());
         let allowed = decision.allowed();
         let pending = event.event();
         pending.url = urls.join(",");
@@ -416,6 +424,22 @@ mod tests {
         assert_eq!(next_row(&mut events).await, "dns - - - - - - MALFORMED_DNS");
     }
 
+    /// While blocking is paused, unmatched names are relayed and logged as `@paused`.
+    #[tokio::test]
+    async fn relays_unmatched_names_while_paused() {
+        let (dns, mut events, store) = service("", true, Behaviour::Answer);
+        store.pause().pause(Duration::from_secs(60));
+        let reply = answer(&dns, &query(&[("denied.test", RecordType::A)])).await;
+        assert_eq!(reply.response_code(), ResponseCode::NoError);
+        assert_eq!(
+            next_row(&mut events).await,
+            "dns ALLOW @paused - dns://denied.test/A - NOERROR -"
+        );
+        store.pause().resume();
+        let reply = answer(&dns, &query(&[("denied.test", RecordType::A)])).await;
+        assert_eq!(reply.response_code(), ResponseCode::Refused);
+    }
+
     /// The local hostname resolves without a rule; non-query messages are denied.
     #[tokio::test]
     async fn applies_local_hostname_and_rejects_non_queries() {
@@ -427,12 +451,14 @@ mod tests {
         let mut response = Message::from_vec(&query(&[("box", RecordType::A)])).unwrap();
         response.set_message_type(MessageType::Response);
         let policy = store.snapshot();
-        assert!(!decide_message(&response, &policy, &dns.local).allowed());
+        assert!(!decide_message(&response, &policy, &dns.local, Enforcement::Paused).allowed());
         let refused = answer(&dns, &response.to_vec().unwrap()).await;
         assert_eq!(refused.response_code(), ResponseCode::Refused);
         assert_eq!(next_row(&mut events).await, "dns DENY - - dns://box/A - REFUSED -");
         let empty = Message::new();
-        assert!(decide_message(&empty, &policy, &dns.local).matches.is_empty());
+        assert!(
+            decide_message(&empty, &policy, &dns.local, Enforcement::Paused).matches.is_empty()
+        );
     }
 
     /// Invalid or missing upstream replies fail closed with SERVFAIL and a failure category.

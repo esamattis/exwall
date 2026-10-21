@@ -8,7 +8,7 @@ pub mod path_safety;
 pub mod pathname;
 mod rules;
 
-pub use decision::{Decision, DnsDecision, LocalHostname, MatchSource};
+pub use decision::{Decision, DnsDecision, Enforcement, LocalHostname, MatchSource};
 pub use host::Host;
 pub use loader::{LoadError, MissingDirectory, load_rules};
 pub use methods::MethodSet;
@@ -36,7 +36,15 @@ impl Policy {
     }
 
     /// Authorize each DNS question by hostname, ignoring HTTP method and path constraints.
-    pub fn dns_decision(&self, questions: &[Host], local: &LocalHostname) -> DnsDecision {
+    ///
+    /// While blocking is paused, questions that nothing else authorizes are allowed as
+    /// [`MatchSource::Paused`].
+    pub fn dns_decision(
+        &self,
+        questions: &[Host],
+        local: &LocalHostname,
+        enforcement: Enforcement,
+    ) -> DnsDecision {
         let matches = questions
             .iter()
             .map(|host| {
@@ -46,6 +54,8 @@ impl Policy {
                     Some(MatchSource::Rule(rule.id().clone()))
                 } else if local.matches(host) {
                     Some(MatchSource::LocalHostname)
+                } else if enforcement == Enforcement::Paused {
+                    Some(MatchSource::Paused)
                 } else {
                     None
                 }
@@ -79,7 +89,7 @@ mod tests {
         );
         let local = LocalHostname::new(Host::new("box"));
         let questions = [Host::new("allowed.test"), Host::new("denied.test"), Host::new("BOX.")];
-        let decision = enforced.dns_decision(&questions, &local);
+        let decision = enforced.dns_decision(&questions, &local, Enforcement::Enforced);
         assert_eq!(
             decision.matches,
             vec![
@@ -89,10 +99,28 @@ mod tests {
             ]
         );
         assert!(!decision.allowed());
-        assert!(enforced.dns_decision(&questions[..1], &local).allowed());
+        assert!(enforced.dns_decision(&questions[..1], &local, Enforcement::Enforced).allowed());
         let bypass = policy("", false);
-        let decision = bypass.dns_decision(&questions, &local);
+        let decision = bypass.dns_decision(&questions, &local, Enforcement::Paused);
         assert!(decision.allowed());
         assert!(decision.matches.iter().all(|m| m == &Some(MatchSource::DnsBypass)));
+    }
+
+    /// A pause allows only the questions that rules and exceptions would deny.
+    #[test]
+    fn paused_dns_allows_unmatched_questions() {
+        let enforced = policy("[[allow]]\ndomain='allowed.test'", true);
+        let local = LocalHostname::new(Host::new("box"));
+        let questions = [Host::new("allowed.test"), Host::new("denied.test"), Host::new("box")];
+        let decision = enforced.dns_decision(&questions, &local, Enforcement::Paused);
+        assert!(decision.allowed());
+        assert_eq!(
+            decision.matches,
+            vec![
+                Some(MatchSource::Rule(RuleId::new("test", 1))),
+                Some(MatchSource::Paused),
+                Some(MatchSource::LocalHostname),
+            ]
+        );
     }
 }

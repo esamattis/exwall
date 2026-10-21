@@ -597,3 +597,51 @@ test("broken rule files open as TOML with their error and are repaired from the 
     await page.getByRole("button", { name: "Edit as TOML", exact: true }).click();
     await expect(editor).toContainText("# Repaired in the browser");
 });
+
+test("blocking pauses for the chosen minutes, allows denied requests, and resumes", async ({
+    page,
+    protocolProxy: fixture,
+}) => {
+    const ui = `http://127.0.0.1:${fixture.uiPort}`;
+    /** Send a request that the fixture rules deny while blocking is enforced. */
+    const denied = () =>
+        exchange({
+            hostname: "127.0.0.1",
+            port: fixture.proxyPort,
+            path: `http://127.0.0.1:${fixture.upstreamPort}/allowed`,
+            method: "POST",
+            headers: { Host: `127.0.0.1:${fixture.upstreamPort}` },
+        });
+    expect(
+        (await page.request.post(`${ui}/api/blocking/pause`, { data: { minutes: 5 } })).status(),
+    ).toBe(401);
+    expect((await denied()).status).toBe(403);
+    expect(await queryDns("127.0.0.1", fixture.dnsPort, "denied.test")).toBe(5);
+
+    await loginBrowser(page, ui, "integration-password");
+    await page.goto(`${ui}/`);
+    await page.getByRole("button", { name: "Pause blocking", exact: true }).click();
+    const minutes = page.getByRole("spinbutton", { name: "Pause for minutes" });
+    await expect(minutes).toHaveValue("5");
+    await minutes.fill("2");
+    await page.locator("#pause-blocking").getByRole("button", { name: "Pause blocking" }).click();
+    await expect(page.getByText("Blocking paused for 2 minutes.")).toBeVisible();
+    await expect(page.getByRole("status").filter({ hasText: "Blocking is paused" })).toContainText(
+        /for (2:00|1:5\d)\./,
+    );
+    const status = await page.request.get(`${ui}/api/blocking`, {
+        headers: await sessionHeaders(page),
+    });
+    const { paused_seconds_remaining: remaining } = await status.json();
+    expect(remaining).toBeGreaterThan(100);
+    expect(remaining).toBeLessThanOrEqual(120);
+
+    expect((await denied()).status).toBe(200);
+    expect(await queryDns("127.0.0.1", fixture.dnsPort, "denied.test")).toBe(0);
+
+    await page.getByRole("button", { name: "Resume blocking", exact: true }).click();
+    await expect(page.getByText("Blocking resumed.")).toBeVisible();
+    await expect(page.getByText("Blocking is paused")).toHaveCount(0);
+    expect((await denied()).status).toBe(403);
+    expect(await queryDns("127.0.0.1", fixture.dnsPort, "denied.test")).toBe(5);
+});

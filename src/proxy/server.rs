@@ -9,7 +9,7 @@ use super::{
 use crate::{
     ca::{Authority, Resolver},
     error::ErrorChain,
-    policy::{Decision, MatchSource},
+    policy::Decision,
     runtime::PolicyStore,
     telemetry::{Direction, EventSink, Failure},
 };
@@ -136,7 +136,7 @@ impl Proxy {
         let mut event = self.sink.track(initial_event(&request, &target));
         let decision = {
             let policy = self.policy.load();
-            authorize(&request, &target, &policy.rules)
+            authorize(&request, &target, &policy.rules, self.policy.enforcement())
         };
         let plan = match decision {
             Ok(plan) => plan,
@@ -184,7 +184,7 @@ impl Proxy {
         let mut event = self.sink.track(initial_event(&request, &target));
         let decision = {
             let policy = self.policy.load();
-            authorize_connect(&request, &policy.rules)
+            authorize_connect(&request, &policy.rules, self.policy.enforcement())
         };
         let plan = match decision {
             Ok(plan) => plan,
@@ -195,7 +195,7 @@ impl Proxy {
         };
         let pending = event.event();
         pending.decide(Decision::Allow);
-        pending.matched(MatchSource::Rule(plan.rule));
+        pending.matched(plan.source);
         pending.subjects = vec![plan.host];
         request.extensions().insert(Tunnel(plan.authority));
         let result = LazyHttpProxyConnectReplyService::new().serve(request).await;
@@ -450,6 +450,25 @@ mod tests {
                 down: "upstream".len() as u64
             }
         );
+    }
+
+    /// While blocking is paused, denied requests are forwarded and logged as `@paused`.
+    #[tokio::test]
+    async fn forwards_denied_requests_while_paused() {
+        let (_directory, proxy, mut receiver, upstream) = proxy(Behaviour::Status(200));
+        proxy.policy.pause().pause(Duration::from_secs(60));
+        let (status, row) = send(&proxy, &mut receiver, "http://denied.test/x", false).await;
+        assert_eq!(status, 200);
+        assert_eq!(row, "http ALLOW @paused GET http://denied.test:80/x 200 - -");
+        let received = upstream.received.lock().unwrap().clone();
+        assert_eq!(
+            received,
+            vec![("http://denied.test:80/x".into(), Some("client-secret".into()))]
+        );
+        assert!(proxy.sink.stats().denials_snapshot().is_empty());
+        proxy.policy.pause().resume();
+        let (status, _row) = send(&proxy, &mut receiver, "http://denied.test/x", false).await;
+        assert_eq!(status, 403);
     }
 
     /// Upstream failures and timeouts become 502 with a failure category.

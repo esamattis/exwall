@@ -34,6 +34,8 @@ pub enum MatchSource {
     DnsBypass,
     /// The host's own name is always resolvable.
     LocalHostname,
+    /// Blocking is temporarily paused, so a request no rule allows is let through.
+    Paused,
 }
 
 impl fmt::Display for MatchSource {
@@ -43,8 +45,18 @@ impl fmt::Display for MatchSource {
             Self::Rule(id) => id.fmt(formatter),
             Self::DnsBypass => formatter.write_str("@dns-bypass"),
             Self::LocalHostname => formatter.write_str("@local-hostname"),
+            Self::Paused => formatter.write_str("@paused"),
         }
     }
+}
+
+/// Whether policy denials are enforced or temporarily lifted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Enforcement {
+    /// Requests no rule allows are denied.
+    Enforced,
+    /// Blocking is paused: requests no rule allows are let through as [`MatchSource::Paused`].
+    Paused,
 }
 
 /// The authorization of every question in one DNS query message.
@@ -93,6 +105,7 @@ mod tests {
         assert_eq!(MatchSource::Rule(RuleId::new("a.toml", 3)).to_string(), "a.toml:allow#3");
         assert_eq!(MatchSource::DnsBypass.to_string(), "@dns-bypass");
         assert_eq!(MatchSource::LocalHostname.to_string(), "@local-hostname");
+        assert_eq!(MatchSource::Paused.to_string(), "@paused");
     }
 
     /// An empty hostname never authorizes root or empty queries.

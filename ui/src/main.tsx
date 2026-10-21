@@ -20,6 +20,7 @@ import {
     useNavigate,
 } from "@tanstack/react-router";
 import { api, ApiError, hasSession, sessionKey, type Session } from "./api.ts";
+import { BlockingBanner, BlockingButton, useBlockingStatus } from "./blocking.tsx";
 import { ErrorBanner, ShieldIcon, SignOutIcon, Spinner, ToastProvider } from "./components.tsx";
 import { RuleFilesPage, RulesPage } from "./rules.tsx";
 import { parseTrafficView, TrafficPage } from "./traffic.tsx";
@@ -64,6 +65,7 @@ function AppShell() {
             await navigate({ to: "/login" });
         },
     });
+    const blocking = useBlockingStatus();
     const navLink =
         "rounded-md px-3 py-1.5 text-sm font-medium text-zinc-400 transition hover:text-zinc-100";
     return (
@@ -92,6 +94,7 @@ function AppShell() {
                         </Link>
                     </nav>
                     <div className="ml-auto flex items-center gap-3">
+                        <BlockingButton blocking={blocking} />
                         {session.data && (
                             <span className="hidden text-sm text-zinc-500 sm:inline">
                                 {session.data.username}
@@ -108,6 +111,7 @@ function AppShell() {
                         </button>
                     </div>
                 </div>
+                <BlockingBanner secondsLeft={blocking.secondsLeft} />
             </header>
             <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
                 {logout.error && (

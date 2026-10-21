@@ -2,7 +2,7 @@
 
 use crate::{
     policy::{
-        Decision, Host, RuleId, RuleSet,
+        Decision, Enforcement, Host, MatchSource, RuleId, RuleSet,
         path_safety::{is_clean_pathname, is_unambiguous_pathname},
     },
     telemetry::{Failure, Protocol, RequestEvent},
@@ -29,8 +29,8 @@ pub struct Target {
 /// An authorized request's fixed destination and header injections.
 #[derive(Clone, Debug)]
 pub struct ForwardPlan {
-    /// The authorizing rule.
-    pub rule: RuleId,
+    /// The authorizing rule, or a blocking pause.
+    pub source: MatchSource,
     /// The authorized, normalized host.
     pub host: Host,
     /// The absolute URI the request is forwarded to.
@@ -42,8 +42,8 @@ pub struct ForwardPlan {
 /// An authorized CONNECT tunnel.
 #[derive(Clone, Debug)]
 pub struct ConnectPlan {
-    /// The authorizing rule.
-    pub rule: RuleId,
+    /// The authorizing rule, or a blocking pause.
+    pub source: MatchSource,
     /// The normalized tunnel host.
     pub host: Host,
     /// The CONNECT target carried into the tunnel.
@@ -326,6 +326,89 @@ fn client_server_name(request: &Request) -> Option<Host> {
 
 /// Authorize request metadata and fix its destination before any header is injected.
 ///
+/// While blocking is paused, a request the rules deny is still forwarded, but
+/// without injected headers; see [`paused_plan`].
+pub fn authorize(
+    request: &Request,
+    target: &Target,
+    rules: &RuleSet,
+    enforcement: Enforcement,
+) -> Result<ForwardPlan, Rejection> {
+    let rejection = match authorize_by_rules(request, target, rules) {
+        Ok(plan) => return Ok(plan),
+        Err(rejection) => rejection,
+    };
+    if enforcement == Enforcement::Paused
+        && rejection.decision() == Decision::Deny
+        && let Some(plan) = paused_plan(request, target)
+    {
+        return Ok(plan);
+    }
+    Err(rejection)
+}
+
+/// Forward a request the rules deny while blocking is paused.
+///
+/// A pause lifts only policy: it never injects headers, and requests with an
+/// unclean pathname or an unsupported scheme keep their original rejection.
+/// The authority checks already passed when the rules were evaluated.
+fn paused_plan(request: &Request, target: &Target) -> Option<ForwardPlan> {
+    let authority = request_authority(request, target)?;
+    let host = authority_host(&authority);
+    let (pathname, path) = request_path(request);
+    if !is_clean_pathname(&pathname) {
+        return None;
+    }
+    let scheme = request_scheme(request, target);
+    if !matches!(scheme, "http" | "https") {
+        return None;
+    }
+    let destination = destination_uri(scheme, &authority, target, &host, &path)?;
+    Some(ForwardPlan {
+        source: MatchSource::Paused,
+        host,
+        destination,
+        inject_headers: Vec::new(),
+    })
+}
+
+/// The pathname of a request, and the pathname with its query string.
+fn request_path(request: &Request) -> (String, String) {
+    let pathname = request.uri().path_or_root().into_owned();
+    let mut path = pathname.clone();
+    if let Some(query) = request.uri().query() {
+        path.push('?');
+        path.push_str(&query.to_string());
+    }
+    (pathname, path)
+}
+
+/// Build the absolute URI that forwards a request to `host`, or `None` if it is invalid.
+///
+/// The port comes from the request authority, the CONNECT target, or the
+/// original destination, defaulting to the scheme's port.
+fn destination_uri(
+    scheme: &str,
+    authority: &Authority,
+    target: &Target,
+    host: &Host,
+    path: &str,
+) -> Option<Uri> {
+    let default_port = if scheme == "https" {
+        443
+    } else {
+        80
+    };
+    let port = authority
+        .port_u16()
+        .or_else(|| target.tunnel.as_ref().and_then(Authority::port_u16))
+        .or_else(|| target.original.map(|address| address.port()))
+        .unwrap_or(default_port);
+    Uri::parse(format!("{scheme}://{}:{port}{path}", host.uri_host())).ok()
+}
+
+/// Authorize a request strictly by the allow rules.
+///
 /// The client-selected original IP supplies only a port; it can never override
 /// hostname routing, so credentials always reach the authorized host.
 ///
@@ -334,7 +417,7 @@ fn client_server_name(request: &Request) -> Option<Host> {
 /// decode to (see [`RuleSet::admits_ambiguous_pathname`]), so domain-wide
 /// rules allow paths such as `/@scope%2Fname`. An unclean or ambiguous path
 /// that no rule matches is reported as unmatched, since no rule allows it at all.
-pub fn authorize(
+fn authorize_by_rules(
     request: &Request,
     target: &Target,
     rules: &RuleSet,
@@ -367,12 +450,7 @@ pub fn authorize(
     {
         return Err(Rejection::SniMismatch);
     }
-    let pathname = request.uri().path_or_root().into_owned();
-    let mut path = pathname.clone();
-    if let Some(query) = request.uri().query() {
-        path.push('?');
-        path.push_str(&query.to_string());
-    }
+    let (pathname, path) = request_path(request);
     let method = request.method().as_str();
     let Some(rule) = rules.http_rule(&host, method, &path) else {
         return Err(Rejection::NoRuleMatched {
@@ -405,24 +483,14 @@ pub fn authorize(
             rule: rule_id,
         });
     }
-    let default_port = if scheme == "https" {
-        443
-    } else {
-        80
-    };
-    let port = authority
-        .port_u16()
-        .or_else(|| target.tunnel.as_ref().and_then(Authority::port_u16))
-        .or_else(|| target.original.map(|address| address.port()))
-        .unwrap_or(default_port);
-    let Ok(destination) = Uri::parse(format!("{scheme}://{}:{port}{path}", host.uri_host())) else {
+    let Some(destination) = destination_uri(scheme, &authority, target, &host, &path) else {
         return Err(Rejection::InvalidDestination {
             host,
             rule: rule_id,
         });
     };
     Ok(ForwardPlan {
-        rule: rule_id,
+        source: MatchSource::Rule(rule_id),
         host,
         destination,
         inject_headers: rule.inject_headers().to_vec(),
@@ -430,16 +498,27 @@ pub fn authorize(
 }
 
 /// Authorize a CONNECT hostname using HTTP-capable rules, ignoring method and path filters.
-pub fn authorize_connect(request: &Request, rules: &RuleSet) -> Result<ConnectPlan, Rejection> {
+///
+/// While blocking is paused, every CONNECT host is let through; the tunneled
+/// requests are still authorized one by one.
+pub fn authorize_connect(
+    request: &Request,
+    rules: &RuleSet,
+    enforcement: Enforcement,
+) -> Result<ConnectPlan, Rejection> {
     let authority = request.uri().authority().ok_or(Rejection::InvalidConnect)?.into_owned();
     let host = authority_host(&authority);
-    let Some(rule) = rules.connect_rule(&host) else {
-        return Err(Rejection::ConnectDenied {
-            host,
-        });
+    let source = match rules.connect_rule(&host) {
+        Some(rule) => MatchSource::Rule(rule.id().clone()),
+        None if enforcement == Enforcement::Paused => MatchSource::Paused,
+        None => {
+            return Err(Rejection::ConnectDenied {
+                host,
+            });
+        }
     };
     Ok(ConnectPlan {
-        rule: rule.id().clone(),
+        source,
         host,
         authority,
     })
@@ -509,7 +588,7 @@ pub fn initial_event(request: &Request, target: &Target) -> RequestEvent {
 /// Record an authorized forwarding plan on an event.
 pub fn record_plan(event: &mut RequestEvent, plan: &ForwardPlan) {
     event.decide(Decision::Allow);
-    event.matched(crate::policy::MatchSource::Rule(plan.rule.clone()));
+    event.matched(plan.source.clone());
     event.subjects = vec![plan.host.clone()];
     event.url = plan.destination.to_string();
 }
@@ -559,7 +638,7 @@ inject_headers = [{ name = 'Authorization', value = 'replacement' }]
         target: &Target,
         rules: &RuleSet,
     ) -> Result<ForwardPlan, Rejection> {
-        let plan = authorize(request, target, rules)?;
+        let plan = authorize(request, target, rules, Enforcement::Enforced)?;
         apply_plan(request, &plan);
         Ok(plan)
     }
@@ -613,7 +692,7 @@ inject_headers = [{ name = 'Authorization', value = 'replacement' }]
         ] {
             let mut forwarded = request(&format!("https://registry.test{path}?x=1"), &[]);
             let plan = prepare(&mut forwarded, &Target::default(), &rules).unwrap();
-            assert_eq!(plan.rule.to_string(), "test:allow#1");
+            assert_eq!(plan.source.to_string(), "test:allow#1");
             assert_eq!(forwarded.uri().path_or_root(), path);
             assert_eq!(forwarded.uri().query_or_empty(), "x=1");
         }
@@ -641,6 +720,7 @@ inject_headers = [{ name = 'Authorization', value = 'replacement' }]
                 &request(&format!("https://allowed.test{path}"), &[]),
                 &Target::default(),
                 &rules,
+                Enforcement::Enforced,
             )
             .unwrap_err();
             assert_eq!(
@@ -669,7 +749,7 @@ domain = 'registry.test'
         );
         let mut encoded = request("https://registry.test/@private%2fpackage", &[]);
         let plan = prepare(&mut encoded, &Target::default(), &rules).unwrap();
-        assert_eq!(plan.rule.to_string(), "test:allow#2");
+        assert_eq!(plan.source.to_string(), "test:allow#2");
         assert!(!encoded.headers().contains_key("authorization"));
         assert_ambiguous(&rules, "https://registry.test/@private/%2e%2e/other", 1);
         let mut literal = request("https://registry.test/@private/package", &[]);
@@ -705,7 +785,8 @@ inject_headers = [{ name = 'Authorization', value = 'secret' }]
         assert_eq!(plain.headers()["authorization"], "secret");
         let mut post = request("https://api.test/other%2fx", &[]);
         *post.method_mut() = Method::POST;
-        let rejection = authorize(&post, &Target::default(), &rules).unwrap_err();
+        let rejection =
+            authorize(&post, &Target::default(), &rules, Enforcement::Enforced).unwrap_err();
         assert_eq!(rejection.rule().unwrap().to_string(), "test:allow#3");
         // Neither carve-out applies to DELETE (rule 1 is GET and HEAD only, rule 2
         // is POST only), so the domain-wide rule already covers every DELETE route.
@@ -736,7 +817,7 @@ inject_headers = [{ name = 'Authorization', value = 'secret' }]
         assert!(!request.headers().contains_key("connection"));
         assert_eq!(request.uri().host_str().unwrap(), "allowed.test");
         assert_eq!(request.uri().query_or_empty(), "x=1");
-        assert_eq!(plan.rule.to_string(), "test:allow#1");
+        assert_eq!(plan.source.to_string(), "test:allow#1");
         assert_eq!(event.url, "https://allowed.test:443/allowed?x=1");
         assert_eq!(event.subjects, vec![Host::new("allowed.test")]);
     }
@@ -767,12 +848,14 @@ inject_headers = [{ name = 'Authorization', value = 'secret' }]
     fn rejects_conflicting_hosts_and_raw_upgrades() {
         let rules = injecting_rules();
         let mut request = request("http://allowed.test/allowed", &[("Host", "denied.test")]);
-        let rejection = authorize(&request, &Target::default(), &rules).unwrap_err();
+        let rejection =
+            authorize(&request, &Target::default(), &rules, Enforcement::Enforced).unwrap_err();
         assert_eq!(rejection, Rejection::HostMismatch);
         assert_eq!(rejection.status(), StatusCode::MISDIRECTED_REQUEST);
         request.headers_mut().insert("host", "allowed.test".parse().unwrap());
         request.headers_mut().insert("upgrade", "websocket".parse().unwrap());
-        let rejection = authorize(&request, &Target::default(), &rules).unwrap_err();
+        let rejection =
+            authorize(&request, &Target::default(), &rules, Enforcement::Enforced).unwrap_err();
         assert_eq!(rejection.status(), StatusCode::NOT_IMPLEMENTED);
         assert_eq!(rejection.decision(), Decision::Unevaluated);
     }
@@ -786,23 +869,34 @@ inject_headers = [{ name = 'Authorization', value = 'secret' }]
             tls: true,
             ..Target::default()
         };
-        let plan = authorize(&request("/a", &[]), &tunnel, &rules).unwrap();
+        let plan = authorize(&request("/a", &[]), &tunnel, &rules, Enforcement::Enforced).unwrap();
         assert_eq!(plan.destination.to_string(), "https://allowed.test:8443/a");
-        let mismatch = authorize(&request("/a", &[("Host", "other.test")]), &tunnel, &rules);
+        let mismatch = authorize(
+            &request("/a", &[("Host", "other.test")]),
+            &tunnel,
+            &rules,
+            Enforcement::Enforced,
+        );
         assert_eq!(mismatch.unwrap_err(), Rejection::TunnelMismatch);
         let transparent = Target {
             original: Some("[::1]:8080".parse().unwrap()),
             ..Target::default()
         };
-        let plan = authorize(&request("/a", &[]), &transparent, &rules).unwrap();
+        let plan =
+            authorize(&request("/a", &[]), &transparent, &rules, Enforcement::Enforced).unwrap();
         assert_eq!(plan.destination.to_string(), "http://[::1]:8080/a");
-        let missing = authorize(&request("/a", &[]), &Target::default(), &rules);
+        let missing =
+            authorize(&request("/a", &[]), &Target::default(), &rules, Enforcement::Enforced);
         assert_eq!(missing.unwrap_err(), Rejection::MissingAuthority);
-        let unusable =
-            authorize(&request("/a", &[("Host", "bad host")]), &Target::default(), &rules);
+        let unusable = authorize(
+            &request("/a", &[("Host", "bad host")]),
+            &Target::default(),
+            &rules,
+            Enforcement::Enforced,
+        );
         assert_eq!(unusable.unwrap_err(), Rejection::MissingAuthority);
         let invalid = request("http://allowed.test/a", &[("Host", "bad host")]);
-        let invalid = authorize(&invalid, &Target::default(), &rules);
+        let invalid = authorize(&invalid, &Target::default(), &rules, Enforcement::Enforced);
         assert_eq!(invalid.unwrap_err(), Rejection::InvalidHostHeader);
     }
 
@@ -895,16 +989,59 @@ inject_headers = [{ name = 'Authorization', value = 'secret' }]
         let rules = rules(
             "[[allow]]\ndomain='dns.test'\ndns_only=true\n[[allow]]\ndomain='web.test'\npathname_pattern='/x'",
         );
-        let connect = |authority: &str| authorize_connect(&connect_request(authority), &rules);
+        let connect = |authority: &str| {
+            authorize_connect(&connect_request(authority), &rules, Enforcement::Enforced)
+        };
         let plan = connect("WEB.test:443").unwrap();
         assert_eq!(plan.host, Host::new("web.test"));
-        assert_eq!(plan.rule.to_string(), "test:allow#2");
+        assert_eq!(plan.source.to_string(), "test:allow#2");
         assert_eq!(
             connect("dns.test:443").unwrap_err(),
             Rejection::ConnectDenied {
                 host: Host::new("dns.test")
             }
         );
+    }
+
+    /// A pause forwards denied requests and CONNECT hosts without injecting headers.
+    #[test]
+    fn paused_blocking_forwards_denied_requests_without_injection() {
+        let rules = injecting_rules();
+        let paused = |uri: &str, target: &Target| {
+            let mut forwarded = request(uri, &[("Authorization", "client")]);
+            let plan = authorize(&forwarded, target, &rules, Enforcement::Paused)?;
+            apply_plan(&mut forwarded, &plan);
+            Ok::<_, Rejection>((plan, forwarded))
+        };
+        let (plan, forwarded) =
+            paused("https://denied.test:8443/x?q=1", &Target::default()).unwrap();
+        assert_eq!(plan.source, MatchSource::Paused);
+        assert_eq!(plan.destination.to_string(), "https://denied.test:8443/x?q=1");
+        assert_eq!(forwarded.headers()["authorization"], "client");
+
+        let (plan, forwarded) = paused("https://allowed.test/allowed", &Target::default()).unwrap();
+        assert_eq!(plan.source.to_string(), "test:allow#1");
+        assert_eq!(forwarded.headers()["authorization"], "replacement");
+
+        let (plan, forwarded) = paused("http://allowed.test/allowed", &Target::default()).unwrap();
+        assert_eq!(plan.source, MatchSource::Paused);
+        assert_eq!(forwarded.headers()["authorization"], "client");
+
+        let rejection = paused("https://denied.test/a%00b", &Target::default()).unwrap_err();
+        assert!(matches!(rejection, Rejection::NoRuleMatched { .. }));
+        let mismatch = paused(
+            "https://denied.test/x",
+            &Target {
+                tunnel: Some("other.test:443".parse().unwrap()),
+                ..Target::default()
+            },
+        );
+        assert_eq!(mismatch.unwrap_err(), Rejection::TunnelMismatch);
+
+        let plan =
+            authorize_connect(&connect_request("denied.test:443"), &rules, Enforcement::Paused)
+                .unwrap();
+        assert_eq!(plan.source, MatchSource::Paused);
     }
 
     /// Initial events capture full URLs and query-free pathnames, but no pathname for CONNECT.

@@ -266,3 +266,19 @@ export async function allowRequest(denial: HttpDenial): Promise<RulesDocument> {
     }
     return changed ? api<RulesDocument>(rulesPath(webRulesFile), "PUT", document) : document;
 }
+
+/** Whether blocking is enforced or temporarily paused. */
+export interface BlockingStatus {
+    /** Whole seconds until blocking resumes, or null while blocking is enforced. */
+    paused_seconds_remaining: number | null;
+}
+
+/** Let all HTTP(S) requests and DNS lookups through for `minutes`, then resume blocking. */
+export function pauseBlocking(minutes: number): Promise<BlockingStatus> {
+    return api<BlockingStatus>("blocking/pause", "POST", { minutes });
+}
+
+/** End a blocking pause immediately. */
+export function resumeBlocking(): Promise<BlockingStatus> {
+    return api<BlockingStatus>("blocking/resume", "POST", {});
+}

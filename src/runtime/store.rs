@@ -1,13 +1,16 @@
 //! The atomically published policy read by every request handler.
 
-use crate::policy::{Policy, RuleSet};
+use super::BlockingPause;
+use crate::policy::{Enforcement, Policy, RuleSet};
 use arc_swap::{ArcSwap, Guard};
 use std::sync::Arc;
 
-/// Lock-free storage for the active policy snapshot.
+/// Lock-free storage for the active policy snapshot and the blocking pause.
 pub struct PolicyStore {
     /// The current snapshot.
     current: ArcSwap<Policy>,
+    /// A temporary pause of blocking, kept across policy reloads.
+    pause: BlockingPause,
 }
 
 impl PolicyStore {
@@ -15,7 +18,18 @@ impl PolicyStore {
     pub fn new(policy: Policy) -> Self {
         Self {
             current: ArcSwap::from_pointee(policy),
+            pause: BlockingPause::default(),
         }
+    }
+
+    /// The temporary pause of blocking.
+    pub fn pause(&self) -> &BlockingPause {
+        &self.pause
+    }
+
+    /// Whether requests no rule allows are currently denied.
+    pub fn enforcement(&self) -> Enforcement {
+        self.pause.enforcement()
     }
 
     /// Borrow the current snapshot cheaply for one request.

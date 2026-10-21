@@ -111,6 +111,16 @@ export function SignOutIcon(props: IconProps) {
     return <Icon {...props} paths={["M15 4h4v16h-4", "M10 8l-4 4 4 4", "M6 12h10"]} />;
 }
 
+/** A pause symbol for temporarily disabling blocking. */
+export function PauseIcon(props: IconProps) {
+    return <Icon {...props} paths={["M9 5v14", "M15 5v14"]} />;
+}
+
+/** A play symbol for resuming blocking. */
+export function PlayIcon(props: IconProps) {
+    return <Icon {...props} paths={["M7 4.5v15L19 12z"]} />;
+}
+
 /** A spinning ring shown while work is in progress. */
 export function Spinner({ className = "size-4" }: IconProps) {
     return (
