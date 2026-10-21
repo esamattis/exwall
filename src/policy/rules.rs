@@ -262,11 +262,19 @@ impl Rule {
         exact || self.domain_regexes.iter().any(|regex| regex.is_match(host.as_str(), &self.id))
     }
 
+    /// Report whether the rule restricts pathnames with patterns or regexes.
+    pub fn has_path_constraint(&self) -> bool {
+        !self.paths.is_empty()
+    }
+
+    /// Check that the rule authorizes HTTP for the hostname and method, ignoring pathnames.
+    fn matches_endpoint(&self, host: &Host, method: &str) -> bool {
+        !self.dns_only && self.methods.allows(method) && self.matches_host(host)
+    }
+
     /// Check the hostname, method, and pathname filters together.
     fn matches_request(&self, host: &Host, method: &str, path: &str) -> bool {
-        !self.dns_only
-            && self.methods.allows(method)
-            && self.matches_host(host)
+        self.matches_endpoint(host, method)
             && (self.paths.is_empty()
                 || self.paths.iter().any(|regex| regex.is_match(path, &self.id)))
     }
@@ -413,6 +421,38 @@ impl RuleSet {
     pub fn http_rule(&self, host: &Host, method: &str, path: &str) -> Option<&Rule> {
         let path = path.split(['?', '#']).next().filter(|path| !path.is_empty()).unwrap_or("/");
         self.rules.iter().find(|rule| rule.matches_request(host, method, path))
+    }
+
+    /// Report whether `matched`, the first HTTP rule for a request, may authorize
+    /// a pathname that upstreams could decode into a different route.
+    ///
+    /// A rule that constrains paths may not: its matchers saw only the literal
+    /// path, so an encoded separator or dot segment could reach a route the
+    /// rule never allowed. A rule without path constraints already authorizes
+    /// every route on the host, so whichever route the upstream decodes is
+    /// authorized too.
+    ///
+    /// One case remains. An earlier rule for the same host and method can
+    /// constrain paths in order to give those routes different injected
+    /// headers, or none. An ambiguous path can miss that rule literally yet
+    /// reach one of its routes upstream carrying `matched`'s headers instead,
+    /// which could expose credentials to an endpoint deliberately carved out
+    /// of them. Such paths are refused whenever `matched` injects headers that
+    /// an earlier path-constrained rule would not. When `matched` injects
+    /// nothing the request carries only client-supplied headers, which the
+    /// client could send anywhere on the host already.
+    pub fn admits_ambiguous_pathname(&self, matched: &Rule, host: &Host, method: &str) -> bool {
+        if matched.has_path_constraint() {
+            return false;
+        }
+        if matched.inject_headers.is_empty() {
+            return true;
+        }
+        self.rules
+            .iter()
+            .take_while(|rule| !std::ptr::eq(*rule, matched))
+            .filter(|rule| rule.has_path_constraint() && rule.matches_endpoint(host, method))
+            .all(|rule| rule.inject_headers == matched.inject_headers)
     }
 
     /// Return the first hostname match for DNS, ignoring HTTP constraints.

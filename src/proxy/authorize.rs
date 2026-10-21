@@ -1,7 +1,10 @@
 //! Pure HTTP authorization: request metadata and policy in, a forwarding plan or rejection out.
 
 use crate::{
-    policy::{Decision, Host, RuleId, RuleSet, path_safety::is_safe_pathname},
+    policy::{
+        Decision, Host, RuleId, RuleSet,
+        path_safety::{is_clean_pathname, is_unambiguous_pathname},
+    },
     telemetry::{Failure, Protocol, RequestEvent},
 };
 use rama::{
@@ -64,12 +67,16 @@ pub enum Rejection {
     TunnelMismatch,
     /// The request authority differs from the TLS server name.
     SniMismatch,
-    /// The pathname contains traversal or ambiguous encodings.
+    /// The pathname contains control characters or a literal backslash, or it
+    /// contains traversal or encoded separators while the matching rule cannot
+    /// authorize ambiguous routes.
     AmbiguousPathname {
         /// The request host.
         host: Host,
         /// The request pathname.
         pathname: String,
+        /// The first rule matching the literal pathname.
+        rule: RuleId,
     },
     /// No rule authorizes the host, method, and pathname.
     NoRuleMatched {
@@ -177,8 +184,10 @@ impl Rejection {
 
     /// The policy decision recorded for the request.
     ///
-    /// Failures after a rule matched keep the ALLOW decision; checks that ran
-    /// before policy evaluation are unevaluated.
+    /// Policy refusals are DENY, including a matched rule refusing an ambiguous
+    /// pathname or plaintext injection. Other failures after a rule matched
+    /// keep the ALLOW decision; checks that ran before policy evaluation are
+    /// unevaluated.
     pub fn decision(&self) -> Decision {
         match self {
             Self::AmbiguousPathname {
@@ -211,7 +220,11 @@ impl Rejection {
     /// The rule that matched before the rejection, if any.
     pub fn rule(&self) -> Option<&RuleId> {
         match self {
-            Self::UnsupportedScheme {
+            Self::AmbiguousPathname {
+                rule,
+                ..
+            }
+            | Self::UnsupportedScheme {
                 rule,
                 ..
             }
@@ -315,6 +328,12 @@ fn client_server_name(request: &Request) -> Option<Host> {
 ///
 /// The client-selected original IP supplies only a port; it can never override
 /// hostname routing, so credentials always reach the authorized host.
+///
+/// Every pathname must be clean. Traversal and encoded separators are refused
+/// only when the first matching rule cannot authorize every route they might
+/// decode to (see [`RuleSet::admits_ambiguous_pathname`]), so domain-wide
+/// rules allow paths such as `/@scope%2Fname`. An unclean or ambiguous path
+/// that no rule matches is reported as unmatched, since no rule allows it at all.
 pub fn authorize(
     request: &Request,
     target: &Target,
@@ -349,24 +368,29 @@ pub fn authorize(
         return Err(Rejection::SniMismatch);
     }
     let pathname = request.uri().path_or_root().into_owned();
-    if !is_safe_pathname(&pathname) {
-        return Err(Rejection::AmbiguousPathname {
-            host,
-            pathname,
-        });
-    }
     let mut path = pathname.clone();
     if let Some(query) = request.uri().query() {
         path.push('?');
         path.push_str(&query.to_string());
     }
-    let Some(rule) = rules.http_rule(&host, request.method().as_str(), &path) else {
+    let method = request.method().as_str();
+    let Some(rule) = rules.http_rule(&host, method, &path) else {
         return Err(Rejection::NoRuleMatched {
             host,
             pathname,
         });
     };
     let rule_id = rule.id().clone();
+    let admitted = is_clean_pathname(&pathname)
+        && (is_unambiguous_pathname(&pathname)
+            || rules.admits_ambiguous_pathname(rule, &host, method));
+    if !admitted {
+        return Err(Rejection::AmbiguousPathname {
+            host,
+            pathname,
+            rule: rule_id,
+        });
+    }
     let scheme = request_scheme(request, target);
     if !matches!(scheme, "http" | "https") {
         return Err(Rejection::UnsupportedScheme {
@@ -560,6 +584,137 @@ inject_headers = [{ name = 'Authorization', value = 'replacement' }]
         assert_eq!(request.headers()["authorization"], "secret");
     }
 
+    /// Assert that `uri` is refused as an ambiguous pathname by rule `number` without injection.
+    fn assert_ambiguous(rules: &RuleSet, uri: &str, number: usize) {
+        let mut refused = request(uri, &[]);
+        let rejection = prepare(&mut refused, &Target::default(), rules).unwrap_err();
+        let Rejection::AmbiguousPathname {
+            rule,
+            ..
+        } = &rejection
+        else {
+            panic!("{uri}: expected an ambiguous pathname, got {rejection:?}");
+        };
+        assert_eq!(rule, &RuleId::new("test", number), "{uri}");
+        assert_eq!(rejection.decision(), Decision::Deny, "{uri}");
+        assert!(!refused.headers().contains_key("authorization"), "{uri}");
+    }
+
+    /// Rules without path constraints allow encoded separators and dot segments verbatim.
+    #[test]
+    fn domain_wide_rules_allow_ambiguous_pathnames() {
+        let rules = rules("[[allow]]\ndomain = 'registry.test'");
+        for path in [
+            "/@uiw%2Freact-codemirror",
+            "/api/v4/projects/group%2frepo",
+            "/a/%2e%2e/b",
+            "/a/%252e%252e/b",
+            "/bucket/key%5Cname",
+        ] {
+            let mut forwarded = request(&format!("https://registry.test{path}?x=1"), &[]);
+            let plan = prepare(&mut forwarded, &Target::default(), &rules).unwrap();
+            assert_eq!(plan.rule.to_string(), "test:allow#1");
+            assert_eq!(forwarded.uri().path_or_root(), path);
+            assert_eq!(forwarded.uri().query_or_empty(), "x=1");
+        }
+    }
+
+    /// Control characters are refused even when the matching rule allows every path.
+    #[test]
+    fn domain_wide_rules_refuse_control_characters() {
+        let rules = rules("[[allow]]\ndomain = 'registry.test'");
+        for path in ["/a%00b", "/a%0d%0aHost:%20evil.test", "/a%2500b"] {
+            assert_ambiguous(&rules, &format!("https://registry.test{path}"), 1);
+        }
+    }
+
+    /// A path-constrained rule refuses ambiguous paths it matches literally, and
+    /// unclean paths no rule matches are reported as unmatched.
+    #[test]
+    fn path_constrained_rules_refuse_ambiguous_pathnames() {
+        let rules = rules("[[allow]]\ndomain = 'allowed.test'\npathname_pattern = '/allowed/*'");
+        for path in ["/allowed/%2f../private", "/allowed/%2e%2e/private", "/allowed/a%2fb"] {
+            assert_ambiguous(&rules, &format!("https://allowed.test{path}"), 1);
+        }
+        for path in ["/other/%2f../private", "/other/%00"] {
+            let rejection = authorize(
+                &request(&format!("https://allowed.test{path}"), &[]),
+                &Target::default(),
+                &rules,
+            )
+            .unwrap_err();
+            assert_eq!(
+                rejection,
+                Rejection::NoRuleMatched {
+                    host: Host::new("allowed.test"),
+                    pathname: path.into(),
+                }
+            );
+        }
+    }
+
+    /// An ambiguous path missing a path-constrained rule falls through to a later
+    /// domain-wide rule, which authorizes every route and supplies its own headers.
+    #[test]
+    fn ambiguous_pathnames_fall_through_to_domain_wide_rules() {
+        let rules = rules(
+            r#"
+[[allow]]
+domain = 'registry.test'
+pathname_pattern = '/@private/*'
+inject_headers = [{ name = 'Authorization', value = 'private-token' }]
+[[allow]]
+domain = 'registry.test'
+"#,
+        );
+        let mut encoded = request("https://registry.test/@private%2fpackage", &[]);
+        let plan = prepare(&mut encoded, &Target::default(), &rules).unwrap();
+        assert_eq!(plan.rule.to_string(), "test:allow#2");
+        assert!(!encoded.headers().contains_key("authorization"));
+        assert_ambiguous(&rules, "https://registry.test/@private/%2e%2e/other", 1);
+        let mut literal = request("https://registry.test/@private/package", &[]);
+        prepare(&mut literal, &Target::default(), &rules).unwrap();
+        assert_eq!(literal.headers()["authorization"], "private-token");
+    }
+
+    /// A later injecting rule cannot authorize an ambiguous path when an earlier
+    /// path-constrained rule for the same host and method chose other headers,
+    /// because the upstream might decode the path into that carved-out route.
+    #[test]
+    fn ambiguous_pathnames_cannot_escape_header_carve_outs() {
+        let rules = rules(
+            r#"
+[[allow]]
+domain = 'api.test'
+pathname_pattern = '/echo/*'
+[[allow]]
+domain = 'api.test'
+methods = ['POST']
+pathname_pattern = '/other/*'
+inject_headers = [{ name = 'Authorization', value = 'other' }]
+[[allow]]
+domain = 'api.test'
+methods = 'ANY'
+inject_headers = [{ name = 'Authorization', value = 'secret' }]
+"#,
+        );
+        assert_ambiguous(&rules, "https://api.test/echo%2fheaders", 3);
+        assert_ambiguous(&rules, "https://api.test/x/%2e%2e/echo/headers", 3);
+        let mut plain = request("https://api.test/plain/path", &[]);
+        prepare(&mut plain, &Target::default(), &rules).unwrap();
+        assert_eq!(plain.headers()["authorization"], "secret");
+        let mut post = request("https://api.test/other%2fx", &[]);
+        *post.method_mut() = Method::POST;
+        let rejection = authorize(&post, &Target::default(), &rules).unwrap_err();
+        assert_eq!(rejection.rule().unwrap().to_string(), "test:allow#3");
+        // Neither carve-out applies to DELETE (rule 1 is GET and HEAD only, rule 2
+        // is POST only), so the domain-wide rule already covers every DELETE route.
+        let mut delete = request("https://api.test/echo%2fheaders", &[]);
+        *delete.method_mut() = Method::DELETE;
+        prepare(&mut delete, &Target::default(), &rules).unwrap();
+        assert_eq!(delete.headers()["authorization"], "secret");
+    }
+
     /// Verify injections survive client hop-by-hop directives while proxy credentials are removed.
     #[test]
     fn fixes_route_before_injection_and_cleans_client_headers() {
@@ -668,6 +823,7 @@ inject_headers = [{ name = 'Authorization', value = 'replacement' }]
                 Rejection::AmbiguousPathname {
                     host: host.clone(),
                     pathname: "/".into(),
+                    rule: rule.clone(),
                 },
                 403,
                 "DENY",

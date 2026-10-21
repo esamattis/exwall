@@ -120,6 +120,14 @@ Use `pathname_regex = '^/downloads/[^/]+$'` for anything patterns cannot express
 When several rules match a request, the first one (by file name, then order in
 the file) decides its headers.
 
+Patterns see the path exactly as sent, so a rule that restricts paths refuses
+ambiguous ones (`..` segments or encoded separators such as `%2F`, at any
+encoding depth) with `exwall: ambiguous pathname denied`. Rules without path
+constraints forward them unchanged, e.g. `/@scope%2Fname` on an npm registry,
+unless the matching rule injects headers and an earlier path-restricted rule for
+the same host and method would inject different ones. Control characters are
+always refused.
+
 See [example-rules.toml](../example-rules.toml) for every option.
 
 ## Configuration

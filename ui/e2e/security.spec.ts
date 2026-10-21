@@ -88,28 +88,39 @@ test("a stalled login does not block the API and expires after its body deadline
     }
 });
 
-test("wildcard path allowances reject traversal without changing normal routes", async ({
+test("path-constrained rules reject ambiguous paths that domain-wide rules forward", async ({
     protocolProxy: fixture,
 }) => {
     await writeFile(
         fixture.rule,
-        `${fixture.ruleText}\n[[allow]]\ndomain = '127.0.0.1'\npathname_pattern = '/allowed/*'\n`,
+        `${fixture.ruleText}\n[[allow]]\ndomain = '127.0.0.1'\npathname_pattern = '/allowed/*'\n` +
+            `[[allow]]\ndomain = '127.0.0.1'\nmethods = ['POST']\n`,
     );
     /** Send raw paths so client URL normalization cannot hide the regression. */
-    const get = (path: string) =>
+    const send = (method: string, path: string) =>
         exchange({
+            method,
             hostname: "127.0.0.1",
             port: fixture.proxyPort,
             path: `http://127.0.0.1:${fixture.upstreamPort}${path}`,
             headers: { Host: `127.0.0.1:${fixture.upstreamPort}` },
         });
-    await expect.poll(async () => (await get("/allowed/file.txt")).status).toBe(200);
+    await expect.poll(async () => (await send("GET", "/allowed/file.txt")).status).toBe(200);
     for (const path of [
         "/allowed/../private",
         "/allowed/%2e%2e/private",
         "/allowed/%252e%252e/private",
+        "/allowed/%2f../private",
     ]) {
-        expect((await get(path)).status).toBe(403);
+        expect((await send("GET", path)).status).toBe(403);
     }
-    expect((await get("/allowed/file.txt?next=/../private")).status).toBe(200);
+    const ambiguous = await send("GET", "/allowed/%2f../private");
+    expect(ambiguous.body).toBe("exwall: ambiguous pathname denied\n");
+    expect((await send("GET", "/allowed/file.txt?next=/../private")).status).toBe(200);
+    for (const path of ["/@scope%2Fname", "/a/%2e%2e/b"]) {
+        const forwarded = await send("POST", path);
+        expect(forwarded.status).toBe(200);
+        expect(JSON.parse(forwarded.body).path).toBe(path);
+    }
+    expect((await send("POST", "/a%00b")).status).toBe(403);
 });
