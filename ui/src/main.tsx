@@ -21,10 +21,11 @@ import {
 } from "@tanstack/react-router";
 import { api, ApiError, hasSession, sessionKey, type Session } from "./api.ts";
 import { BlockingBanner, BlockingButton, useBlockingStatus } from "./blocking.tsx";
-import { ErrorBanner, ShieldIcon, SignOutIcon, Spinner, ToastProvider } from "./components.tsx";
+import { ErrorBanner, SignOutIcon, Spinner, ToastProvider } from "./components.tsx";
 import { RuleFilesPage, RulesPage } from "./rules.tsx";
 import { parseTrafficView, TrafficPage } from "./traffic.tsx";
 import "./style.css";
+import iconUrl from "../../assets/icon.svg";
 
 /** Accept only same-origin paths as post-login destinations. */
 function safeRedirect(value: unknown): string | undefined {
@@ -38,9 +39,7 @@ function safeRedirect(value: unknown): string | undefined {
 function Brand() {
     return (
         <span className="flex items-center gap-2 text-base font-semibold tracking-tight text-white">
-            <span className="grid size-7 place-items-center rounded-lg bg-emerald-400/15 text-emerald-300 ring-1 ring-emerald-400/30">
-                <ShieldIcon className="size-4" />
-            </span>
+            <img src={iconUrl} alt="" className="size-7" />
             exwall
         </span>
     );
