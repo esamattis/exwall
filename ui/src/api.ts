@@ -92,8 +92,18 @@ export interface HttpDenial {
 export interface HostInfo {
     /** The kernel hostname, or null when it cannot be read. */
     hostname: string | null;
-    /** Local interface addresses that other hosts can reach, IPv4 first. */
-    addresses: string[];
+    /** Reachable interface addresses, default-route interfaces first, then IPv4 before IPv6. */
+    addresses: InterfaceAddress[];
+}
+
+/** One address assigned to a network interface on the firewall host. */
+export interface InterfaceAddress {
+    /** Whether the interface carries a default route. */
+    default_route: boolean;
+    /** The assigned IPv4 or IPv6 address. */
+    address: string;
+    /** The interface name, such as eth0 or docker0. */
+    interface: string;
 }
 
 /** The signed-in account. */

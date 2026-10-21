@@ -1,4 +1,4 @@
-import { StrictMode, useState } from "react";
+import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
     MutationCache,
@@ -21,7 +21,14 @@ import {
 } from "@tanstack/react-router";
 import { api, ApiError, hasSession, sessionKey, type HostInfo, type Session } from "./api.ts";
 import { BlockingBanner, BlockingButton, useBlockingStatus } from "./blocking.tsx";
-import { ErrorBanner, SignOutIcon, Spinner, ToastProvider } from "./components.tsx";
+import {
+    ChevronIcon,
+    CopyButton,
+    ErrorBanner,
+    SignOutIcon,
+    Spinner,
+    ToastProvider,
+} from "./components.tsx";
 import { RuleFilesPage, RulesPage } from "./rules.tsx";
 import { parseTrafficView, TrafficPage } from "./traffic.tsx";
 import "./style.css";
@@ -45,7 +52,7 @@ function Brand() {
     );
 }
 
-/** The managed host's name with its network addresses in small print below. */
+/** The managed host's name with its main address below, opening a list of all addresses. */
 function HostLabel() {
     const host = useQuery({
         queryKey: ["host"],
@@ -53,22 +60,104 @@ function HostLabel() {
         refetchInterval: 60_000,
         refetchOnWindowFocus: false,
     });
+    const [open, setOpen] = useState(false);
+    const container = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        if (!open) {
+            return undefined;
+        }
+        const close = (event: MouseEvent | KeyboardEvent) => {
+            if (
+                (event instanceof KeyboardEvent && event.key === "Escape") ||
+                (event instanceof MouseEvent &&
+                    event.target instanceof Node &&
+                    !container.current?.contains(event.target))
+            ) {
+                setOpen(false);
+            }
+        };
+        document.addEventListener("mousedown", close);
+        document.addEventListener("keydown", close);
+        return () => {
+            document.removeEventListener("mousedown", close);
+            document.removeEventListener("keydown", close);
+        };
+    }, [open]);
     if (!host.data?.hostname) {
         return null;
     }
-    const addresses = host.data.addresses.join(" · ");
+    const [primary, ...others] = host.data.addresses;
     return (
-        <div className="flex min-w-0 flex-col justify-center border-l border-white/10 pl-4 leading-tight">
+        <div
+            ref={container}
+            className="relative flex min-w-0 flex-col justify-center border-l border-white/10 pl-4 leading-tight"
+        >
             <span
                 className="truncate text-base font-semibold text-white"
                 title={host.data.hostname}
             >
                 {host.data.hostname}
             </span>
-            {addresses && (
-                <span className="truncate font-mono text-[10px] text-zinc-500" title={addresses}>
-                    {addresses}
-                </span>
+            {primary && (
+                <button
+                    type="button"
+                    className="flex items-center gap-1.5 self-start rounded font-mono text-[10px] text-zinc-500 transition hover:text-zinc-300"
+                    aria-expanded={open}
+                    aria-controls="host-addresses"
+                    title="Show all addresses"
+                    onClick={() => setOpen((previous) => !previous)}
+                >
+                    {primary.address}
+                    {others.length > 0 && (
+                        <span className="rounded bg-white/10 px-1 font-sans font-medium text-zinc-400">
+                            +{others.length}
+                        </span>
+                    )}
+                    <ChevronIcon className={`size-3 transition ${open ? "rotate-180" : ""}`} />
+                </button>
+            )}
+            {open && (
+                <div
+                    id="host-addresses"
+                    className="panel absolute top-full left-0 z-40 mt-3 w-80 bg-zinc-900 py-2 shadow-2xl shadow-black/50"
+                >
+                    <p className="field-label px-4 pb-1">Addresses</p>
+                    <ul>
+                        {host.data.addresses.map((entry) => (
+                            <li
+                                key={entry.address}
+                                className="flex items-center gap-3 py-0.5 pr-2 pl-4"
+                            >
+                                <code
+                                    className="min-w-0 flex-1 truncate font-mono text-xs text-zinc-200"
+                                    title={entry.address}
+                                >
+                                    {entry.address}
+                                </code>
+                                <span
+                                    className={`shrink-0 text-xs ${entry.default_route ? "text-emerald-400" : "text-zinc-500"}`}
+                                    title={
+                                        entry.default_route
+                                            ? "This interface carries a default route"
+                                            : undefined
+                                    }
+                                >
+                                    {entry.interface}
+                                </span>
+                                <CopyButton
+                                    text={entry.address}
+                                    label={`Copy address ${entry.address}`}
+                                />
+                            </li>
+                        ))}
+                    </ul>
+                    {host.data.addresses.some((entry) => entry.default_route) && (
+                        <p className="px-4 pt-2 text-xs text-zinc-500">
+                            <span className="text-emerald-400">Green</span> interfaces carry a
+                            default route.
+                        </p>
+                    )}
+                </div>
             )}
         </div>
     );

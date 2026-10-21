@@ -762,7 +762,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let host: HostInfo = decode(response).await;
         assert!(host.hostname.is_some_and(|name| !name.is_empty()));
-        assert!(!host.addresses.iter().any(std::net::IpAddr::is_loopback));
+        assert!(!host.addresses.iter().any(|entry| entry.address.is_loopback()));
     }
 
     /// Blocking pauses for the requested minutes, rejects invalid durations, and resumes on request.
