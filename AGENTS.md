@@ -12,3 +12,5 @@ fake tools, or an explicitly chosen disposable network namespace instead.
 The web UI's HTTP API under /api is private to the bundled UI and may change
 without notice. Do not document its endpoints, requests, or responses in the
 README, docs/, or other user-facing documentation.
+
+Commit directly to main; there is no need to create a branch first.
