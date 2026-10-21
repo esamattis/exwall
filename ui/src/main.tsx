@@ -19,7 +19,7 @@ import {
     RouterProvider,
     useNavigate,
 } from "@tanstack/react-router";
-import { api, ApiError, hasSession, sessionKey, type Session } from "./api.ts";
+import { api, ApiError, hasSession, sessionKey, type HostInfo, type Session } from "./api.ts";
 import { BlockingBanner, BlockingButton, useBlockingStatus } from "./blocking.tsx";
 import { ErrorBanner, SignOutIcon, Spinner, ToastProvider } from "./components.tsx";
 import { RuleFilesPage, RulesPage } from "./rules.tsx";
@@ -42,6 +42,35 @@ function Brand() {
             <img src={iconUrl} alt="" className="size-7" />
             exwall
         </span>
+    );
+}
+
+/** The managed host's name with its network addresses in small print below. */
+function HostLabel() {
+    const host = useQuery({
+        queryKey: ["host"],
+        queryFn: () => api<HostInfo>("host"),
+        refetchInterval: 60_000,
+        refetchOnWindowFocus: false,
+    });
+    if (!host.data?.hostname) {
+        return null;
+    }
+    const addresses = host.data.addresses.join(" · ");
+    return (
+        <div className="flex min-w-0 flex-col justify-center border-l border-white/10 pl-4 leading-tight">
+            <span
+                className="truncate text-base font-semibold text-white"
+                title={host.data.hostname}
+            >
+                {host.data.hostname}
+            </span>
+            {addresses && (
+                <span className="truncate font-mono text-[10px] text-zinc-500" title={addresses}>
+                    {addresses}
+                </span>
+            )}
+        </div>
     );
 }
 
@@ -74,6 +103,7 @@ function AppShell() {
                     <Link to="/" search={{}} aria-label="exwall home">
                         <Brand />
                     </Link>
+                    <HostLabel />
                     <nav aria-label="Main" className="flex gap-1">
                         <Link
                             to="/"

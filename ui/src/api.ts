@@ -88,6 +88,14 @@ export interface HttpDenial {
     timestamp: string;
 }
 
+/** The firewall host, identified in the page header. */
+export interface HostInfo {
+    /** The kernel hostname, or null when it cannot be read. */
+    hostname: string | null;
+    /** Local interface addresses that other hosts can reach, IPv4 first. */
+    addresses: string[];
+}
+
 /** The signed-in account. */
 export interface Session {
     username: string;

@@ -3,6 +3,7 @@
 mod api;
 mod assets;
 pub mod auth;
+mod host_info;
 mod rule_files;
 pub mod rules_doc;
 mod server;

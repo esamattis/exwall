@@ -2,6 +2,7 @@
 
 use super::{
     auth::{AuthError, Authenticator},
+    host_info::HostInfo,
     rule_files::{RuleFiles, WriteOutcome},
     rules_doc::{RuleFileContents, RulesDocument, edit_document, inspect_document},
 };
@@ -344,6 +345,12 @@ impl Api {
             (Method::POST, "/api/logout") => {
                 self.auth.logout(request.headers()).await?;
                 Ok(with_cleared_cookie(json(StatusCode::OK, &serde_json::json!({}))))
+            }
+            (Method::GET, "/api/host") => {
+                let host = tokio::task::spawn_blocking(HostInfo::read)
+                    .await
+                    .map_err(InternalError::Task)?;
+                Ok(json(StatusCode::OK, &host))
             }
             (Method::GET, "/api/http-denials") => {
                 Ok(json(StatusCode::OK, &self.stats.denials_snapshot()))
@@ -738,6 +745,24 @@ mod tests {
             .response(request(Method::GET, "/api/session", Some(("authorization", &bearer)), &()))
             .await;
         assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Host identification requires a session and omits loopback addresses.
+    #[tokio::test]
+    async fn reports_host_info_to_signed_in_users() {
+        let temporary = tempfile::tempdir().unwrap();
+        let harness = harness(temporary.path(), "password");
+        let anonymous = harness.api.response(request(Method::GET, "/api/host", None, &())).await;
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+        let bearer = login(&harness.api, "password").await;
+        let response = harness
+            .api
+            .response(request(Method::GET, "/api/host", Some(("authorization", &bearer)), &()))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let host: HostInfo = decode(response).await;
+        assert!(host.hostname.is_some_and(|name| !name.is_empty()));
+        assert!(!host.addresses.iter().any(std::net::IpAddr::is_loopback));
     }
 
     /// Blocking pauses for the requested minutes, rejects invalid durations, and resumes on request.
