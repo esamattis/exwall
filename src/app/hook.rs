@@ -11,7 +11,6 @@ use crate::{
         iptables::{BUILTIN_OUTPUT, Family, NAT_CHAIN, OUTPUT_CHAIN, Table},
         simulate::SimulatedTables,
     },
-    policy::{MissingDirectory, load_rules},
 };
 use std::collections::BTreeMap;
 
@@ -41,21 +40,23 @@ pub fn run(cli: &Cli, args: &HookArgs) -> Result<(), Error> {
         let system = DryRunSystem::new(tables, Box::new(std::io::stdout()));
         let note = |text: &str| system.note(text);
         let hooks = Hooks::new(settings, &system, Mode::DryRun, &note);
-        return execute(&hooks, args.action, cli, config);
+        return execute(&hooks, args.action, config);
     }
     let system = RealSystem;
     let silent = |_: &str| {};
     let hooks = Hooks::new(settings, &system as &dyn System, Mode::Live, &silent);
     // One lock covers the guard and the start that follows it.
     let _lock = hooks.lock()?;
-    execute(&hooks, args.action, cli, config)
+    execute(&hooks, args.action, config)
 }
 
-/// Perform the hook action; start requires valid configuration and rules after guarding.
+/// Perform the hook action; start requires valid configuration after guarding.
+///
+/// Rules are not validated here: the service starts with invalid rule files
+/// and blocks everything until they are repaired.
 fn execute(
     hooks: &Hooks<'_>,
     action: HookAction,
-    cli: &Cli,
     config: Result<Config, crate::config::ConfigError>,
 ) -> Result<(), Error> {
     match action {
@@ -63,7 +64,6 @@ fn execute(
         HookAction::Start => {
             hooks.guard()?;
             let config = config?;
-            load_rules(&cli.rules_dir, MissingDirectory::Empty)?;
             hooks.start(&config.startup)?;
         }
         HookAction::Stop => hooks.stop()?,

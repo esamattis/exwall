@@ -1,18 +1,24 @@
 import { useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
+import CodeMirror, { EditorView, Prec, keymap } from "@uiw/react-codemirror";
+import { StreamLanguage } from "@codemirror/language";
+import { toml } from "@codemirror/legacy-modes/mode/toml";
 import {
     api,
     rulesPath,
+    saveRulesToml,
     webRulesFile,
     type FieldValue,
     type InjectedHeader,
     type RuleDraft,
+    type RuleFileContents,
     type RuleFileSummary,
     type RulesDocument,
 } from "./api.ts";
 import {
     ChevronIcon,
+    CodeIcon,
     EmptyState,
     ErrorBanner,
     FilePath,
@@ -69,10 +75,10 @@ function invalidRuleNumber(message: string | undefined): number | null {
     return match?.[1] ? Number(match[1]) : null;
 }
 
-/** Describe a rule file's allow table count, or flag a file that cannot be read as rules. */
+/** Describe a rule file's allow table count, or flag a file that is invalid. */
 function RuleCount({ rules }: { rules: number | null }) {
     if (rules === null) {
-        return <span className="badge badge-warn">Unreadable</span>;
+        return <span className="badge badge-warn">Invalid</span>;
     }
     return (
         <span className="badge badge-neutral">
@@ -174,9 +180,10 @@ export function RulesPage({ file }: { file: string }) {
     const [generation, setGeneration] = useState(0);
     const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
     const [filter, setFilter] = useState("");
+    const [mode, setMode] = useState<"form" | "toml">("form");
     const rules = useQuery({
         queryKey: ["rules", file],
-        queryFn: () => api<RulesDocument>(rulesPath(file)),
+        queryFn: () => api<RuleFileContents>(rulesPath(file)),
         retry: false,
         refetchOnWindowFocus: false,
     });
@@ -196,22 +203,265 @@ export function RulesPage({ file }: { file: string }) {
             </div>
         );
     }
+    const { revision, rules: drafts } = rules.data;
+    const path = files.data?.find((summary) => summary.name === file)?.path;
+    const key = `${generation}:${revision}`;
+
+    /** Load the file again and remount the editor with its contents. */
+    async function reload() {
+        await rules.refetch();
+        setGeneration((value) => value + 1);
+    }
+
+    /** Remount the editor with the loaded contents, discarding local edits. */
+    function discard() {
+        setGeneration((value) => value + 1);
+    }
+
+    // Invalid files can only be repaired as TOML.
+    if (drafts === undefined || mode === "toml") {
+        return (
+            <TomlEditor
+                key={key}
+                file={file}
+                path={path}
+                contents={rules.data}
+                onReload={reload}
+                onDiscard={discard}
+                onSaved={() => setMode("toml")}
+                onEditForm={drafts === undefined ? null : () => setMode("form")}
+            />
+        );
+    }
     return (
         <Editor
-            key={`${generation}:${rules.data.revision}`}
+            key={key}
             file={file}
-            path={files.data?.find((summary) => summary.name === file)?.path}
-            document={rules.data}
+            path={path}
+            document={{ revision, rules: drafts }}
             expanded={expanded}
             setExpanded={setExpanded}
             filter={filter}
             setFilter={setFilter}
-            onReload={async () => {
-                await rules.refetch();
-                setGeneration((value) => value + 1);
-            }}
-            onDiscard={() => setGeneration((value) => value + 1)}
+            onReload={reload}
+            onDiscard={discard}
+            onEditToml={() => setMode("toml")}
         />
+    );
+}
+
+/** CodeMirror extensions for TOML highlighting, saving with Mod-S, and a theme matching the panels. */
+const tomlExtensions = [
+    StreamLanguage.define(toml),
+    keymap.of([
+        {
+            key: "Mod-s",
+            // Submitting the surrounding form saves through the editor's usual path.
+            run: (view) => {
+                view.dom.closest("form")?.requestSubmit();
+                return true;
+            },
+        },
+    ]),
+    // The dark theme's own background would otherwise take precedence.
+    Prec.highest(
+        EditorView.theme(
+            {
+                "&": { backgroundColor: "transparent", fontSize: "13px" },
+                "&.cm-focused": { outline: "none" },
+                ".cm-scroller": { fontFamily: "var(--font-mono)" },
+                ".cm-gutters": {
+                    backgroundColor: "transparent",
+                    borderRight: "1px solid rgb(255 255 255 / 0.1)",
+                },
+            },
+            { dark: true },
+        ),
+    ),
+];
+
+/** Show a heading and a verbatim, possibly multi-line error message. */
+function ErrorDetails({ heading, message }: { heading: string; message: string }) {
+    return (
+        <>
+            <span className="block font-medium">{heading}</span>
+            <code className="mt-1 block font-mono text-xs whitespace-pre-wrap">{message}</code>
+        </>
+    );
+}
+
+/** Edit one rule file as TOML text, showing why it is invalid above the editor. */
+function TomlEditor({
+    file,
+    path,
+    contents,
+    onReload,
+    onDiscard,
+    onSaved,
+    onEditForm,
+}: {
+    file: string;
+    path: string | undefined;
+    contents: RuleFileContents;
+    onReload: () => Promise<void>;
+    onDiscard: () => void;
+    onSaved: () => void;
+    /** Switch to the form editor, or null when the file is invalid. */
+    onEditForm: (() => void) | null;
+}) {
+    const [text, setText] = useState(contents.revision);
+    const client = useQueryClient();
+    const toast = useToast();
+    const save = useMutation({
+        mutationFn: () => saveRulesToml(file, contents.revision, text),
+        onSuccess: async (result) => {
+            // Stay in the TOML editor even when the saved file could be edited as a form.
+            onSaved();
+            client.setQueryData(["rules", file], result);
+            toast("Changes saved.");
+            await client.invalidateQueries({ queryKey: ["rules"], exact: true });
+        },
+    });
+    const dirty = text !== contents.revision;
+    const conflict = save.error?.message.includes("Reload") ?? false;
+
+    /** Save the text unless it is unchanged or already being saved. */
+    function submit() {
+        if (dirty && !save.isPending) {
+            save.mutate();
+        }
+    }
+
+    /** Ask before discarding edits, then load the file again. */
+    function reload() {
+        if (!dirty || window.confirm(`Reload ${file} and discard unsaved edits?`)) {
+            void onReload();
+        }
+    }
+
+    /** Ask before discarding edits, then switch to the form editor. */
+    function editForm() {
+        if (
+            onEditForm &&
+            (!dirty || window.confirm("Discard unsaved TOML edits and edit as a form?"))
+        ) {
+            onEditForm();
+        }
+    }
+
+    return (
+        <form
+            className="pb-24"
+            onSubmit={(event) => {
+                event.preventDefault();
+                submit();
+            }}
+        >
+            <BackToFiles />
+            <PageHeader
+                title={file}
+                description={
+                    <>
+                        {path && (
+                            <span className="mb-1 block">
+                                <FilePath path={path} />
+                            </span>
+                        )}
+                        Saved TOML is validated and enforced immediately. Comments and formatting
+                        are saved exactly as written.
+                    </>
+                }
+                actions={
+                    <>
+                        <button
+                            type="button"
+                            className="btn btn-secondary"
+                            disabled={save.isPending}
+                            onClick={reload}
+                        >
+                            <RefreshIcon />
+                            Reload from file
+                        </button>
+                        {onEditForm && (
+                            <button
+                                type="button"
+                                className="btn btn-secondary"
+                                disabled={save.isPending}
+                                onClick={editForm}
+                            >
+                                Edit as form
+                            </button>
+                        )}
+                    </>
+                }
+            />
+            {(save.error || contents.error) && (
+                <div className="mb-3">
+                    <ErrorBanner>
+                        {save.error ? (
+                            <ErrorDetails heading="Not saved" message={save.error.message} />
+                        ) : (
+                            <ErrorDetails
+                                heading={`${file} is invalid, so rule changes are not applied until it is fixed.`}
+                                message={contents.error ?? ""}
+                            />
+                        )}
+                    </ErrorBanner>
+                </div>
+            )}
+            <div className="panel overflow-hidden">
+                <CodeMirror
+                    value={text}
+                    onChange={(value) => {
+                        save.reset();
+                        setText(value);
+                    }}
+                    editable={!save.isPending}
+                    theme="dark"
+                    minHeight="20rem"
+                    extensions={tomlExtensions}
+                    aria-label={`${file} TOML`}
+                />
+            </div>
+            {(dirty || save.isPending || conflict) && (
+                <div className="fixed inset-x-0 bottom-0 z-40 border-t border-white/10 bg-zinc-950/90 backdrop-blur">
+                    <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
+                        <p className="flex min-w-0 flex-1 items-center gap-2 text-sm text-zinc-300">
+                            <span className="size-2 rounded-full bg-amber-400" />
+                            Unsaved changes
+                        </p>
+                        <div className="flex gap-2">
+                            {conflict ? (
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={reload}
+                                >
+                                    Reload from file
+                                </button>
+                            ) : (
+                                <button
+                                    type="button"
+                                    className="btn btn-ghost"
+                                    disabled={save.isPending || !dirty}
+                                    onClick={onDiscard}
+                                >
+                                    Discard
+                                </button>
+                            )}
+                            <button
+                                type="submit"
+                                className="btn btn-primary"
+                                disabled={save.isPending || !dirty}
+                            >
+                                {save.isPending && <Spinner />}
+                                {save.isPending ? "Saving…" : "Save changes"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </form>
     );
 }
 
@@ -239,6 +489,7 @@ function Editor({
     setFilter,
     onReload,
     onDiscard,
+    onEditToml,
 }: {
     file: string;
     path: string | undefined;
@@ -249,6 +500,7 @@ function Editor({
     setFilter: (value: string) => void;
     onReload: () => Promise<void>;
     onDiscard: () => void;
+    onEditToml: () => void;
 }) {
     // Stable React keys keep each card's local text when other rules are added or removed.
     const [items, setItems] = useState(() =>
@@ -322,6 +574,13 @@ function Editor({
         }
     }
 
+    /** Ask before discarding edits, then switch to the TOML editor. */
+    function editToml() {
+        if (!dirty || window.confirm("Discard unsaved edits and edit as TOML?")) {
+            onEditToml();
+        }
+    }
+
     const visible = items
         .map((item, position) => ({ ...item, position }))
         .filter(
@@ -362,6 +621,15 @@ function Editor({
                         >
                             <RefreshIcon />
                             Reload from file
+                        </button>
+                        <button
+                            type="button"
+                            className="btn btn-secondary"
+                            disabled={save.isPending}
+                            onClick={editToml}
+                        >
+                            <CodeIcon />
+                            Edit as TOML
                         </button>
                         <button
                             type="button"

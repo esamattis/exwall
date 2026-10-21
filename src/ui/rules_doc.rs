@@ -1,6 +1,9 @@
 //! Pure, comment-preserving conversion between rule files and the UI's rule drafts.
 
-use crate::policy::{RuleFileError, RuleSet};
+use crate::{
+    error::ErrorChain,
+    policy::{RuleFileError, RuleSet},
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use thiserror::Error;
@@ -24,6 +27,23 @@ pub struct RulesDocument {
     pub revision: String,
     /// The allow tables in document order.
     pub rules: Vec<Draft>,
+}
+
+/// A rule file as the editor loads it: its text, plus drafts when valid or the reason it is not.
+///
+/// Valid files serialize exactly like a [`RulesDocument`], so a loaded file can be
+/// edited and sent back as form drafts.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RuleFileContents {
+    /// The exact file contents, also used as the revision token.
+    pub revision: String,
+    /// The allow tables in document order, absent when the file is invalid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<Draft>>,
+    /// Why the file cannot be loaded or edited as a form, absent when it is valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A rules document that cannot be read or edited.
@@ -87,6 +107,27 @@ pub fn read_document(revision: String) -> Result<RulesDocument, RulesDocError> {
         revision,
         rules,
     })
+}
+
+/// Validate a rule file like the loader does and read its drafts, describing any failure.
+///
+/// `label` names the file in the identifiers of rules that fail validation.
+pub fn inspect_document(revision: String, label: &str) -> RuleFileContents {
+    let checked = RuleSet::parse(&revision, label)
+        .map_err(RulesDocError::from)
+        .and_then(|_| read_document(revision.clone()));
+    match checked {
+        Ok(document) => RuleFileContents {
+            revision,
+            rules: Some(document.rules),
+            error: None,
+        },
+        Err(error) => RuleFileContents {
+            revision,
+            rules: None,
+            error: Some(ErrorChain(&error).to_string()),
+        },
+    }
 }
 
 /// Render one JSON-compatible field value as a TOML item.
@@ -205,6 +246,23 @@ mod tests {
         assert!(saved.contains("domain = \"new.test\" # Keep this"));
         assert!(saved.contains("methods = ['GET']"));
         assert!(saved.contains("[[allow.inject_headers]]"));
+    }
+
+    /// Valid files carry drafts; syntax and validation failures carry the loader's message.
+    #[test]
+    fn inspects_valid_and_invalid_files() {
+        let valid = inspect_document("[[allow]]\ndomain = 'a.test'\n".into(), "test.toml");
+        assert_eq!(valid.rules.unwrap()[0].fields["domain"].as_str(), Some("a.test"));
+        assert_eq!(valid.error, None);
+        let broken = inspect_document("[[allow".into(), "test.toml");
+        assert_eq!(broken.revision, "[[allow");
+        assert_eq!(broken.rules, None);
+        assert!(broken.error.unwrap().contains("line 1"));
+        let invalid = inspect_document("[[allow]]\nunknown = 1\n".into(), "test.toml");
+        assert_eq!(invalid.rules, None);
+        assert!(invalid.error.unwrap().contains("unknown field"));
+        let serialized = serde_json::to_value(inspect_document(String::new(), "test.toml"));
+        assert_eq!(serialized.unwrap(), serde_json::json!({"revision": "", "rules": []}));
     }
 
     /// Invalid rules, bad indices, and non-table documents are rejected without output.

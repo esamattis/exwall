@@ -19,12 +19,24 @@ export interface RulesDocument {
     rules: RuleDraft[];
 }
 
+/**
+ * A rule file as loaded for editing: its exact text as the revision, plus either
+ * the rules for the form editor or why the file is invalid.
+ */
+export interface RuleFileContents {
+    revision: string;
+    /** The allow tables, absent when the file is invalid. */
+    rules?: RuleDraft[];
+    /** Why the file cannot be loaded or edited as a form, absent when it is valid. */
+    error?: string;
+}
+
 /** One rule file in the rules directory. */
 export interface RuleFileSummary {
     name: string;
     /** The absolute path on the host. */
     path: string;
-    /** The number of allow tables, or null when the file cannot be read as rules. */
+    /** The number of allow tables, or null when the file is invalid. */
     rules: number | null;
 }
 
@@ -34,6 +46,26 @@ export const webRulesFile = "05-web.toml";
 /** The API path of one rule file. */
 export function rulesPath(file: string): string {
     return `rules/${encodeURIComponent(file)}`;
+}
+
+/** Replace a rule file with TOML text, which the server validates before saving. */
+export function saveRulesToml(
+    file: string,
+    revision: string,
+    toml: string,
+): Promise<RuleFileContents> {
+    return api<RuleFileContents>(rulesPath(file), "PUT", { revision, toml });
+}
+
+/** Load the rules that Traffic page allowances extend, refusing to edit an invalid file. */
+async function readWebRules(): Promise<RulesDocument> {
+    const { revision, rules, error } = await api<RuleFileContents>(rulesPath(webRulesFile));
+    if (rules === undefined) {
+        throw new Error(
+            `${webRulesFile} is invalid. Fix it on the Rules page first: ${error ?? "unknown error"}`,
+        );
+    }
+    return { revision, rules };
 }
 
 /** Current counters for a domain, without individual request history. */
@@ -177,7 +209,7 @@ export async function allowDomain({
     dnsOnly,
     includeSubdomains = false,
 }: DomainAllowance): Promise<RulesDocument> {
-    const document = await api<RulesDocument>(rulesPath(webRulesFile));
+    const document = await readWebRules();
     let changed = !dnsOnly && removeCoveredDnsRules(document, domain, includeSubdomains);
     if (
         !document.rules.some(
@@ -207,7 +239,7 @@ export async function allowDomain({
 
 /** Add a rule allowing one denied request's exact method and pathname. */
 export async function allowRequest(denial: HttpDenial): Promise<RulesDocument> {
-    const document = await api<RulesDocument>(rulesPath(webRulesFile));
+    const document = await readWebRules();
     const pathnameRegex = exactPathRegex(denial.pathname);
     let changed = removeCoveredDnsRules(document, denial.domain);
     if (

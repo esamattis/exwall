@@ -103,8 +103,6 @@ export async function checkSystemd(fixture: LifecycleFixture): Promise<void> {
         } else if (line.startsWith("ExecStartPre=+") || line.startsWith("ExecStopPost=+")) {
             const key = line.slice(0, line.indexOf("="));
             line = `${key}=+${[...hook, line.split(" ").at(-1)!].map((argument) => JSON.stringify(argument)).join(" ")}`;
-        } else if (line.startsWith("ExecStartPre=")) {
-            line = `ExecStartPre=${[...args, "check"].map((argument) => JSON.stringify(argument)).join(" ")}`;
         } else if (line.startsWith("ExecStart=")) {
             line = `ExecStart=${serve.map((argument) => JSON.stringify(argument)).join(" ")}`;
         }
@@ -140,6 +138,14 @@ export async function checkSystemd(fixture: LifecycleFixture): Promise<void> {
     }
     const rule = join(fixture.rules, "20-network.toml");
     const ruleText = await readFile(rule, "utf8");
+    /** Fetch a host the fixture rules allow as the restricted user, returning the HTTP status. */
+    async function allowedHostStatus(): Promise<number | undefined> {
+        const response = await fixtureClient(fixture, {
+            operation: "http",
+            url: "https://github.com/",
+        });
+        return typeof response.result === "object" ? response.result.status : undefined;
+    }
     const manager = startProcess(["/usr/lib/systemd/systemd", "--user"], { env: environment });
     try {
         await waitUntil(
@@ -158,25 +164,41 @@ export async function checkSystemd(fixture: LifecycleFixture): Promise<void> {
         );
         await waitForPort(proxyPort, manager);
         await restricted(fixture);
-        for (const path of [config, rule]) {
-            const text = await readFile(path, "utf8");
-            await writeFile(path, "not valid TOML");
-            await control(["restart", "exwall.service"]);
-            await waitUntil(
-                async () => Number(await property("NRestarts")) >= 1,
-                "Invalid policy was not retried",
-            );
-            // Each failed attempt runs ExecStopPost cleanup before the next retry.
-            await waitUntil(() => restored(fixture), "Failed start did not restore the host");
-            await writeFile(path, text);
-            await checked("reset-failed", "exwall.service");
-            await checked("restart", "exwall.service");
-            await waitUntil(
-                async () => (await property("ActiveState")) === "active",
-                "Policy repair failed",
-            );
-            await waitForPort(proxyPort, manager);
-        }
+        assert.notEqual(await allowedHostStatus(), 403);
+        await writeFile(config, "not valid TOML");
+        await control(["restart", "exwall.service"]);
+        await waitUntil(
+            async () => Number(await property("NRestarts")) >= 1,
+            "Invalid configuration was not retried",
+        );
+        // Each failed attempt runs ExecStopPost cleanup before the next retry.
+        await waitUntil(() => restored(fixture), "Failed start did not restore the host");
+        await writeFile(config, configText);
+        await checked("reset-failed", "exwall.service");
+        await checked("restart", "exwall.service");
+        await waitUntil(
+            async () => (await property("ActiveState")) === "active",
+            "Configuration repair failed",
+        );
+        await waitForPort(proxyPort, manager);
+        // Invalid rules still start the service, with no rules, so they can be repaired in the UI.
+        await writeFile(rule, "not valid TOML");
+        await checked("restart", "exwall.service");
+        await waitUntil(
+            async () => (await property("ActiveState")) === "active",
+            "Invalid rules stopped the service",
+        );
+        await waitForPort(proxyPort, manager);
+        await restricted(fixture);
+        assert.equal(await allowedHostStatus(), 403);
+        await writeFile(rule, ruleText);
+        await checked("restart", "exwall.service");
+        await waitUntil(
+            async () => (await property("ActiveState")) === "active",
+            "Rule repair failed",
+        );
+        await waitForPort(proxyPort, manager);
+        assert.notEqual(await allowedHostStatus(), 403);
         await restricted(fixture);
         const restarts = Number(await property("NRestarts"));
         await checked("kill", "--signal=KILL", "--kill-whom=main", "exwall.service");

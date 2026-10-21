@@ -81,6 +81,11 @@ export function ChevronIcon(props: IconProps) {
     return <Icon {...props} paths={["m6 9 6 6 6-6"]} />;
 }
 
+/** Angle brackets marking source code. */
+export function CodeIcon(props: IconProps) {
+    return <Icon {...props} paths={["m8 6-6 6 6 6", "m16 6 6 6-6 6"]} />;
+}
+
 /** A magnifying glass for filter fields. */
 export function SearchIcon(props: IconProps) {
     return <Icon {...props} paths={["M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14", "m20 20-4-4"]} />;

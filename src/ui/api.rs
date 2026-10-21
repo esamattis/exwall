@@ -3,10 +3,11 @@
 use super::{
     auth::{AuthError, Authenticator},
     rule_files::{RuleFiles, WriteOutcome},
-    rules_doc::{RulesDocError, RulesDocument, edit_document, read_document},
+    rules_doc::{RuleFileContents, RulesDocument, edit_document, inspect_document},
 };
 use crate::{
     error::ErrorChain,
+    policy::RuleSet,
     runtime::{ReloadError, ReloadHandle},
     telemetry::DomainStats,
 };
@@ -56,15 +57,6 @@ pub enum InternalError {
         /// The filesystem error.
         #[source]
         source: io::Error,
-    },
-    /// A stored rules file is unreadable.
-    #[error("read rules file {name}")]
-    Document {
-        /// The rules file name.
-        name: String,
-        /// The parse failure.
-        #[source]
-        source: RulesDocError,
     },
     /// A blocking file task failed.
     #[error("file task failed")]
@@ -185,6 +177,55 @@ struct RuleFileSummary {
     rules: Option<usize>,
 }
 
+/// The complete text of a rule file, replacing it verbatim when saved.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RulesText {
+    /// The exact file contents the edit started from.
+    revision: String,
+    /// The new file contents.
+    toml: String,
+}
+
+/// A rule file edit, either as form drafts or as raw TOML.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RulesEdit {
+    /// Allow tables merged into the file while preserving comments.
+    Drafts(RulesDocument),
+    /// The complete new file text.
+    Text(RulesText),
+}
+
+impl RulesEdit {
+    /// The file contents the edit started from.
+    fn revision(&self) -> &str {
+        match self {
+            Self::Drafts(draft) => &draft.revision,
+            Self::Text(text) => &text.revision,
+        }
+    }
+
+    /// Validate the edit of the rule file `name`, currently `current`, and render its new contents.
+    ///
+    /// Drafts can only edit a valid file; an invalid one must be replaced as TOML.
+    fn render(&self, name: &str, current: &RuleFileContents) -> Result<String, ApiError> {
+        let invalid = |error: &(dyn std::error::Error + 'static)| {
+            ApiError::Validation(ErrorChain(error).to_string())
+        };
+        match self {
+            Self::Drafts(_) if current.rules.is_none() => Err(ApiError::Validation(format!(
+                "{name} is invalid and can only be edited as TOML"
+            ))),
+            Self::Drafts(draft) => edit_document(draft, name).map_err(|error| invalid(&error)),
+            Self::Text(text) => {
+                RuleSet::parse(&text.toml, name).map_err(|error| invalid(&error))?;
+                Ok(text.toml.clone())
+            }
+        }
+    }
+}
+
 /// Why a JSON body could not be decoded.
 enum BodyError {
     /// The body did not arrive within the deadline.
@@ -299,7 +340,7 @@ impl Api {
         Ok(with_cleared_cookie(json(StatusCode::OK, &body)))
     }
 
-    /// List every editable rule file with its number of allow tables.
+    /// List every editable rule file with its number of allow tables, if it is valid.
     async fn list_rule_files(&self) -> Result<Vec<RuleFileSummary>, InternalError> {
         let rules = self.rules.clone();
         tokio::task::spawn_blocking(move || {
@@ -310,8 +351,8 @@ impl Api {
                     let count = rules
                         .read(&name)
                         .ok()
-                        .and_then(|text| read_document(text).ok())
-                        .map(|document| document.rules.len());
+                        .and_then(|text| inspect_document(text, &name).rules)
+                        .map(|drafts| drafts.len());
                     RuleFileSummary {
                         path: rules.path(&name).to_string_lossy().into_owned(),
                         name,
@@ -324,27 +365,26 @@ impl Api {
         .await?
     }
 
-    /// Validate and write edited rules to the file `name`, then activate them before responding.
+    /// Validate and write edited rules or TOML to the file `name`, then activate them before responding.
     ///
     /// The response is sent only after the complete ruleset has been published,
     /// so a successful save is already enforced. If publishing fails, the write
     /// is kept and reported as not activated.
     async fn save_rules(&self, name: &str, request: Request) -> Result<Response, ApiError> {
         // No shared lock is held while waiting for client-controlled bytes.
-        let draft: RulesDocument = read_json(request).await.map_err(|error| match error {
+        let edit: RulesEdit = read_json(request).await.map_err(|error| match error {
             BodyError::Timeout => ApiError::BodyTimeout,
             BodyError::Invalid => ApiError::InvalidRules,
         })?;
         let _guard = self.lock.lock().await;
         let current = self.read_rules(name).await?;
-        if draft.revision != current.revision {
+        if edit.revision() != current.revision {
             return Err(ApiError::Conflict(name.to_owned()));
         }
-        let edited = edit_document(&draft, name)
-            .map_err(|error| ApiError::Validation(ErrorChain(&error).to_string()))?;
+        let edited = edit.render(name, &current)?;
         let rules = self.rules.clone();
         let file = name.to_owned();
-        let revision = draft.revision.clone();
+        let revision = current.revision;
         let outcome = tokio::task::spawn_blocking(move || {
             rules.replace_if_unchanged(&file, &revision, &edited)
         })
@@ -361,20 +401,20 @@ impl Api {
         Ok(json(StatusCode::OK, &self.read_rules(name).await?))
     }
 
-    /// Read the rules file `name` into editable drafts off the async runtime.
-    async fn read_rules(&self, name: &str) -> Result<RulesDocument, ApiError> {
+    /// Read the rules file `name` off the async runtime, with drafts if it is valid.
+    ///
+    /// An invalid file is not an error: it is returned with the reason so it
+    /// can be repaired as TOML.
+    async fn read_rules(&self, name: &str) -> Result<RuleFileContents, ApiError> {
         let rules = self.rules.clone();
         let file = name.to_owned();
-        let text = tokio::task::spawn_blocking(move || rules.read(&file))
-            .await
-            .map_err(InternalError::Task)?
-            .map_err(|source| rules_file_error(name, source))?;
-        read_document(text).map_err(|source| {
-            ApiError::Internal(InternalError::Document {
-                name: name.to_owned(),
-                source,
-            })
+        // Validation compiles every regex, so it runs off the async runtime too.
+        tokio::task::spawn_blocking(move || {
+            rules.read(&file).map(|text| inspect_document(text, &file))
         })
+        .await
+        .map_err(InternalError::Task)?
+        .map_err(|source| rules_file_error(name, source))
     }
 }
 
@@ -663,7 +703,9 @@ mod tests {
         assert_eq!(stale.status(), StatusCode::CONFLICT);
         let body: serde_json::Value = decode(stale).await;
         assert_eq!(body["error"], "05-web.toml changed. Reload before saving.");
-        let mut draft = harness.api.read_rules("05-web.toml").await.unwrap();
+        let mut draft: RulesDocument =
+            decode(harness.api.response(request(Method::GET, WEB_RULES_PATH, auth, &())).await)
+                .await;
         draft.rules[0].fields.insert("domain_regex".into(), "[".into());
         let invalid =
             harness.api.response(request(Method::PUT, WEB_RULES_PATH, auth, &draft)).await;
@@ -762,6 +804,61 @@ mod tests {
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{missing}");
         }
         assert_eq!(fs::read_to_string(temporary.path().join("outside.toml")).unwrap(), "");
+    }
+
+    /// Broken files load with their error and can be repaired by saving validated TOML.
+    #[tokio::test]
+    async fn repairs_broken_files_as_toml() {
+        let temporary = tempfile::tempdir().unwrap();
+        let harness = harness(temporary.path(), "secret");
+        fs::create_dir_all(&harness.rules).unwrap();
+        fs::write(harness.rules.join("05-web.toml"), "[[allow]]\nunknown = 1\n").unwrap();
+        let basic = format!("Basic {}", STANDARD.encode("admin:secret"));
+        let auth = Some(("authorization", basic.as_str()));
+        let listing = harness.api.response(request(Method::GET, "/api/rules", auth, &())).await;
+        let files: Vec<RuleFileSummary> = decode(listing).await;
+        assert_eq!(files[0].rules, None);
+        let response = harness.api.response(request(Method::GET, WEB_RULES_PATH, auth, &())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let broken: RuleFileContents = decode(response).await;
+        assert_eq!(broken.revision, "[[allow]]\nunknown = 1\n");
+        assert_eq!(broken.rules, None);
+        assert!(broken.error.unwrap().contains("unknown field"));
+
+        let form = RulesDocument {
+            revision: broken.revision.clone(),
+            rules: Vec::new(),
+        };
+        let response =
+            harness.api.response(request(Method::PUT, WEB_RULES_PATH, auth, &form)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = decode(response).await;
+        assert_eq!(body["error"], "05-web.toml is invalid and can only be edited as TOML");
+        let save = |revision: &str, toml: &str| {
+            request(
+                Method::PUT,
+                WEB_RULES_PATH,
+                auth,
+                &serde_json::json!({"revision": revision, "toml": toml}),
+            )
+        };
+        let response = harness.api.response(save(&broken.revision, "[[allow]\n")).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = decode(response).await;
+        assert!(body["error"].as_str().unwrap().contains("line 1"), "{body}");
+        let response = harness.api.response(save("stale", "")).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(fs::read_to_string(harness.rules.join("05-web.toml")).unwrap(), broken.revision);
+
+        let fixed = "# Repaired\n[[allow]]\ndomain = 'fixed.test'   # kept verbatim\n";
+        let response = harness.api.response(save(&broken.revision, fixed)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let saved: RuleFileContents = decode(response).await;
+        assert_eq!(saved.revision, fixed);
+        assert_eq!(saved.error, None);
+        assert_eq!(saved.rules.unwrap().len(), 1);
+        assert_eq!(fs::read_to_string(harness.rules.join("05-web.toml")).unwrap(), fixed);
+        assert!(harness.store.load().rules.dns_rule(&Host::new("fixed.test")).is_some());
     }
 
     /// Resetting traffic requires authentication and clears domains and denials.

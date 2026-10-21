@@ -8,7 +8,7 @@ use crate::{
     dns::{DnsError, DnsService, SocketUpstream},
     error::ErrorChain,
     net::{self, Stack},
-    policy::{Host, LoadError, LocalHostname, MissingDirectory, Policy, load_rules},
+    policy::{Host, LocalHostname, MissingDirectory, Policy, RuleSet, load_rules},
     proxy::{HttpUpstream, Proxy, ProxyError},
     runtime::{PolicyStore, ReloadHandle, Reloader, RulesWatcher, WatchError},
     telemetry::{self, AccessLogError, AccessLogTask},
@@ -18,7 +18,7 @@ use crate::{
     },
 };
 use rama::rt::Executor;
-use std::{collections::HashMap, future::Future, io, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, io, path::Path, sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::{
     signal::unix::{Signal, SignalKind, signal},
@@ -64,9 +64,6 @@ pub enum ServeError {
     /// The configuration is invalid.
     #[error(transparent)]
     Config(#[from] ConfigError),
-    /// The rules are invalid.
-    #[error(transparent)]
-    Rules(#[from] LoadError),
     /// The rules watcher could not start.
     #[error(transparent)]
     Watcher(#[from] WatchError),
@@ -259,7 +256,7 @@ pub async fn run(cli: &Cli, args: ServeArgs) -> Result<(), ServeError> {
     } else {
         None
     };
-    let rules = load_rules(&cli.rules_dir, MissingDirectory::Empty)?;
+    let rules = initial_rules(&cli.rules_dir);
     let store = Arc::new(PolicyStore::new(Policy::new(config.runtime, rules)));
     let authority = Arc::new(Authority::load(&args.ca_dir).map_err(ServeError::Ca)?);
     let http =
@@ -337,6 +334,24 @@ pub async fn run(cli: &Cli, args: ServeArgs) -> Result<(), ServeError> {
         None => Ok(()),
     };
     outcome.and(graceful_result).and(drain_result)
+}
+
+/// Load the startup rules, or none if any rule file is invalid.
+///
+/// Invalid rules must not stop the service: it starts with an empty ruleset,
+/// which blocks everything, so the files can be repaired from the web UI and
+/// the watcher or a save activates them.
+fn initial_rules(directory: &Path) -> RuleSet {
+    match load_rules(directory, MissingDirectory::Empty) {
+        Ok(rules) => rules,
+        Err(error) => {
+            tracing::error!(
+                error = %ErrorChain(&error),
+                "cannot load rules; starting with no rules, so all traffic is blocked until they are fixed"
+            );
+            RuleSet::default()
+        }
+    }
 }
 
 /// Read the kernel hostname for the DNS exception, disabling it if unavailable.
@@ -448,6 +463,16 @@ mod tests {
         );
         supervisor.shutdown().await;
         assert!(supervisor.tasks.is_empty());
+    }
+
+    /// Valid rules load at startup; an invalid rule file starts the service with no rules.
+    #[test]
+    fn invalid_rules_start_with_no_rules() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("a.toml"), "[[allow]]\ndomain = 'a.test'\n").unwrap();
+        assert_eq!(initial_rules(directory.path()).len(), 1);
+        std::fs::write(directory.path().join("b.toml"), "[[allow").unwrap();
+        assert!(initial_rules(directory.path()).is_empty());
     }
 
     /// Build a reloader handle whose reloader is never run.

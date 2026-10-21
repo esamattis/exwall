@@ -12,7 +12,6 @@ Group=exwall
 LogsDirectory=exwall
 LogsDirectoryMode=0700
 ExecStartPre=+/usr/local/bin/exwall hook guard
-ExecStartPre=/usr/local/bin/exwall check
 ExecStartPre=+/usr/local/bin/exwall hook start
 ExecStart=/usr/local/bin/exwall serve
 ExecReload=/bin/kill -HUP $MAINPID

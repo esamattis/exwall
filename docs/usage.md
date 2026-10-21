@@ -63,7 +63,9 @@ curl -fsSL https://raw.githubusercontent.com/esamattis/exwall/refs/heads/main/un
 
 Put rules in any `*.toml` file under `/etc/exwall/rules.d/`. Changes are applied
 automatically within a moment; an invalid file is reported in the journal and the
-previous rules stay active. Check your files with `sudo -u exwall exwall check`.
+previous rules stay active. If a file is invalid when exwall starts, it still
+starts but with no rules, blocking everything until the file is fixed, for example
+from the web UI. Check your files with `sudo -u exwall exwall check`.
 
 A rule allows both DNS lookups and HTTP(S) requests for its domains. Only `GET`
 and `HEAD` are allowed unless you list more methods.
@@ -171,7 +173,9 @@ ssh -L 58000:127.0.0.1:58000 your-server
   requests. Allow a blocked domain, its subdomains, a DNS-only lookup, or one
   exact request with a single click.
 - **Rules** lists every `*.toml` file in `/etc/exwall/rules.d/` and edits any
-  of them; comments and formatting are kept. Rules allowed from the Traffic
+  of them; comments and formatting are kept. **Edit as TOML** switches to a
+  text editor for the whole file. Invalid files open directly in the TOML
+  editor with the error shown above it, and are only saved once they are valid. Rules allowed from the Traffic
   page are added to `05-web.toml`, which the service creates on start. Each
   start also makes every rule file owned by `exwall` with mode `0600` so the
   UI can save it; symlinked rule files are left untouched and not shown.

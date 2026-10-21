@@ -7,7 +7,7 @@ import {
     loginBrowser,
     sessionHeaders,
 } from "#playwright_helpers/test_fixtures.mts";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fixtureOperation, fixtureRules, networkRequest } from "#playwright_helpers/client.mts";
 import { queryDns } from "#playwright_helpers/dns.mts";
@@ -549,4 +549,51 @@ test("rule files show absolute paths that copy to the clipboard", async ({
     await expect(
         page.getByRole("button", { name: `Copy path ${path}`, exact: true }),
     ).toBeVisible();
+});
+
+test("broken rule files open as TOML with their error and are repaired from the editor", async ({
+    page,
+    protocolProxy: fixture,
+}) => {
+    const ui = `http://127.0.0.1:${fixture.uiPort}`;
+    const path = join(fixture.rules, "30-broken.toml");
+    const broken = "[[allow]]\ndomain = 'repaired.test'\nunknown = 1\n";
+    await writeFile(path, broken);
+    await loginBrowser(page, ui, "integration-password");
+    await page.goto(`${ui}/rules`);
+    const files = page.getByRole("list", { name: "Rule files", exact: true });
+    const brokenFile = files.getByRole("listitem").filter({ hasText: "30-broken.toml" });
+    await expect(brokenFile.getByText("Invalid", { exact: true })).toBeVisible();
+
+    await page.goto(`${ui}/rules/30-broken.toml`);
+    const alert = page.getByRole("alert");
+    await expect(alert).toContainText("30-broken.toml is invalid");
+    await expect(alert).toContainText("unknown field `unknown`");
+    await expect(page.getByRole("button", { name: "Edit as form", exact: true })).toHaveCount(0);
+    const editor = page.locator(".cm-content");
+    await expect(editor).toContainText("domain = 'repaired.test'");
+
+    /** Replace the editor's whole text as if typed. */
+    async function replaceText(text: string) {
+        await editor.click();
+        await page.keyboard.press("ControlOrMeta+A");
+        await page.keyboard.insertText(text);
+    }
+    await replaceText("[[allow]\n");
+    await page.getByRole("button", { name: "Save changes", exact: true }).click();
+    await expect(alert).toContainText("Not saved");
+    await expect(alert).toContainText("TOML parse error at line 1");
+    expect(await readFile(path, "utf8")).toBe(broken);
+
+    const repaired = "# Repaired in the browser\n[[allow]]\ndomain = 'repaired.test'\n";
+    await replaceText(repaired);
+    await page.keyboard.press("ControlOrMeta+S");
+    await expect(page.getByText("Changes saved.", { exact: true })).toBeVisible();
+    await expect(alert).toHaveCount(0);
+    expect(await readFile(path, "utf8")).toBe(repaired);
+
+    await page.getByRole("button", { name: "Edit as form", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Rule 1", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Edit as TOML", exact: true }).click();
+    await expect(editor).toContainText("# Repaired in the browser");
 });

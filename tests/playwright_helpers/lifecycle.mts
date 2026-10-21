@@ -252,18 +252,22 @@ export async function runFixtureCheck(name: string, fixture: LifecycleFixture): 
                 break;
             }
             case "invalid-policy": {
-                for (const path of [rule, config]) {
-                    const text = await readFile(path, "utf8");
-                    await writeFile(path, "not valid TOML");
-                    for (let attempt = 0; attempt < 3; attempt++) {
-                        assert.notEqual((await failedHook()).exitCode, 0);
-                        assert.deepEqual(await firewallSnapshot(), snapshot);
-                        assert.deepEqual(await readFile(stateFile), saved);
-                        assert.equal(await forwardingSnapshot(), "1\n1\n0\n");
-                        await restricted(fixture);
-                    }
-                    await writeFile(path, text);
+                // Invalid rules never fail the hook; the service starts without rules instead.
+                await writeFile(rule, "not valid TOML");
+                await runCommand([...hook, "start"]);
+                assert.deepEqual(await firewallSnapshot(), snapshot);
+                assert.deepEqual(await readFile(stateFile), saved);
+                await restricted(fixture);
+                await writeFile(rule, originalRule);
+                await writeFile(config, "not valid TOML");
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    assert.notEqual((await failedHook()).exitCode, 0);
+                    assert.deepEqual(await firewallSnapshot(), snapshot);
+                    assert.deepEqual(await readFile(stateFile), saved);
+                    assert.equal(await forwardingSnapshot(), "1\n1\n0\n");
+                    await restricted(fixture);
                 }
+                await writeFile(config, originalConfig);
                 await runCommand([...hook, "start"]);
                 const failed = await startProcess(
                     [
@@ -289,22 +293,27 @@ export async function runFixtureCheck(name: string, fixture: LifecycleFixture): 
                 break;
             }
             case "bootstrap": {
-                for (const path of [config, rule]) {
-                    await runCommand([...hook, "stop"]);
-                    const text = await readFile(path, "utf8");
-                    await writeFile(path, "not valid TOML");
-                    for (let attempt = 0; attempt < 2; attempt++) {
-                        assert.notEqual((await failedHook()).exitCode, 0);
-                        for (const tool of ["iptables", "ip6tables"]) {
-                            assert.match(await runCommand([tool, "-S", "OUTPUT"]), /EXWALL_GUARD/);
-                        }
-                        await restricted(fixture);
+                await runCommand([...hook, "stop"]);
+                await writeFile(config, "not valid TOML");
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    assert.notEqual((await failedHook()).exitCode, 0);
+                    for (const tool of ["iptables", "ip6tables"]) {
+                        assert.match(await runCommand([tool, "-S", "OUTPUT"]), /EXWALL_GUARD/);
                     }
-                    await runCommand([...hook, "stop"]);
-                    assert.deepEqual(await firewallSnapshot(), fixture.baseline);
-                    assert.equal(await forwardingSnapshot(), fixture.sysctls);
-                    await writeFile(path, text);
+                    await restricted(fixture);
                 }
+                await runCommand([...hook, "stop"]);
+                assert.deepEqual(await firewallSnapshot(), fixture.baseline);
+                assert.equal(await forwardingSnapshot(), fixture.sysctls);
+                await writeFile(config, originalConfig);
+                // Invalid rules install full enforcement, not only the bootstrap guard.
+                await writeFile(rule, "not valid TOML");
+                await runCommand([...hook, "start"]);
+                assert.deepEqual(await firewallSnapshot(), snapshot);
+                await restricted(fixture);
+                await runCommand([...hook, "stop"]);
+                assert.deepEqual(await firewallSnapshot(), fixture.baseline);
+                await writeFile(rule, originalRule);
                 break;
             }
             case "corrupt-state": {
