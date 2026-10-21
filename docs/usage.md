@@ -6,6 +6,9 @@ the installer adds to the system trust store. Blocked web requests get a 403.
 
 ## Install
 
+exwall supports Ubuntu with systemd-resolved running. The installer checks for
+this before making any changes and stops with an error on other systems.
+
 ```sh
 sudo apt-get install iptables openssl ca-certificates
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/esamattis/exwall/refs/heads/main/install.sh)"

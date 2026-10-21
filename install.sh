@@ -69,6 +69,29 @@ require_tools() {
     fi
 }
 
+# Stop before downloading, building, or changing anything when the host lacks
+# a facility exwall depends on. Only Ubuntu is supported, so other systems are
+# told what is missing here instead of failing midway or when the service starts.
+check_host() {
+    [[ "$(uname -s)" == Linux ]] || die "exwall only supports Linux"
+    [[ -d /run/systemd/system ]] || die "exwall requires a host booted with systemd"
+    require_tools systemctl iptables ip6tables sysctl openssl update-ca-certificates runuser useradd
+
+    # The CA goes into the Debian/Ubuntu trust store, and TLS clients are
+    # pointed at the bundle that update-ca-certificates generates.
+    if [[ ! -d /usr/local/share/ca-certificates || ! -f /etc/ssl/certs/ca-certificates.crt ]]; then
+        die "missing the Debian/Ubuntu CA trust store (/usr/local/share/ca-certificates and /etc/ssl/certs/ca-certificates.crt); install the ca-certificates package (only Ubuntu is supported)"
+    fi
+
+    # The service is bound to systemd-resolved, and the firewall exempts its account.
+    if ! systemctl is-active --quiet systemd-resolved.service; then
+        die "exwall requires systemd-resolved.service to be running"
+    fi
+    if ! id systemd-resolve >/dev/null 2>&1; then
+        die "missing the systemd-resolve user that systemd-resolved runs as"
+    fi
+}
+
 # Resolve which release tag to install. The caller can pass an explicit tag;
 # otherwise query the GitHub API for the latest release.
 resolve_tag() {
@@ -213,7 +236,12 @@ install_system() {
     for file in config-default.toml example-rules.toml systemd/exwall.service; do
         [[ -f "${support_dir}/${file}" ]] || die "missing installer file: ${support_dir}/${file}"
     done
-    require_tools systemctl iptables ip6tables sysctl openssl update-ca-certificates runuser useradd
+    # The default configuration exempts APT's _apt account, and the service
+    # refuses to start when a bypass user is missing. Existing configurations
+    # belong to the operator and are validated when the service starts.
+    if [[ ! -f /etc/exwall/config.toml && ! -f /etc/mitmwall/config.toml ]] && ! id _apt >/dev/null 2>&1; then
+        die "missing the _apt user that the default configuration exempts from the firewall (only Ubuntu is supported)"
+    fi
     if systemctl is-active --quiet mitmwall.service; then
         die "stop mitmwall.service before installing exwall; both use the same interception ports"
     fi
@@ -323,16 +351,19 @@ install_local() {
 
 # Dispatch between release downloads and local binary installs.
 main() {
-    [[ "$(uname -s)" == Linux ]] || die "exwall only supports Linux"
+    case "${1:-}" in
+        -h | --help)
+            echo "usage: install.sh [TAG | --binary PATH]"
+            echo "Without arguments, a git checkout is built and installed; otherwise the latest release is."
+            return
+            ;;
+    esac
 
+    check_host
     case "${1:-}" in
         --binary)
             [[ -n "${2:-}" ]] || die "usage: install.sh --binary PATH"
             install_local "$2"
-            ;;
-        -h | --help)
-            echo "usage: install.sh [TAG | --binary PATH]"
-            echo "Without arguments, a git checkout is built and installed; otherwise the latest release is."
             ;;
         "")
             local dir
