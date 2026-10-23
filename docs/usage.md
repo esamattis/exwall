@@ -119,7 +119,9 @@ Path patterns match the whole path, ignoring the query string:
 | `/books/:id?`         | `/books` and `/books/42`         |
 | `/docs{/}?`           | `/docs` and `/docs/`             |
 
-Use `pathname_regex = '^/downloads/[^/]+$'` for anything patterns cannot express.
+Use `pathname = "/v1/items:batchGet"` to allow exactly one path; it has no special
+characters, so `:`, `*`, and `(` match themselves. Use
+`pathname_regex = '^/downloads/[^/]+$'` for anything patterns cannot express.
 When several rules match a request, the first one (by file name, then order in
 the file) decides its headers.
 

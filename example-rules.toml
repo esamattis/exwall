@@ -19,6 +19,9 @@
 #                                   # Use methods = "ANY" to allow all methods.
 # stream = true                     # Accepted for compatibility; Rama always streams.
 #
+# pathname = "/v1/items:batchGet"       # Exact pathname filter (optional).
+#                                         # No special characters; matches only this path.
+#                                         # May be a single string or an array of paths.
 # pathname_pattern = "/api/:ver/upload"  # URL pathname filter (optional).
 #                                         # Matches only the path, not ?query or #fragment.
 #                                         # May be a single string or an array of patterns.
@@ -41,8 +44,8 @@
 #
 # * Each `[[allow]]` must have exactly one of `domain` or `domain_regex`.
 # * `include_subdomains` is only valid with `domain`.
-# * `pathname_regex` and `pathname_pattern` may both be set; a request matches
-#   if it satisfies any of the configured pathname filters.
+# * `pathname`, `pathname_pattern`, and `pathname_regex` may be combined; a
+#   request matches if it satisfies any of the configured pathname filters.
 # * `inject_headers` must be a non-empty list of
 #   { name = "Header-Name", value = "..." } tables.
 # * Unknown keys are rejected.
@@ -50,6 +53,8 @@
 # ─── Matching behavior ────────────────────────────────────────────────────────
 #
 # * `domain_regex` is matched case-insensitively (partial match).
+# * `pathname` must equal the entire pathname, character for character.
+#   Characters such as `:`, `*`, and `(` have no special meaning in it.
 # * `pathname_regex` need only match part of the pathname (partial match).
 # * `pathname_pattern` must match the entire pathname (full match) and supports:
 #   - matching is done against the URL pathname only

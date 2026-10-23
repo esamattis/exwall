@@ -275,8 +275,11 @@ export async function resetTraffic(): Promise<void> {
     await api("traffic/reset", "POST", {});
 }
 
-/** Escape pathname characters so an allow rule matches exactly one literal path. */
-export function exactPathRegex(pathname: string): string {
+/**
+ * Escape pathname characters into the regex that older versions of the UI saved to allow
+ * exactly one literal path.
+ */
+function exactPathRegex(pathname: string): string {
     return `\\A${pathname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\z`;
 }
 
@@ -332,6 +335,7 @@ export function coversDomain({
         (dnsOnly ||
             (rule.fields.dns_only !== true &&
                 rule.fields.methods === "ANY" &&
+                rule.fields.pathname === undefined &&
                 rule.fields.pathname_pattern === undefined &&
                 rule.fields.pathname_regex === undefined &&
                 rule.fields.inject_headers === undefined));
@@ -345,8 +349,10 @@ export function coversRequest(request: HttpRequest): (rule: RuleDraft) => boolea
         rule.fields.dns_only !== true &&
         Array.isArray(rule.fields.methods) &&
         rule.fields.methods.some((method) => method === request.method) &&
-        rule.fields.pathname_regex === pathnameRegex &&
         rule.fields.pathname_pattern === undefined &&
+        // Rules saved before exact pathnames existed used an escaped regex instead.
+        ((rule.fields.pathname === request.pathname && rule.fields.pathname_regex === undefined) ||
+            (rule.fields.pathname_regex === pathnameRegex && rule.fields.pathname === undefined)) &&
         rule.fields.inject_headers === undefined;
 }
 
@@ -389,7 +395,7 @@ export async function allowRequest(request: HttpRequest): Promise<RulesDocument>
     return ensureWebRule(document, changed, coversRequest(request), {
         domain: request.domain,
         methods: [request.method],
-        pathname_regex: exactPathRegex(request.pathname),
+        pathname: request.pathname,
     });
 }
 

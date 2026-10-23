@@ -429,7 +429,7 @@ test("last 200 unique HTTP denials refresh manually and allow only an exact meth
     expect(document.rules[0]!.fields).toEqual({
         domain: "127.0.0.1",
         methods: ["POST"],
-        pathname_regex: "\\A/denied/:item\\*\\+\\(x\\)\\z",
+        pathname,
     });
     await expect.poll(async () => (await http(`${pathname}?another=query`)).status).toBe(200);
     for (const [path, method] of [
@@ -441,6 +441,36 @@ test("last 200 unique HTTP denials refresh manually and allow only an exact meth
     ]) {
         expect((await http(path!, method!)).status).toBe(403);
     }
+    await button.click();
+    await expect(button).toBeEnabled();
+    expect(
+        (
+            await (
+                await page.request.get(`${ui}/api/rules/05-web.toml`, {
+                    headers: await sessionHeaders(page),
+                })
+            ).json()
+        ).rules,
+    ).toHaveLength(1);
+    // Rules saved by older versions as an escaped regex still count as allowing the request.
+    const legacy: RulesDocument = await (
+        await page.request.get(`${ui}/api/rules/05-web.toml`, {
+            headers: await sessionHeaders(page),
+        })
+    ).json();
+    legacy.rules[0]!.fields = {
+        domain: "127.0.0.1",
+        methods: ["POST"],
+        pathname_regex: "\\A/denied/:item\\*\\+\\(x\\)\\z",
+    };
+    expect(
+        (
+            await page.request.put(`${ui}/api/rules/05-web.toml`, {
+                headers: await sessionHeaders(page),
+                data: legacy,
+            })
+        ).status(),
+    ).toBe(200);
     await button.click();
     await expect(button).toBeEnabled();
     expect(
@@ -510,8 +540,8 @@ test("last 200 unique HTTP denials refresh manually and allow only an exact meth
         "true",
     );
     await expect(
-        page.getByRole("textbox", { name: "Rule 1 path regexes", exact: true }),
-    ).toHaveValue("\\A/allowed\\z");
+        page.getByRole("textbox", { name: "Rule 1 exact paths", exact: true }),
+    ).toHaveValue("/allowed");
 
     // A rule fragment opens and scrolls to a rule far down a long file.
     const current: RulesDocument = await (

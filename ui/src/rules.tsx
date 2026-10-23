@@ -697,14 +697,14 @@ function Editor({
                         also allows HTTP and HTTPS requests that match its methods and paths.
                     </li>
                     <li>
-                        Enter one domain, pattern, or regex per line. Leave paths empty to allow
-                        every path.
+                        Enter one domain, path, pattern, or regex per line. Leave paths empty to
+                        allow every path.
                     </li>
                     <li>
-                        Path patterns use URLPattern syntax such as{" "}
-                        <code className="text-zinc-300">/api/*</code> or{" "}
-                        <code className="text-zinc-300">/items/:id</code>. Path regexes match the
-                        pathname without the query string.
+                        Exact paths match one path character for character. Path patterns use
+                        URLPattern syntax such as <code className="text-zinc-300">/api/*</code> or{" "}
+                        <code className="text-zinc-300">/items/:id</code>. All path filters match
+                        the pathname without the query string.
                     </li>
                     <li>Injected headers are only added to HTTPS requests.</li>
                 </ul>
@@ -816,7 +816,11 @@ function RuleSummary({ fields }: { fields: Record<string, FieldValue> }) {
     const domains = lines(regex ? fields.domain_regex : fields.domain).filter((item) =>
         item.trim(),
     );
-    const paths = [...lines(fields.pathname_pattern), ...lines(fields.pathname_regex)];
+    const paths = [
+        ...lines(fields.pathname),
+        ...lines(fields.pathname_pattern),
+        ...lines(fields.pathname_regex),
+    ];
     const headers = headerRows(fields.inject_headers).length;
     const methods = lines(fields.methods);
     let methodLabel = "GET, HEAD";
@@ -1102,6 +1106,18 @@ function RuleFields({
                     )}
                 </div>
                 <div>
+                    <label className="field-label" htmlFor={`rule-${number}-paths`}>
+                        Exact paths
+                    </label>
+                    <LinesField
+                        id={`rule-${number}-paths`}
+                        label={`${name} exact paths`}
+                        value={fields.pathname}
+                        placeholder={"/api/status\n/v1/items:batchGet"}
+                        onChange={(value) => set("pathname", value)}
+                    />
+                </div>
+                <div>
                     <label className="field-label" htmlFor={`rule-${number}-patterns`}>
                         Path patterns
                     </label>
@@ -1125,8 +1141,8 @@ function RuleFields({
                         onChange={(value) => set("pathname_regex", value)}
                     />
                     <p className="field-hint">
-                        A request matching any pattern or regex is allowed. Leave both empty to
-                        allow every path.
+                        A request matching any exact path, pattern, or regex is allowed. Leave all
+                        three empty to allow every path.
                     </p>
                 </div>
             </div>

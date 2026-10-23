@@ -92,6 +92,8 @@ struct RawRule {
     dns_only: Option<bool>,
     /// Method constraint: `"ANY"` or a list.
     methods: Option<Strings>,
+    /// Exact pathname constraints.
+    pathname: Option<Strings>,
     /// URLPattern-style pathname constraints.
     pathname_pattern: Option<Strings>,
     /// Pathname regex constraints.
@@ -262,7 +264,7 @@ impl Rule {
         exact || self.domain_regexes.iter().any(|regex| regex.is_match(host.as_str(), &self.id))
     }
 
-    /// Report whether the rule restricts pathnames with patterns or regexes.
+    /// Report whether the rule restricts pathnames with exact paths, patterns, or regexes.
     pub fn has_path_constraint(&self) -> bool {
         !self.paths.is_empty()
     }
@@ -299,6 +301,11 @@ impl Rule {
         }
         let methods = compile_methods(raw.methods)?;
         let mut paths = Vec::new();
+        if let Some(pathnames) = raw.pathname {
+            for pathname in pathnames.items()? {
+                paths.push(Matcher::build(&format!("\\A{}\\z", regex::escape(&pathname)))?);
+            }
+        }
         if let Some(regexes) = raw.pathname_regex {
             for source in regexes.items()? {
                 paths.push(Matcher::compile(&source, false)?);
@@ -619,6 +626,44 @@ methods = 'ANY'
             crate::error::ErrorChain(&error).to_string(),
             "file.toml:allow#2: expected a nonempty string or list of nonempty strings"
         );
+    }
+
+    /// Exact pathnames match only themselves, with no pattern or regex syntax.
+    #[test]
+    fn exact_pathnames_match_literally() {
+        for (pathname, others) in [
+            ("/v1/items/123:batchGet", vec!["/v1/items/123:delete", "/v1/items/123"]),
+            ("/glob/*.js", vec!["/glob/a.js", "/glob/a/b.js"]),
+            ("/wiki/Foo_(bar)", vec!["/wiki/Foo_bar"]),
+            ("/t/{id}", vec!["/t/id"]),
+            ("/time/12:30", vec!["/time/12:31"]),
+            ("/proxy/https://example.com/x", vec!["/proxy/https://example.com/y"]),
+            ("/a:b/[x]/c++", vec!["/a:b/x/c"]),
+            ("/back\\slash.", vec!["/back\\slashx"]),
+        ] {
+            let rules = rules(&format!(
+                "[[allow]]\ndomain = 'x.test'\npathname = [\"{}\"]\n",
+                pathname.replace('\\', "\\\\")
+            ));
+            assert!(http(&rules, "x.test", "GET", pathname).is_some(), "{pathname}");
+            assert!(
+                http(&rules, "x.test", "GET", &format!("{pathname}?query=1")).is_some(),
+                "{pathname}"
+            );
+            for other in [format!("{pathname}/"), format!("/prefix{pathname}")] {
+                assert!(http(&rules, "x.test", "GET", &other).is_none(), "{pathname}: {other}");
+            }
+            for other in others {
+                assert!(http(&rules, "x.test", "GET", other).is_none(), "{pathname}: {other}");
+            }
+        }
+        let combined = rules(
+            "[[allow]]\ndomain = 'x.test'\npathname = '/exact'\npathname_pattern = '/items/:id'\n",
+        );
+        assert!(http(&combined, "x.test", "GET", "/exact").is_some());
+        assert!(http(&combined, "x.test", "GET", "/items/1").is_some());
+        assert!(http(&combined, "x.test", "GET", "/other").is_none());
+        assert!(RuleSet::parse("[[allow]]\ndomain = 'x'\npathname = ''", "test").is_err());
     }
 
     /// A pathname regex exhausting its backtracking budget is treated as not matching.

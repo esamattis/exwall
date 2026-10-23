@@ -203,6 +203,7 @@ mod tests {
         let fields = serde_json::json!({
             "domain_regex": [r"^one\.test$", r"^two\.test$"],
             "methods": ["GET", "POST"],
+            "pathname": "/api/items:batchGet",
             "pathname_pattern": "/api/*",
             "pathname_regex": "^/api/",
             "stream": false,
