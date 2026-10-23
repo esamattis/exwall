@@ -124,6 +124,17 @@ transparent traffic. CONNECT performs TLS interception and every inner HTTP
 request is filtered; it never grants an unrestricted byte tunnel. Conflicting
 request authorities, Host headers, and TLS server names are rejected.
 
+### Testing WebSockets manually
+
+On a host running exwall, allow `echo.websocket.org` and connect to its echo
+server with `wscat` as a non-bypass user:
+
+```sh
+mise exec -- pnx wscat -c wss://echo.websocket.org/whatever
+```
+
+Every message you type is echoed back.
+
 ## E2E tests
 
 Install Chromium once with
