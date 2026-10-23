@@ -231,24 +231,68 @@ export function FilePath({ path }: { path: string }) {
     );
 }
 
-/** A page title with an optional description and right-aligned actions. */
+/**
+ * A page title with an optional description, page actions below it, and a
+ * refresh control pinned to the top-right corner on every page.
+ */
 export function PageHeader({
     title,
     description,
+    refresh,
     actions,
 }: {
     title: string;
     description: ReactNode;
+    /** Controls for reloading the page's data, usually a `RefreshButton`. */
+    refresh?: ReactNode;
     actions?: ReactNode;
 }) {
     return (
-        <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
-            <div className="min-w-0">
-                <h1 className="text-2xl font-semibold tracking-tight text-white">{title}</h1>
-                <p className="mt-1 max-w-2xl text-sm text-zinc-400">{description}</p>
+        <div className="mb-6">
+            <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                    <h1 className="text-2xl font-semibold tracking-tight text-white">{title}</h1>
+                    <p className="mt-1 max-w-2xl text-sm text-zinc-400">{description}</p>
+                </div>
+                {refresh && <div className="flex shrink-0 items-center gap-3">{refresh}</div>}
             </div>
-            {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+            {actions && <div className="mt-4 flex flex-wrap items-center gap-2">{actions}</div>}
         </div>
+    );
+}
+
+/** The button that reloads a page's data, placed in the `PageHeader` refresh slot. */
+export function RefreshButton({
+    busy = false,
+    disabled = false,
+    updatedAt,
+    onClick,
+}: {
+    /** Show a spinner and disable the button while data is loading. */
+    busy?: boolean;
+    disabled?: boolean;
+    /** When the shown data was loaded, in milliseconds since the epoch, or 0 if never. */
+    updatedAt?: number;
+    onClick: () => void;
+}) {
+    return (
+        <>
+            {updatedAt !== undefined && updatedAt > 0 && (
+                <span className="hidden text-xs text-zinc-500 sm:inline">
+                    Updated {new Date(updatedAt).toLocaleTimeString()}
+                </span>
+            )}
+            <button
+                type="button"
+                className="btn btn-icon btn-secondary p-2"
+                aria-label="Refresh"
+                title="Refresh"
+                disabled={busy || disabled}
+                onClick={onClick}
+            >
+                {busy ? <Spinner /> : <RefreshIcon />}
+            </button>
+        </>
     );
 }
 

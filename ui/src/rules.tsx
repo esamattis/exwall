@@ -25,7 +25,7 @@ import {
     FilterInput,
     PageHeader,
     PlusIcon,
-    RefreshIcon,
+    RefreshButton,
     Segmented,
     Spinner,
     Switch,
@@ -169,16 +169,8 @@ export function RuleFilesPage() {
                         <code className="text-zinc-300">{webRulesFile}</code>.
                     </>
                 }
-                actions={
-                    <button
-                        type="button"
-                        className="btn btn-secondary"
-                        disabled={files.isFetching}
-                        onClick={() => void files.refetch()}
-                    >
-                        <RefreshIcon />
-                        Refresh
-                    </button>
+                refresh={
+                    <RefreshButton busy={files.isFetching} onClick={() => void files.refetch()} />
                 }
             />
             {content}
@@ -257,6 +249,7 @@ export function RulesPage({ file }: { file: string }) {
                 file={file}
                 path={path}
                 contents={rules.data}
+                reloading={rules.isFetching}
                 onReload={reload}
                 onDiscard={discard}
                 onSaved={() => setMode("toml")}
@@ -277,6 +270,7 @@ export function RulesPage({ file }: { file: string }) {
             linked={linked}
             scrollTarget={scrollTarget}
             onScrolled={() => setScrollTarget(null)}
+            reloading={rules.isFetching}
             onReload={reload}
             onDiscard={discard}
             onEditToml={() => setMode("toml")}
@@ -329,6 +323,7 @@ function TomlEditor({
     file,
     path,
     contents,
+    reloading,
     onReload,
     onDiscard,
     onSaved,
@@ -337,6 +332,8 @@ function TomlEditor({
     file: string;
     path: string | undefined;
     contents: RuleFileContents;
+    /** Whether the file is being loaded again. */
+    reloading: boolean;
     onReload: () => Promise<void>;
     onDiscard: () => void;
     onSaved: () => void;
@@ -405,28 +402,20 @@ function TomlEditor({
                         are saved exactly as written.
                     </>
                 }
+                refresh={
+                    <RefreshButton busy={reloading} disabled={save.isPending} onClick={reload} />
+                }
                 actions={
-                    <>
+                    onEditForm && (
                         <button
                             type="button"
                             className="btn btn-secondary"
                             disabled={save.isPending}
-                            onClick={reload}
+                            onClick={editForm}
                         >
-                            <RefreshIcon />
-                            Reload from file
+                            Edit as form
                         </button>
-                        {onEditForm && (
-                            <button
-                                type="button"
-                                className="btn btn-secondary"
-                                disabled={save.isPending}
-                                onClick={editForm}
-                            >
-                                Edit as form
-                            </button>
-                        )}
-                    </>
+                    )
                 }
             />
             {(save.error || contents.error) && (
@@ -524,6 +513,7 @@ function Editor({
     linked,
     scrollTarget,
     onScrolled,
+    reloading,
     onReload,
     onDiscard,
     onEditToml,
@@ -541,6 +531,8 @@ function Editor({
     scrollTarget: number | null;
     /** Forget the scroll target once it has been scrolled to. */
     onScrolled: () => void;
+    /** Whether the file is being loaded again. */
+    reloading: boolean;
     onReload: () => Promise<void>;
     onDiscard: () => void;
     onEditToml: () => void;
@@ -654,17 +646,11 @@ function Editor({
                         validated and enforced immediately.
                     </>
                 }
+                refresh={
+                    <RefreshButton busy={reloading} disabled={save.isPending} onClick={reload} />
+                }
                 actions={
                     <>
-                        <button
-                            type="button"
-                            className="btn btn-secondary"
-                            disabled={save.isPending}
-                            onClick={reload}
-                        >
-                            <RefreshIcon />
-                            Reload from file
-                        </button>
                         <button
                             type="button"
                             className="btn btn-secondary"

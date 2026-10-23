@@ -24,7 +24,7 @@ import {
     ErrorBanner,
     FilterInput,
     PageHeader,
-    RefreshIcon,
+    RefreshButton,
     RecordIcon,
     RelativeTime,
     Spinner,
@@ -226,27 +226,20 @@ export function TrafficPage({ view }: { view: TrafficView }) {
             <PageHeader
                 title="Traffic"
                 description="DNS lookups and HTTP(S) requests checked since exwall started or the last reset. Counters live in memory and reset on restart."
+                refresh={
+                    <RefreshButton
+                        busy={refreshing}
+                        updatedAt={updatedAt}
+                        onClick={() => {
+                            void domains.refetch();
+                            void denials.refetch();
+                            void allowances.refetch();
+                        }}
+                    />
+                }
                 actions={
                     <>
                         <CaptureButton />
-                        {updatedAt > 0 && (
-                            <span className="text-xs text-zinc-500">
-                                Updated {new Date(updatedAt).toLocaleTimeString()}
-                            </span>
-                        )}
-                        <button
-                            type="button"
-                            className="btn btn-secondary"
-                            disabled={refreshing}
-                            onClick={() => {
-                                void domains.refetch();
-                                void denials.refetch();
-                                void allowances.refetch();
-                            }}
-                        >
-                            {refreshing ? <Spinner /> : <RefreshIcon />}
-                            Refresh
-                        </button>
                         <button
                             type="button"
                             className="btn btn-secondary"
@@ -424,8 +417,8 @@ function DomainsTable({
             </EmptyState>
         ) : (
             <EmptyState title="No blocked domains yet">
-                Domains appear here when a DNS lookup or HTTP request is denied. Press Refresh to
-                load new activity.
+                Domains appear here when a DNS lookup or HTTP request is denied. Use the refresh
+                button to load new activity.
             </EmptyState>
         );
     }
