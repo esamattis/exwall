@@ -13,7 +13,7 @@ mod writer;
 pub use batcher::Batcher;
 pub use event::{Failure, Protocol, RequestEvent};
 pub use sink::{EventReceiver, EventSink, PendingEvent};
-pub use stats::{Counts, Direction, DomainStats, DomainSummary, HttpDenial, Transferred};
+pub use stats::{Counts, Direction, DomainStats, DomainSummary, HttpRequest, Transferred};
 pub use writer::{
     AccessLog, AccessLogCloser, AccessLogError, AccessLogTask, AccessLogWriter, start,
 };

@@ -273,7 +273,7 @@ pub struct Api {
     rules: RuleFiles,
     /// Activates saved rules.
     reload: ReloadHandle,
-    /// Domain counters, transfer totals, and denials.
+    /// Domain counters, transfer totals, and recent HTTP requests.
     stats: DomainStats,
     /// The active policy, whose blocking the UI can pause.
     policy: Arc<PolicyStore>,
@@ -354,6 +354,9 @@ impl Api {
             }
             (Method::GET, "/api/http-denials") => {
                 Ok(json(StatusCode::OK, &self.stats.denials_snapshot()))
+            }
+            (Method::GET, "/api/http-allowances") => {
+                Ok(json(StatusCode::OK, &self.stats.allowances_snapshot()))
             }
             (Method::GET, "/api/domains") => Ok(json(StatusCode::OK, &self.stats.snapshot())),
             (Method::POST, "/api/traffic/reset") => {
@@ -1007,7 +1010,7 @@ mod tests {
         assert!(harness.store.load().rules.dns_rule(&Host::new("fixed.test")).is_some());
     }
 
-    /// Resetting traffic requires authentication and clears domains and denials.
+    /// Resetting traffic requires authentication and clears domains and requests.
     #[tokio::test]
     async fn resets_traffic_statistics() {
         let temporary = tempfile::tempdir().unwrap();
@@ -1015,6 +1018,7 @@ mod tests {
         let stats = &harness.api.stats;
         stats.record(&Host::new("example.com"), crate::telemetry::Protocol::Dns, true);
         stats.record_denial(&Host::new("example.com"), "GET", "/denied");
+        stats.record_allowance(&Host::new("example.com"), "GET", "/allowed", None);
         let body = serde_json::json!({});
         let anonymous = request(Method::POST, "/api/traffic/reset", None, &body);
         let response = harness.api.response(anonymous).await;
@@ -1027,6 +1031,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert!(stats.snapshot().is_empty());
         assert!(stats.denials_snapshot().is_empty());
+        assert!(stats.allowances_snapshot().is_empty());
     }
 
     /// Reject cross-origin mutations, unknown endpoints, methods, and disabled credentials.

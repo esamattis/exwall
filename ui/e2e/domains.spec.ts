@@ -305,15 +305,17 @@ firewallTest(
     },
 );
 
-/** Current metadata for one retained HTTP policy denial. */
-interface HttpDenial {
+/** Current metadata for one retained HTTP request and its repeats. */
+interface HttpRequest {
     domain: string;
     method: string;
     pathname: string;
+    rule?: string;
+    count: number;
     timestamp: string;
 }
 
-test("last 100 HTTP denials refresh manually and allow only an exact method and pathname", async ({
+test("last 200 unique HTTP denials refresh manually and allow only an exact method and pathname", async ({
     page,
     protocolProxy: fixture,
 }) => {
@@ -328,9 +330,9 @@ test("last 100 HTTP denials refresh manually and allow only an exact method and 
             method,
             headers: { Host: `127.0.0.1:${fixture.upstreamPort}` },
         });
-    /** Read the authenticated denial API without changing the manually refreshed table. */
-    const snapshot = async (): Promise<HttpDenial[]> => {
-        const response = await page.request.get(`${ui}/api/http-denials`, {
+    /** Read an authenticated request API without changing the manually refreshed table. */
+    const snapshot = async (endpoint = "http-denials"): Promise<HttpRequest[]> => {
+        const response = await page.request.get(`${ui}/api/${endpoint}`, {
             headers: await sessionHeaders(page),
         });
         expect(response.status()).toBe(200);
@@ -343,31 +345,38 @@ test("last 100 HTTP denials refresh manually and allow only an exact method and 
     await expect(section.getByText("No blocked requests yet")).toBeVisible();
     expect(await queryDns("127.0.0.1", fixture.dnsPort, "denied.test")).toBe(5);
     expect((await http("/allowed?upstream_status=502", "GET")).status).toBe(502);
-    for (let index = 0; index < 104; index += 1) {
+    for (let index = 0; index < 204; index += 1) {
         expect((await http(`/denied/${index}`)).status).toBe(403);
     }
+    // Repeats are grouped, so they neither take extra slots nor evict older requests.
+    expect((await http("/denied/10")).status).toBe(403);
+    expect((await http("/denied/10")).status).toBe(403);
     expect((await http(`${pathname}?secret=hidden`)).status).toBe(403);
     expect(
         (await tlsExchange(fixture.proxyPort, fixture.securePort, fixture.cert, "/denied")).status,
     ).toBe(403);
-    await expect.poll(async () => (await snapshot()).length).toBe(100);
+    await expect.poll(async () => (await snapshot()).length).toBe(200);
     const before = await snapshot();
     expect(before[0]).toMatchObject({
         domain: "localhost",
         method: "GET",
         pathname: "/denied",
+        count: 1,
     });
     expect(before[1]).toMatchObject({ domain: "127.0.0.1", method: "POST", pathname });
-    expect(before[99]!.pathname).toBe("/denied/6");
+    expect(before[2]).toMatchObject({ pathname: "/denied/10", count: 3 });
+    expect(before[199]!.pathname).toBe("/denied/6");
+    expect(before[0]).not.toHaveProperty("rule");
     expect(JSON.stringify(before)).not.toContain("secret");
     await expect(section.getByText("No blocked requests yet")).toBeVisible();
     await page.getByRole("button", { name: "Refresh", exact: true }).click();
     const rows = section
         .getByRole("table", { name: "Blocked requests, latest first" })
         .locator("tbody tr");
-    await expect(rows).toHaveCount(100);
+    await expect(rows).toHaveCount(200);
     await expect(rows.nth(0).getByRole("rowheader")).toHaveText("localhost");
     await expect(rows.nth(1).getByRole("cell").nth(1)).toHaveText(pathname);
+    await expect(rows.nth(2).getByRole("cell").nth(2)).toHaveText("3");
     const button = section.getByRole("button", {
         name: `Allow 127.0.0.1 POST ${pathname}`,
         exact: true,
@@ -407,14 +416,40 @@ test("last 100 HTTP denials refresh manually and allow only an exact method and 
         ).rules,
     ).toHaveLength(1);
     const after = await snapshot();
-    expect(after).toHaveLength(100);
-    expect(after[0]).toMatchObject({ method: "POST", pathname: "/denied/103" });
+    expect(after).toHaveLength(200);
+    expect(after[0]).toMatchObject({ method: "POST", pathname: "/denied/103", count: 2 });
     await expect(rows.nth(0).getByRole("rowheader")).toHaveText("localhost");
     await page.getByRole("button", { name: "Refresh", exact: true }).click();
     await expect(rows.nth(0).getByRole("cell").nth(1)).toHaveText("/denied/103");
     await page.reload();
-    await expect(rows).toHaveCount(100);
+    await expect(rows).toHaveCount(200);
     expect((await http(pathname)).status).toBe(200);
+
+    // Allowed requests are grouped the same way and name the rule that allowed them.
+    const allowances = await snapshot("http-allowances");
+    expect(allowances[0]).toMatchObject({
+        domain: "127.0.0.1",
+        method: "POST",
+        pathname,
+        rule: expect.stringMatching(/\/05-web\.toml:allow#\d+$/),
+    });
+    expect(allowances[0]!.count).toBeGreaterThanOrEqual(2);
+    expect(allowances.find((request) => request.pathname === "/allowed")).toMatchObject({
+        method: "GET",
+        count: 1,
+    });
+    expect(JSON.stringify(allowances)).not.toContain("query");
+    await page.getByRole("tab", { name: /^Allowed requests/ }).click();
+    const allowedRows = page
+        .getByRole("tabpanel")
+        .getByRole("table", { name: "Allowed requests, latest first" })
+        .locator("tbody tr");
+    await expect(allowedRows).toHaveCount(allowances.length);
+    await expect(allowedRows.nth(0).getByRole("cell").nth(1)).toHaveText(pathname);
+    await expect(allowedRows.nth(0).getByRole("cell").nth(4)).toHaveText(
+        /^05-web\.toml:allow#\d+$/,
+    );
+    await expect(allowedRows.nth(0).getByRole("button")).toHaveCount(0);
 });
 
 test("HTTP allow actions remove only fully covered DNS-only rules, including duplicate allowances", async ({
@@ -445,6 +480,7 @@ test("HTTP allow actions remove only fully covered DNS-only rules, including dup
                     domain: "example.com",
                     method: "POST",
                     pathname: "/blocked",
+                    count: 1,
                     timestamp: new Date().toISOString(),
                 },
             ],

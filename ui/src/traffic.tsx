@@ -8,7 +8,7 @@ import {
     resetTraffic,
     type DomainAllowance,
     type DomainStats,
-    type HttpDenial,
+    type HttpRequest,
 } from "./api.ts";
 import {
     CheckIcon,
@@ -24,16 +24,19 @@ import {
     useToast,
 } from "./components.tsx";
 
-/** The three traffic views selectable from the tab bar. */
-export type TrafficView = "blocked" | "allowed" | "requests";
+/** The traffic views selectable from the tab bar; `requests` lists blocked requests. */
+export type TrafficView = "blocked" | "allowed" | "requests" | "allowed-requests";
 
 /** Validate the `view` search parameter, defaulting to blocked domains. */
 export function parseTrafficView(value: unknown): TrafficView {
-    if (value === "allowed" || value === "requests") {
+    if (value === "allowed" || value === "requests" || value === "allowed-requests") {
         return value;
     }
     return "blocked";
 }
+
+/** The number of unique requests the server retains for each outcome. */
+const requestCapacity = 200;
 
 /** Query options shared by the manually refreshed traffic queries. */
 const manualQuery = {
@@ -100,7 +103,7 @@ function allowanceLabel(allowance: DomainAllowance): string {
     return "Allowed";
 }
 
-/** Show seen domains and recent denials, with one-click allow actions. */
+/** Show seen domains and recent requests, with one-click allow actions. */
 export function TrafficPage({ view }: { view: TrafficView }) {
     const client = useQueryClient();
     const navigate = useNavigate();
@@ -116,7 +119,12 @@ export function TrafficPage({ view }: { view: TrafficView }) {
     });
     const denials = useQuery({
         queryKey: ["http-denials"],
-        queryFn: () => api<HttpDenial[]>("http-denials"),
+        queryFn: () => api<HttpRequest[]>("http-denials"),
+        ...manualQuery,
+    });
+    const allowances = useQuery({
+        queryKey: ["http-allowances"],
+        queryFn: () => api<HttpRequest[]>("http-allowances"),
         ...manualQuery,
     });
     const domainAllow = useMutation({
@@ -141,10 +149,10 @@ export function TrafficPage({ view }: { view: TrafficView }) {
             setAllowedDomains({});
             setAllowedRequests({});
             toast("Traffic statistics reset.");
-            await Promise.all([domains.refetch(), denials.refetch()]);
+            await Promise.all([domains.refetch(), denials.refetch(), allowances.refetch()]);
         },
     });
-    const refreshing = domains.isFetching || denials.isFetching;
+    const refreshing = domains.isFetching || denials.isFetching || allowances.isFetching;
     const blocked = domainEntries(domains.data ?? [], "block");
     const allowed = domainEntries(domains.data ?? [], "allow");
     const needle = filter.trim().toLowerCase();
@@ -152,31 +160,38 @@ export function TrafficPage({ view }: { view: TrafficView }) {
         { id: "blocked", label: "Blocked domains", count: domains.data && blocked.length },
         { id: "allowed", label: "Allowed domains", count: domains.data && allowed.length },
         { id: "requests", label: "Blocked requests", count: denials.data?.length },
+        { id: "allowed-requests", label: "Allowed requests", count: allowances.data?.length },
     ];
-    const updatedAt = Math.max(domains.dataUpdatedAt, denials.dataUpdatedAt);
+    const updatedAt = Math.max(
+        domains.dataUpdatedAt,
+        denials.dataUpdatedAt,
+        allowances.dataUpdatedAt,
+    );
     const actionError = domainAllow.error ?? requestAllow.error ?? reset.error;
-    const loadError = domains.error ?? denials.error;
+    const loadError = domains.error ?? denials.error ?? allowances.error;
+    const requests = view === "requests" ? denials.data : allowances.data;
     let panel: ReactNode = (
         <p role="status" className="flex items-center gap-2 px-4 py-10 text-sm text-zinc-400">
             <Spinner /> Loading traffic…
         </p>
     );
-    if (view === "requests" && denials.data) {
+    if ((view === "requests" || view === "allowed-requests") && requests) {
         panel = (
             <RequestsTable
-                denials={denials.data.filter(
-                    (denial) =>
-                        denial.domain.toLowerCase().includes(needle) ||
-                        denial.pathname.toLowerCase().includes(needle),
+                outcome={view === "requests" ? "block" : "allow"}
+                requests={requests.filter(
+                    (request) =>
+                        request.domain.toLowerCase().includes(needle) ||
+                        request.pathname.toLowerCase().includes(needle),
                 )}
-                filtered={needle !== "" && denials.data.length > 0}
+                filtered={needle !== "" && requests.length > 0}
                 now={now}
                 isPending={requestAllow.isPending}
                 allowed={allowedRequests}
                 onAllow={requestAllow.mutate}
             />
         );
-    } else if (view !== "requests" && domains.data) {
+    } else if ((view === "blocked" || view === "allowed") && domains.data) {
         const entries = view === "blocked" ? blocked : allowed;
         panel = (
             <DomainsTable
@@ -209,6 +224,7 @@ export function TrafficPage({ view }: { view: TrafficView }) {
                             onClick={() => {
                                 void domains.refetch();
                                 void denials.refetch();
+                                void allowances.refetch();
                             }}
                         >
                             {refreshing ? <Spinner /> : <RefreshIcon />}
@@ -217,12 +233,12 @@ export function TrafficPage({ view }: { view: TrafficView }) {
                         <button
                             type="button"
                             className="btn btn-secondary"
-                            title="Clear all domain counters, transferred bytes, and blocked requests"
+                            title="Clear all domain counters, transferred bytes, and recorded requests"
                             disabled={reset.isPending}
                             onClick={() => {
                                 if (
                                     window.confirm(
-                                        "Reset all traffic counters, transferred bytes, and blocked requests?",
+                                        "Reset all traffic counters, transferred bytes, and recorded requests?",
                                     )
                                 ) {
                                     reset.mutate();
@@ -292,7 +308,9 @@ export function TrafficPage({ view }: { view: TrafficView }) {
                         <FilterInput
                             label="Filter"
                             placeholder={
-                                view === "requests" ? "Filter domains or paths" : "Filter domains"
+                                view === "requests" || view === "allowed-requests"
+                                    ? "Filter domains or paths"
+                                    : "Filter domains"
                             }
                             value={filter}
                             onChange={setFilter}
@@ -525,8 +543,13 @@ function DomainsTable({
 }
 
 /** Identify a denial by the rule it would create. */
-function requestKey(denial: HttpDenial): string {
+function requestKey(denial: HttpRequest): string {
     return `${denial.domain} ${denial.method} ${denial.pathname}`;
+}
+
+/** Shorten a rule label such as `/etc/exwall/rules/web.toml:allow#2` to its file name. */
+function ruleLabel(rule: string): string {
+    return rule.slice(rule.lastIndexOf("/") + 1);
 }
 
 /** Color HTTP methods by how much they can change on the server. */
@@ -540,102 +563,132 @@ function methodBadge(method: string): string {
     return "badge-warn";
 }
 
-/** Show the latest denied HTTP requests, each allowable by exact method and path. */
+/**
+ * Show the most recently seen unique HTTP requests with one outcome and how often each repeated.
+ * Denied requests can be allowed by exact method and path; allowed requests show what allowed them.
+ */
 function RequestsTable({
-    denials,
+    outcome,
+    requests,
     filtered,
     now,
     isPending,
     allowed,
     onAllow,
 }: {
-    denials: HttpDenial[];
+    outcome: "allow" | "block";
+    requests: HttpRequest[];
     filtered: boolean;
     now: number;
     isPending: boolean;
     allowed: Record<string, boolean>;
-    onAllow: (denial: HttpDenial) => void;
+    onAllow: (denial: HttpRequest) => void;
 }) {
-    if (denials.length === 0) {
+    const title = outcome === "allow" ? "Allowed requests" : "Blocked requests";
+    const verb = outcome === "allow" ? "allowed" : "denied";
+    if (requests.length === 0) {
         if (filtered) {
             return <EmptyState title="No matching requests" />;
         }
         return (
-            <EmptyState title="No blocked requests yet">
-                The latest 100 denied HTTP and HTTPS requests appear here, newest first.
+            <EmptyState title={`No ${title.toLowerCase()} yet`}>
+                The {requestCapacity} most recently seen {verb} HTTP and HTTPS requests appear here,
+                newest first.
             </EmptyState>
         );
     }
     return (
         <div className="relative overflow-x-auto">
             <p className="border-b border-white/5 px-4 py-2 text-xs text-zinc-500">
-                The latest 100 denied HTTP(S) requests, newest first. Query strings are not
-                recorded; allowing a request matches its exact method and path only.
+                The {requestCapacity} most recently seen {verb} HTTP(S) requests, newest first, with
+                repeats of the same method and path counted together. Query strings are not recorded
+                {outcome === "block" &&
+                    "; allowing a request matches its exact method and path only"}
+                .
             </p>
             <table className="w-full text-left text-sm">
-                <caption className="sr-only">Blocked requests, latest first</caption>
+                <caption className="sr-only">{title}, latest first</caption>
                 <thead className="border-b border-white/10 bg-white/[0.02]">
                     <tr>
                         <th className={headerCell}>Domain</th>
                         <th className={headerCell}>Method</th>
                         <th className={headerCell}>Path</th>
-                        <th className={headerCell}>When</th>
-                        <th className={`${headerCell} text-right`}>
-                            <span className="sr-only">Actions</span>
+                        <th
+                            className={`${headerCell} text-right`}
+                            title="Times seen since first recorded"
+                        >
+                            Count
                         </th>
+                        <th className={headerCell}>{outcome === "allow" ? "Last seen" : "When"}</th>
+                        {outcome === "allow" ? (
+                            <th className={headerCell}>Allowed by</th>
+                        ) : (
+                            <th className={`${headerCell} text-right`}>
+                                <span className="sr-only">Actions</span>
+                            </th>
+                        )}
                     </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                    {denials.map((denial, index) => {
-                        const label = `${denial.domain} ${denial.method} ${denial.pathname}`;
+                    {requests.map((request) => {
+                        const label = requestKey(request);
                         return (
-                            <tr
-                                key={`${denial.timestamp}:${index}`}
-                                className="transition hover:bg-white/[0.03]"
-                            >
+                            <tr key={label} className="transition hover:bg-white/[0.03]">
                                 <th
                                     scope="row"
                                     className="max-w-[14rem] truncate px-4 py-2.5 font-mono text-[13px] font-medium text-zinc-100"
-                                    title={denial.domain}
+                                    title={request.domain}
                                 >
-                                    {denial.domain}
+                                    {request.domain}
                                 </th>
                                 <td className="px-4 py-2.5">
                                     <span
-                                        className={`badge font-mono ${methodBadge(denial.method)}`}
+                                        className={`badge font-mono ${methodBadge(request.method)}`}
                                     >
-                                        {denial.method}
+                                        {request.method}
                                     </span>
                                 </td>
                                 <td
                                     className="max-w-md truncate px-4 py-2.5 font-mono text-[13px] text-zinc-300"
-                                    title={denial.pathname}
+                                    title={request.pathname}
                                 >
-                                    {denial.pathname}
+                                    {request.pathname}
                                 </td>
-                                <td className="px-4 py-2.5 text-zinc-400">
-                                    <RelativeTime timestamp={denial.timestamp} now={now} />
+                                <td className="px-4 py-2.5 text-right text-zinc-300 tabular-nums">
+                                    {request.count.toLocaleString()}
                                 </td>
-                                <td className="px-4 py-2">
-                                    <div className="flex items-center justify-end gap-1.5">
-                                        {allowed[requestKey(denial)] && (
-                                            <span className="badge badge-allow">
-                                                <CheckIcon className="size-3" />
-                                                Allowed
-                                            </span>
-                                        )}
-                                        <button
-                                            type="button"
-                                            className="btn btn-sm btn-secondary"
-                                            aria-label={`Allow ${label}`}
-                                            title="Allow exactly this method and path"
-                                            disabled={isPending}
-                                            onClick={() => onAllow(denial)}
-                                        >
-                                            Allow request
-                                        </button>
-                                    </div>
+                                <td className="px-4 py-2.5 whitespace-nowrap text-zinc-400">
+                                    <RelativeTime timestamp={request.timestamp} now={now} />
                                 </td>
+                                {outcome === "allow" ? (
+                                    <td
+                                        className="max-w-[14rem] truncate px-4 py-2.5 font-mono text-[13px] text-zinc-400"
+                                        title={request.rule}
+                                    >
+                                        {request.rule === undefined ? "–" : ruleLabel(request.rule)}
+                                    </td>
+                                ) : (
+                                    <td className="px-4 py-2">
+                                        <div className="flex items-center justify-end gap-1.5">
+                                            {allowed[label] && (
+                                                <span className="badge badge-allow">
+                                                    <CheckIcon className="size-3" />
+                                                    Allowed
+                                                </span>
+                                            )}
+                                            <button
+                                                type="button"
+                                                className="btn btn-sm btn-secondary"
+                                                aria-label={`Allow ${label}`}
+                                                title="Allow exactly this method and path"
+                                                disabled={isPending}
+                                                onClick={() => onAllow(request)}
+                                            >
+                                                Allow request
+                                            </button>
+                                        </div>
+                                    </td>
+                                )}
                             </tr>
                         );
                     })}

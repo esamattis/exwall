@@ -80,11 +80,16 @@ export interface DomainStats {
     last_denied: string | null;
 }
 
-/** One retained policy denial, with the exact pathname and no query string. */
-export interface HttpDenial {
+/** One retained HTTP request and its repeats, with the exact pathname and no query string. */
+export interface HttpRequest {
     domain: string;
     method: string;
     pathname: string;
+    /** The rule or exception that allowed the latest repeat; absent for denials. */
+    rule?: string;
+    /** How many times the request was seen since it was first retained. */
+    count: number;
+    /** When the latest repeat was seen. */
     timestamp: string;
 }
 
@@ -171,7 +176,7 @@ export async function api<T>(
     return result;
 }
 
-/** Forget all domain counters, transfer totals, and retained denials. */
+/** Forget all domain counters, transfer totals, and retained requests. */
 export async function resetTraffic(): Promise<void> {
     await api("traffic/reset", "POST", {});
 }
@@ -256,7 +261,7 @@ export async function allowDomain({
 }
 
 /** Add a rule allowing one denied request's exact method and pathname. */
-export async function allowRequest(denial: HttpDenial): Promise<RulesDocument> {
+export async function allowRequest(denial: HttpRequest): Promise<RulesDocument> {
     const document = await readWebRules();
     const pathnameRegex = exactPathRegex(denial.pathname);
     let changed = removeCoveredDnsRules(document, denial.domain);
