@@ -542,6 +542,118 @@ test("last 200 unique HTTP denials refresh manually and allow only an exact meth
     await expect(page.getByRole("region", { name: "Rule 1", exact: true })).not.toBeInViewport();
 });
 
+test("request rows open details with decoded query strings and opt-in captured headers and bodies", async ({
+    page,
+    context,
+    protocolProxy: fixture,
+}) => {
+    const ui = `http://127.0.0.1:${fixture.uiPort}`;
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: ui });
+    /** Send a request with an optional body through the proxy to the disposable upstream. */
+    const http = (path: string, method: string, body?: string) =>
+        exchange(
+            {
+                hostname: "127.0.0.1",
+                port: fixture.proxyPort,
+                path: `http://127.0.0.1:${fixture.upstreamPort}${path}`,
+                method,
+                headers: {
+                    Host: `127.0.0.1:${fixture.upstreamPort}`,
+                    "X-Client-Key": "client-value",
+                    ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+                },
+            },
+            undefined,
+            body,
+        );
+    await loginBrowser(page, ui, "integration-password");
+    await page.goto(`${ui}/?view=requests`);
+    const capture = page.getByRole("button", { name: "Capture", exact: true });
+    await expect(capture).toBeVisible();
+
+    // Requests made while capture is off still open with their decoded query string.
+    expect((await http("/uncaptured?q=caf%C3%A9+au+lait&next=%2Fhome", "POST", "{}")).status).toBe(
+        403,
+    );
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    const rows = page.getByRole("tabpanel").locator("tbody tr");
+    await rows.filter({ hasText: "/uncaptured" }).getByRole("cell").nth(3).click();
+    let dialog = page.getByRole("dialog", { name: "POST 127.0.0.1/uncaptured" });
+    await expect(dialog).toBeVisible();
+    const query = dialog.getByRole("table", { name: "Decoded query parameters" });
+    await expect(query.getByRole("row")).toHaveText([/^q.*café au lait/, /^next.*\/home/]);
+    await expect(dialog.getByText(/Headers and bodies were not captured/)).toBeVisible();
+    await dialog.getByRole("button", { name: "Copy query parameter value of q" }).click();
+    await expect
+        .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+        .toBe("café au lait");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+
+    // Turn capture on with a 1 KB limit, so longer bodies are truncated.
+    await capture.click();
+    const limit = page.getByRole("spinbutton", { name: "Max body size (KB)" });
+    await expect(limit).toHaveValue("32");
+    await limit.fill("1");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.getByRole("status")).toHaveText("Header and body capture turned off.");
+    await page.getByRole("switch", { name: "Capture headers and bodies" }).click();
+    await expect(page.getByRole("status")).toHaveText(
+        "Capturing headers and up to 1 KB of each body.",
+    );
+    await expect(page.getByRole("button", { name: "Capturing · 1 KB" })).toBeVisible();
+    const long = JSON.stringify({ data: "x".repeat(2000) });
+    expect((await http("/denied/body?tag=a%26b", "POST", long)).status).toBe(403);
+    expect((await http("/allowed?mode=echo", "GET")).status).toBe(200);
+
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await rows.filter({ hasText: "/denied/body" }).getByRole("cell").nth(3).click();
+    dialog = page.getByRole("dialog", { name: "POST 127.0.0.1/denied/body" });
+    await expect(dialog.getByRole("row", { name: /^tag/ })).toContainText("a&b");
+    const request = dialog.getByRole("region", { name: "Captured request" });
+    const headers = request.getByRole("table", { name: "Request headers" });
+    await expect(headers.getByRole("row", { name: /^x-client-key/i })).toContainText(
+        "client-value",
+    );
+    await headers.getByRole("button", { name: /^Copy request header name x-client-key$/i }).click();
+    await expect
+        .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+        .toMatch(/^x-client-key$/i);
+    await headers
+        .getByRole("button", { name: /^Copy request header value of x-client-key$/i })
+        .click();
+    await expect
+        .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+        .toBe("client-value");
+    await expect(
+        request.getByText(
+            `Truncated at the 1 KB capture limit: showing the first 1,024 bytes of ${long.length.toLocaleString("en-US")} bytes.`,
+        ),
+    ).toBeVisible();
+    await expect(request.getByLabel("Request body", { exact: true })).toHaveText(
+        long.slice(0, 1024),
+    );
+    const response = dialog.getByRole("region", { name: "Captured response" });
+    await expect(response.getByText("403", { exact: true })).toBeVisible();
+    await expect(response.getByLabel("Response body", { exact: true })).toHaveText(
+        /no allow rule matched/,
+    );
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(dialog).toBeHidden();
+
+    await page.getByRole("tab", { name: /^Allowed requests/ }).click();
+    await rows.filter({ hasText: "/allowed" }).getByRole("cell").nth(3).click();
+    dialog = page.getByRole("dialog", { name: "GET 127.0.0.1/allowed" });
+    const upstream = dialog.getByRole("region", { name: "Captured response" });
+    await expect(upstream.getByText("200", { exact: true })).toBeVisible();
+    await expect(upstream.getByLabel("Response body", { exact: true })).toContainText(
+        '"path": "/allowed?mode=echo"',
+    );
+    await expect(dialog.getByRole("region", { name: "Captured request" })).toContainText(
+        "No body.",
+    );
+});
+
 test("HTTP allow actions remove only fully covered DNS-only rules, including duplicate allowances", async ({
     page,
     protocolProxy: fixture,

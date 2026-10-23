@@ -110,6 +110,81 @@ export interface HttpRequest {
     count: number;
     /** When the latest repeat was seen. */
     timestamp: string;
+    /** The latest captured repeat's headers and bodies; absent when none was captured. */
+    capture_id?: number;
+}
+
+/** One query string parameter, percent- and form-decoded. */
+export interface QueryParameter {
+    name: string;
+    value: string;
+}
+
+/** Split a raw query string into decoded parameters in their original order. */
+export function parseQuery(query: string): QueryParameter[] {
+    return [...new URLSearchParams(query)].map(([name, value]) => ({ name, value }));
+}
+
+/** Whether HTTP headers and bodies are captured, and how much of each body is kept. */
+export interface CaptureSettings {
+    enabled: boolean;
+    /** The most bytes kept from each request and response body, in KB (1024 bytes). */
+    body_limit_kb: number;
+}
+
+/** The largest body size limit the server accepts, in KB. */
+export const maxBodyLimitKb = 1024;
+
+/** Turn capturing of HTTP headers and bodies on or off for new requests. */
+export function updateCapture(settings: CaptureSettings): Promise<CaptureSettings> {
+    return api<CaptureSettings>("capture", "PUT", settings);
+}
+
+/** One header as received; repeated headers appear as separate entries. */
+export interface CapturedHeader {
+    /** The header name, with the case the client or upstream sent where it is known. */
+    name: string;
+    value: string;
+}
+
+/** The captured leading part of a request or response body. */
+export interface CapturedBody {
+    /** Every byte seen, including bytes beyond the capture limit. */
+    size: number;
+    /** The bytes kept. */
+    captured: number;
+    /** Whether bytes beyond the capture limit were not kept. */
+    truncated: boolean;
+    /** Whether the body was read to its end. */
+    complete: boolean;
+    /** The body's Content-Encoding, if any. */
+    encoding?: string;
+    /** Whether `text` was decompressed from `encoding`. */
+    decoded: boolean;
+    /** The body as text; absent when it is binary. */
+    text?: string;
+}
+
+/** A captured request or response. */
+export interface CapturedMessage {
+    /** The response status; absent for requests. */
+    status?: number;
+    headers: CapturedHeader[];
+    /** The body, or null while it is still streaming. */
+    body: CapturedBody | null;
+}
+
+/** A request's captured headers and bodies. */
+export interface CaptureDetails {
+    id: number;
+    /** When the captured request arrived. */
+    timestamp: string;
+    /** The most bytes kept from each body. */
+    body_limit: number;
+    /** The request as the client sent it, before any header injection. */
+    request: CapturedMessage;
+    /** The response returned to the client, or null before its headers arrive. */
+    response: CapturedMessage | null;
 }
 
 /** The firewall host, identified in the page header. */

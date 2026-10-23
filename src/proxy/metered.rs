@@ -1,8 +1,9 @@
-//! A body wrapper that counts forwarded bytes toward a domain's transfer totals.
+//! A body wrapper that counts forwarded bytes toward a domain's transfer totals and
+//! optionally captures the leading bytes for the web UI.
 
 use crate::{
     policy::Host,
-    telemetry::{Direction, DomainStats},
+    telemetry::{BodyRecorder, Direction, DomainStats},
 };
 use rama::{
     bytes::Bytes,
@@ -23,7 +24,8 @@ const FLUSH_BYTES: u64 = 64 * 1024;
 /// A streaming body that adds its data frame sizes to one domain's totals.
 ///
 /// Counts are batched to keep the shared statistics lock off the per-frame path,
-/// and flushed at the end of the stream or when the body is dropped early.
+/// and flushed at the end of the stream or when the body is dropped early. Frames
+/// are forwarded unchanged and immediately, whether or not they are also captured.
 pub struct MeteredBody {
     /// The forwarded body.
     inner: Body,
@@ -35,17 +37,27 @@ pub struct MeteredBody {
     direction: Direction,
     /// Bytes counted but not yet recorded.
     pending: u64,
+    /// Captures the body's leading bytes while request capturing is enabled.
+    recorder: Option<BodyRecorder>,
 }
 
 impl MeteredBody {
-    /// Wrap `inner` so its data bytes count toward `host` in `direction`.
-    pub fn wrap(inner: Body, stats: DomainStats, host: Host, direction: Direction) -> Body {
+    /// Wrap `inner` so its data bytes count toward `host` in `direction`, and are
+    /// captured by `recorder` if one is given.
+    pub fn wrap(
+        inner: Body,
+        stats: DomainStats,
+        host: Host,
+        direction: Direction,
+        recorder: Option<BodyRecorder>,
+    ) -> Body {
         Body::new(Self {
             inner,
             stats,
             host,
             direction,
             pending: 0,
+            recorder,
         })
     }
 
@@ -53,6 +65,14 @@ impl MeteredBody {
     fn flush(&mut self) {
         let bytes = std::mem::take(&mut self.pending);
         self.stats.record_transfer(&self.host, self.direction, bytes);
+    }
+
+    /// Record pending bytes and store the captured body, if any.
+    fn finish(&mut self, complete: bool) {
+        self.flush();
+        if let Some(recorder) = &mut self.recorder {
+            recorder.finish(complete);
+        }
     }
 }
 
@@ -70,12 +90,16 @@ impl StreamingBody for MeteredBody {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
                     self.pending += data.len() as u64;
+                    if let Some(recorder) = &mut self.recorder {
+                        recorder.observe(data);
+                    }
                     if self.pending >= FLUSH_BYTES {
                         self.flush();
                     }
                 }
             }
-            Poll::Ready(Some(Err(_)) | None) => self.flush(),
+            Poll::Ready(Some(Err(_))) => self.finish(false),
+            Poll::Ready(None) => self.finish(true),
             Poll::Pending => {}
         }
         polled
@@ -94,8 +118,11 @@ impl StreamingBody for MeteredBody {
 
 impl Drop for MeteredBody {
     /// Record bytes forwarded before the body was completed or abandoned.
+    ///
+    /// An empty body may be dropped without being polled, so it still counts as complete.
     fn drop(&mut self) {
-        self.flush();
+        let complete = self.inner.is_end_stream();
+        self.finish(complete);
     }
 }
 
@@ -117,7 +144,7 @@ mod tests {
         let chunks = vec![Ok::<_, BoxError>(Bytes::from("hello")), Ok(Bytes::from(" world"))];
         let body = Body::from_stream(rama::stream::iter(chunks));
         let metered =
-            MeteredBody::wrap(body, stats.clone(), Host::new("example.com"), Direction::Down);
+            MeteredBody::wrap(body, stats.clone(), Host::new("example.com"), Direction::Down, None);
         let bytes = metered.collect().await.unwrap().to_bytes();
         assert_eq!(bytes, "hello world");
         assert_eq!(transferred(&stats), (0, 11));
@@ -131,12 +158,50 @@ mod tests {
         let chunks = vec![Ok::<_, BoxError>(large), Ok(Bytes::from("tail"))];
         let body = Body::from_stream(rama::stream::iter(chunks));
         let mut metered =
-            MeteredBody::wrap(body, stats.clone(), Host::new("example.com"), Direction::Up);
+            MeteredBody::wrap(body, stats.clone(), Host::new("example.com"), Direction::Up, None);
         metered.frame().await.unwrap().unwrap();
         assert_eq!(transferred(&stats), (FLUSH_BYTES, 0));
         metered.frame().await.unwrap().unwrap();
         assert_eq!(transferred(&stats), (FLUSH_BYTES, 0));
         drop(metered);
         assert_eq!(transferred(&stats), (FLUSH_BYTES + 4, 0));
+    }
+
+    /// Capture the leading bytes of a forwarded body without changing what is forwarded.
+    #[tokio::test]
+    async fn captures_forwarded_bodies() {
+        let stats = DomainStats::default();
+        stats.capture_settings().set(true, 1);
+        let capture = stats.capture_settings().begin(&rama::http::HeaderMap::new()).unwrap();
+        let chunks = vec![
+            Ok::<_, BoxError>(Bytes::from(vec![b'a'; 1000])),
+            Ok(Bytes::from(vec![b'b'; 100])),
+        ];
+        let body = Body::from_stream(rama::stream::iter(chunks));
+        let recorder = capture.recorder(crate::telemetry::Side::Request);
+        let metered = MeteredBody::wrap(
+            body,
+            stats.clone(),
+            Host::new("example.com"),
+            Direction::Up,
+            Some(recorder),
+        );
+        let bytes = metered.collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.len(), 1100);
+        let body = capture.details().request.body.unwrap();
+        assert_eq!((body.size, body.captured), (1100, 1024));
+        assert!(body.truncated && body.complete);
+
+        let empty = MeteredBody::wrap(
+            Body::empty(),
+            stats.clone(),
+            Host::new("example.com"),
+            Direction::Up,
+            Some(capture.recorder(crate::telemetry::Side::Request)),
+        );
+        drop(empty);
+        let body = capture.details().request.body.unwrap();
+        assert_eq!(body.size, 0);
+        assert!(body.complete);
     }
 }

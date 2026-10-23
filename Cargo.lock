@@ -801,8 +801,10 @@ version = "0.2.1"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
+ "brotli",
  "clap",
  "fancy-regex",
+ "flate2",
  "hickory-proto",
  "ipnet",
  "jiff",
@@ -824,6 +826,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "tracing-subscriber",
+ "zstd 0.14.0",
 ]
 
 [[package]]

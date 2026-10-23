@@ -1,6 +1,10 @@
-//! Bounded domain counters, transfer totals, and bounded, process-local lists of HTTP requests.
+//! Bounded domain counters, transfer totals, and bounded, process-local lists of HTTP requests
+//! with their optional captures.
 
-use super::event::{Protocol, RequestEvent};
+use super::{
+    capture::{Capture, CaptureSettings},
+    event::{Protocol, RequestEvent},
+};
 use crate::policy::{Decision, Host};
 use serde::Serialize;
 use std::{
@@ -79,6 +83,15 @@ pub struct HttpRequest {
     /// What allowed the latest repeat, as its access-log label; absent for denials.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule: Option<String>,
+    /// The latest captured repeat, serialized as its identifier.
+    ///
+    /// A repeat seen while capturing is off keeps the earlier capture.
+    #[serde(
+        rename = "capture_id",
+        serialize_with = "serialize_capture_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub capture: Option<Capture>,
     /// How many times the request was seen since it was first retained.
     pub count: u64,
     /// When the latest repeat was recorded.
@@ -111,6 +124,9 @@ impl RecentRequests {
         if let Some(index) = existing {
             let previous = requests.remove(index).expect("position is in bounds");
             request.count = previous.count.saturating_add(1);
+            if request.capture.is_none() {
+                request.capture = previous.capture;
+            }
         } else if requests.len() == REQUEST_CAPACITY {
             requests.pop_front();
         }
@@ -121,6 +137,16 @@ impl RecentRequests {
     fn snapshot(&self) -> Vec<HttpRequest> {
         let requests = self.0.lock().expect("HTTP request lock poisoned");
         requests.iter().rev().cloned().collect()
+    }
+
+    /// Find the capture with identifier `id` among the retained requests.
+    fn capture(&self, id: u64) -> Option<Capture> {
+        let requests = self.0.lock().expect("HTTP request lock poisoned");
+        requests
+            .iter()
+            .filter_map(|request| request.capture.as_ref())
+            .find(|capture| capture.id() == id)
+            .cloned()
     }
 
     /// Forget every retained request.
@@ -193,6 +219,8 @@ pub struct DomainStats {
     denials: RecentRequests,
     /// The newest allowed HTTP requests.
     allowances: RecentRequests,
+    /// Whether new HTTP requests capture headers and bodies.
+    capture: CaptureSettings,
 }
 
 impl DomainStats {
@@ -215,11 +243,12 @@ impl DomainStats {
             return;
         };
         let query = event.query.as_deref();
+        let capture = event.capture.clone();
         if allowed {
             let rule = event.matches.first().and_then(Option::as_ref).map(ToString::to_string);
-            self.record_allowance(host, method, pathname, query, rule);
+            self.record_allowance(host, method, pathname, query, rule, capture);
         } else {
-            self.record_denial(host, method, pathname, query);
+            self.record_denial(host, method, pathname, query, capture);
         }
     }
 
@@ -262,9 +291,10 @@ impl DomainStats {
         *total = total.saturating_add(bytes);
     }
 
-    /// Forget every domain summary and retained request.
+    /// Forget every domain summary and retained request, including their captures.
     ///
-    /// Transfers still in flight continue to count toward fresh summaries.
+    /// Transfers still in flight continue to count toward fresh summaries, and the
+    /// capture settings are kept.
     pub fn reset(&self) {
         *self.domains.lock().expect("domain counter lock poisoned") = Domains::default();
         self.denials.clear();
@@ -272,8 +302,15 @@ impl DomainStats {
     }
 
     /// Retain the latest denied requests without writing request history to disk.
-    pub fn record_denial(&self, host: &Host, method: &str, pathname: &str, query: Option<&str>) {
-        self.denials.push(http_request(host, method, pathname, query, None));
+    pub fn record_denial(
+        &self,
+        host: &Host,
+        method: &str,
+        pathname: &str,
+        query: Option<&str>,
+        capture: Option<Capture>,
+    ) {
+        self.denials.push(http_request(host, method, pathname, query, None, capture));
     }
 
     /// Retain the latest allowed requests and what allowed them, without writing to disk.
@@ -284,8 +321,19 @@ impl DomainStats {
         pathname: &str,
         query: Option<&str>,
         rule: Option<String>,
+        capture: Option<Capture>,
     ) {
-        self.allowances.push(http_request(host, method, pathname, query, rule));
+        self.allowances.push(http_request(host, method, pathname, query, rule, capture));
+    }
+
+    /// Return the switch and body size limit for capturing HTTP headers and bodies.
+    pub fn capture_settings(&self) -> &CaptureSettings {
+        &self.capture
+    }
+
+    /// Find a capture held by a retained request, denied or allowed.
+    pub fn capture(&self, id: u64) -> Option<Capture> {
+        self.denials.capture(id).or_else(|| self.allowances.capture(id))
     }
 
     /// Return unique denied HTTP requests with the most recently seen first.
@@ -322,6 +370,7 @@ fn http_request(
     pathname: &str,
     query: Option<&str>,
     rule: Option<String>,
+    capture: Option<Capture>,
 ) -> HttpRequest {
     HttpRequest {
         domain: host.to_string(),
@@ -329,9 +378,18 @@ fn http_request(
         pathname: pathname.to_owned(),
         query: query.map(str::to_owned),
         rule,
+        capture,
         count: 1,
         timestamp: jiff::Timestamp::now(),
     }
+}
+
+/// Encode a retained capture as the identifier the UI fetches it by.
+fn serialize_capture_id<S: serde::Serializer>(
+    capture: &Option<Capture>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_some(&capture.as_ref().map(Capture::id))
 }
 
 /// Encode a timestamp as RFC 3339 for API consumers.
@@ -410,7 +468,13 @@ mod tests {
         let stats = DomainStats::default();
         let extra = 5;
         for index in 0..REQUEST_CAPACITY + extra {
-            stats.record_denial(&host("Example.COM."), "POST", &format!("/request/{index}"), None);
+            stats.record_denial(
+                &host("Example.COM."),
+                "POST",
+                &format!("/request/{index}"),
+                None,
+                None,
+            );
         }
         let newest = format!("/request/{}", REQUEST_CAPACITY + extra - 1);
         let oldest = format!("/request/{extra}");
@@ -422,9 +486,9 @@ mod tests {
         assert_eq!(snapshot[0].count, 1);
 
         // A repeat of the oldest request moves it to the front instead of evicting it.
-        stats.record_denial(&host("example.com"), "POST", &oldest, None);
-        stats.record_denial(&host("example.com"), "POST", &oldest, None);
-        stats.record_denial(&host("example.com"), "GET", &oldest, None);
+        stats.record_denial(&host("example.com"), "POST", &oldest, None, None);
+        stats.record_denial(&host("example.com"), "POST", &oldest, None, None);
+        stats.record_denial(&host("example.com"), "GET", &oldest, None, None);
         let latest = stats.denials_snapshot();
         assert_eq!(latest.len(), REQUEST_CAPACITY);
         assert_eq!((latest[0].method.as_str(), latest[0].count), ("GET", 1));
@@ -442,10 +506,10 @@ mod tests {
     fn groups_requests_by_query_string() {
         let stats = DomainStats::default();
         let host = host("example.com");
-        stats.record_denial(&host, "GET", "/search", Some("q=a"));
-        stats.record_denial(&host, "GET", "/search", Some("q=b"));
-        stats.record_denial(&host, "GET", "/search", Some("q=a"));
-        stats.record_denial(&host, "GET", "/search", None);
+        stats.record_denial(&host, "GET", "/search", Some("q=a"), None);
+        stats.record_denial(&host, "GET", "/search", Some("q=b"), None);
+        stats.record_denial(&host, "GET", "/search", Some("q=a"), None);
+        stats.record_denial(&host, "GET", "/search", None, None);
         let denials = stats.denials_snapshot();
         let summary: Vec<_> =
             denials.iter().map(|request| (request.query.as_deref(), request.count)).collect();
@@ -466,14 +530,49 @@ mod tests {
         assert_eq!(allowance.rule.as_deref(), Some("@paused"));
     }
 
+    /// Repeats keep the latest capture, or the earlier one when the repeat was not captured.
+    #[test]
+    fn retains_captures_across_repeats() {
+        let stats = DomainStats::default();
+        let host = host("example.com");
+        stats.capture_settings().set(true, 1);
+        let first = stats.capture_settings().begin(&rama::http::HeaderMap::new()).unwrap();
+        let second = stats.capture_settings().begin(&rama::http::HeaderMap::new()).unwrap();
+        stats.record_allowance(&host, "POST", "/", None, None, Some(first.clone()));
+        assert!(stats.capture(first.id()).is_some());
+        stats.record_allowance(&host, "POST", "/", None, None, Some(second.clone()));
+        assert!(stats.capture(first.id()).is_none());
+        stats.record_allowance(&host, "POST", "/", None, None, None);
+        let allowance = stats.allowances_snapshot().remove(0);
+        assert_eq!(allowance.capture.as_ref().map(Capture::id), Some(second.id()));
+        assert_eq!(serde_json::to_value(&allowance).unwrap()["capture_id"], second.id());
+        stats.reset();
+        assert!(stats.capture(second.id()).is_none());
+        assert!(stats.capture_settings().enabled());
+    }
+
     /// Keep allowed requests separate from denials and report the latest allowing rule.
     #[test]
     fn tracks_allowed_requests_with_their_latest_rule() {
         let stats = DomainStats::default();
         let rule = MatchSource::Rule(RuleId::new("t.toml", 1));
-        stats.record_allowance(&host("example.com"), "GET", "/", None, Some(rule.to_string()));
-        stats.record_allowance(&host("example.com"), "GET", "/", None, Some("@paused".into()));
-        stats.record_denial(&host("example.com"), "GET", "/", None);
+        stats.record_allowance(
+            &host("example.com"),
+            "GET",
+            "/",
+            None,
+            Some(rule.to_string()),
+            None,
+        );
+        stats.record_allowance(
+            &host("example.com"),
+            "GET",
+            "/",
+            None,
+            Some("@paused".into()),
+            None,
+        );
+        stats.record_denial(&host("example.com"), "GET", "/", None, None);
         let allowances = stats.allowances_snapshot();
         assert_eq!(allowances.len(), 1);
         assert_eq!(allowances[0].count, 2);
@@ -543,8 +642,8 @@ mod tests {
         let stats = DomainStats::default();
         stats.record(&host("example.com"), Protocol::Dns, true);
         stats.record_transfer(&host("example.com"), Direction::Down, 100);
-        stats.record_denial(&host("example.com"), "GET", "/denied", None);
-        stats.record_allowance(&host("example.com"), "GET", "/allowed", None, None);
+        stats.record_denial(&host("example.com"), "GET", "/denied", None, None);
+        stats.record_allowance(&host("example.com"), "GET", "/allowed", None, None, None);
         stats.reset();
         assert!(stats.snapshot().is_empty());
         assert!(stats.denials_snapshot().is_empty());

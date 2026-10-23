@@ -11,14 +11,15 @@ use crate::{
     error::ErrorChain,
     policy::Decision,
     runtime::PolicyStore,
-    telemetry::{Direction, EventSink, Failure},
+    telemetry::{Capture, Direction, EventSink, Failure, Side},
 };
 use rama::{
     Layer, Service,
     error::BoxError,
     extensions::ExtensionsRef,
     http::{
-        Body, Request, Response, StatusCode,
+        Body, Method, Request, Response, StatusCode,
+        body::{StreamingBody, util::BodyExt},
         layer::upgrade::{
             LazyHttpProxyConnectReplyService, UpgradeLayer, UpgradeResponse, Upgraded,
         },
@@ -49,6 +50,8 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(60);
 const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The first byte of a TLS handshake record.
 const TLS_HANDSHAKE: u8 = 0x16;
+/// How long a denied request's body is read for capture before the rejection is sent.
+const CAPTURE_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Proxy listener and connection failures.
 #[derive(Debug, Error)]
@@ -98,6 +101,44 @@ fn response(status: StatusCode, message: &'static str) -> Response {
     response
 }
 
+/// Create a local HTTP response and record it in the request's capture, if any.
+fn captured_response(
+    status: StatusCode,
+    message: &'static str,
+    capture: Option<&Capture>,
+) -> Response {
+    let reply = response(status, message);
+    if let Some(capture) = capture {
+        capture.record_local_response(status.as_u16(), reply.headers(), message);
+    }
+    reply
+}
+
+/// Read a denied request's body up to the capture limit so the UI can show it.
+///
+/// The body is never forwarded. Reading stops just past the limit, at the end of the
+/// body, or after [`CAPTURE_READ_TIMEOUT`], so a slow client cannot hold back its
+/// rejection for long.
+async fn capture_rejected_body(capture: &Capture, mut body: Body) {
+    let mut recorder = capture.recorder(Side::Request);
+    let read = async {
+        while !recorder.is_truncated() {
+            match body.frame().await {
+                Some(Ok(frame)) => {
+                    if let Some(data) = frame.data_ref() {
+                        recorder.observe(data);
+                    }
+                }
+                Some(Err(_)) => return false,
+                None => return true,
+            }
+        }
+        body.is_end_stream()
+    };
+    let complete = timeout(CAPTURE_READ_TIMEOUT, read).await.unwrap_or(false);
+    recorder.finish(complete);
+}
+
 impl Proxy {
     /// Assemble a proxy from its shared services.
     pub fn new(
@@ -132,8 +173,17 @@ impl Proxy {
     /// Apply policy and relay an allowed request as a streaming HTTP response.
     ///
     /// Forwarded request and response body bytes count toward the authorized host.
+    /// While capturing is enabled, the client's headers, the response headers, and the
+    /// leading bytes of both bodies are recorded, including for denied requests.
     pub async fn http(&self, mut request: Request, target: Target) -> Result<Response, Infallible> {
-        let mut event = self.sink.track(initial_event(&request, &target));
+        let capture = if request.method() == Method::CONNECT {
+            None
+        } else {
+            self.sink.stats().capture_settings().begin(request.headers())
+        };
+        let mut initial = initial_event(&request, &target);
+        initial.capture = capture.clone();
+        let mut event = self.sink.track(initial);
         let decision = {
             let policy = self.policy.load();
             authorize(&request, &target, &policy.rules, self.policy.enforcement())
@@ -142,21 +192,34 @@ impl Proxy {
             Ok(plan) => plan,
             Err(rejection) => {
                 rejection.record(event.event());
-                return Ok(response(rejection.status(), rejection.message()));
+                if let Some(capture) = &capture {
+                    capture_rejected_body(capture, request.into_body()).await;
+                }
+                return Ok(captured_response(
+                    rejection.status(),
+                    rejection.message(),
+                    capture.as_ref(),
+                ));
             }
         };
         record_plan(event.event(), &plan);
         apply_plan(&mut request, &plan);
         let stats = self.sink.stats().clone();
         let host = plan.host;
-        let request =
-            request.map(|body| MeteredBody::wrap(body, stats.clone(), host.clone(), Direction::Up));
+        let request = request.map(|body| {
+            let recorder = capture.as_ref().map(|capture| capture.recorder(Side::Request));
+            MeteredBody::wrap(body, stats.clone(), host.clone(), Direction::Up, recorder)
+        });
         let failure = match timeout(self.upstream_timeout, self.upstream.send(request)).await {
             Ok(Ok(upstream)) => {
-                event.event().respond_http(upstream.status().as_u16());
-                return Ok(
-                    upstream.map(|body| MeteredBody::wrap(body, stats, host, Direction::Down))
-                );
+                let status = upstream.status().as_u16();
+                event.event().respond_http(status);
+                let recorder = capture.as_ref().map(|capture| {
+                    capture.record_response(status, upstream.headers());
+                    capture.recorder(Side::Response)
+                });
+                return Ok(upstream
+                    .map(|body| MeteredBody::wrap(body, stats, host, Direction::Down, recorder)));
             }
             Ok(Err(error)) => {
                 tracing::warn!(error = %ErrorChain(&*error), "upstream HTTP request failed");
@@ -169,7 +232,11 @@ impl Proxy {
         };
         event.event().respond_http(StatusCode::BAD_GATEWAY.as_u16());
         event.event().fail(failure);
-        Ok(response(StatusCode::BAD_GATEWAY, "upstream request failed\n"))
+        Ok(captured_response(
+            StatusCode::BAD_GATEWAY,
+            "upstream request failed\n",
+            capture.as_ref(),
+        ))
     }
 
     /// Authorize an explicit CONNECT and reply so the client can start TLS.
@@ -450,6 +517,37 @@ mod tests {
                 down: "upstream".len() as u64
             }
         );
+    }
+
+    /// Captures record client headers before injection, both bodies, and local rejections.
+    #[tokio::test]
+    async fn captures_allowed_and_denied_requests() {
+        let (_directory, proxy, mut receiver, _upstream) = proxy(Behaviour::Status(201));
+        send(&proxy, &mut receiver, "https://allowed.test/secure", false).await;
+        assert!(proxy.sink.stats().allowances_snapshot()[0].capture.is_none());
+        proxy.sink.stats().capture_settings().set(true, 1);
+
+        send(&proxy, &mut receiver, "https://allowed.test/secure", false).await;
+        let allowance = proxy.sink.stats().allowances_snapshot().remove(0);
+        let details = allowance.capture.unwrap().details();
+        let authorization = details.request.headers.iter().find(|h| h.name == "authorization");
+        assert_eq!(authorization.unwrap().value, "client-secret");
+        let request_body = details.request.body.unwrap();
+        assert!(request_body.complete);
+        assert_eq!(request_body.text.as_deref(), Some("payload"));
+        let response = details.response.unwrap();
+        assert_eq!(response.status, Some(201));
+        assert_eq!(response.body.unwrap().text.as_deref(), Some("upstream"));
+
+        send(&proxy, &mut receiver, "http://allowed.test/denied", false).await;
+        let denial = proxy.sink.stats().denials_snapshot().remove(0);
+        let details = denial.capture.unwrap().details();
+        assert_eq!(details.request.body.unwrap().text.as_deref(), Some("payload"));
+        let response = details.response.unwrap();
+        assert_eq!(response.status, Some(403));
+        let body = response.body.unwrap();
+        assert!(body.complete);
+        assert_eq!(body.text.as_deref(), Some("exwall: no allow rule matched\n"));
     }
 
     /// While blocking is paused, denied requests are forwarded and logged as `@paused`.

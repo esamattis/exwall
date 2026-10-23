@@ -80,8 +80,11 @@ export async function freePort(): Promise<number> {
     return address.port;
 }
 
-/** Execute an HTTP exchange, optionally over an already connected interception socket. */
-export async function exchange(options: RequestOptions, socket?: Socket) {
+/**
+ * Execute an HTTP exchange, optionally over an already connected interception socket and
+ * with a request body.
+ */
+export async function exchange(options: RequestOptions, socket?: Socket, body?: string) {
     const agent = new Agent();
     if (socket) {
         agent.createConnection = () => socket;
@@ -116,7 +119,7 @@ export async function exchange(options: RequestOptions, socket?: Socket) {
                 });
                 call.on("error", reject);
                 call.setTimeout(3000, () => call.destroy(new Error("HTTP exchange timed out")));
-                call.end();
+                call.end(body);
             }),
             5000,
             "HTTP exchange",

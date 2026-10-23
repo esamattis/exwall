@@ -32,6 +32,10 @@ base64 = "0.22"
 sha2 = "0.10"
 subtle = "2"
 percent-encoding = "2"
+# Decode captured HTTP bodies; the same versions are already built for rama.
+brotli = "8"
+flate2 = "1"
+zstd = "0.14"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

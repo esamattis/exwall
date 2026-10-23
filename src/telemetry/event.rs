@@ -1,5 +1,6 @@
 //! Typed request events, recorded once per HTTP request, CONNECT, or DNS message.
 
+use super::capture::Capture;
 use crate::policy::{Decision, Host, MatchSource};
 use hickory_proto::op::ResponseCode;
 
@@ -84,6 +85,8 @@ pub struct RequestEvent {
     /// The raw HTTP query string without `?`, retained for request history; `None` when the
     /// request has no query, and for CONNECT and DNS.
     pub query: Option<String>,
+    /// Captured headers and bodies, while capturing is enabled; never written to the access log.
+    pub capture: Option<Capture>,
     /// The HTTP status returned to the client.
     pub http_status: Option<u16>,
     /// The DNS response code returned to the client.
@@ -115,6 +118,7 @@ impl RequestEvent {
             subjects: Vec::new(),
             pathname: None,
             query: None,
+            capture: None,
             http_status: None,
             dns_rcode: None,
             failure: Some(Failure::Cancelled),

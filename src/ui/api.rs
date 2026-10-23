@@ -10,7 +10,7 @@ use crate::{
     error::ErrorChain,
     policy::RuleSet,
     runtime::{PolicyStore, ReloadError, ReloadHandle},
-    telemetry::DomainStats,
+    telemetry::{CaptureSettings, DomainStats, MAX_BODY_LIMIT_KB},
 };
 use percent_encoding::percent_decode_str;
 use rama::http::{
@@ -32,6 +32,8 @@ pub const CLEAR_COOKIE: &str = "exwall_session=; Path=/api; HttpOnly; SameSite=S
 const RULE_FILE_PREFIX: &str = "/api/rules/";
 /// The longest blocking pause the UI may request, one day.
 const MAX_PAUSE_MINUTES: u64 = 24 * 60;
+/// The path prefix addressing one captured request by its identifier.
+const CAPTURE_PREFIX: &str = "/api/captures/";
 
 /// Credentials accepted by the login endpoint.
 #[derive(Deserialize)]
@@ -49,6 +51,26 @@ struct Login {
 struct PauseRequest {
     /// How long blocking stays paused.
     minutes: u64,
+}
+
+/// Whether HTTP headers and bodies are captured, and how much of each body is kept.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct CaptureStatus {
+    /// Whether new requests are captured.
+    enabled: bool,
+    /// The most bytes kept from each body, in KiB.
+    body_limit_kb: u32,
+}
+
+impl CaptureStatus {
+    /// Describe the current capture settings.
+    fn of(settings: &CaptureSettings) -> Self {
+        Self {
+            enabled: settings.enabled(),
+            body_limit_kb: settings.body_limit_kb(),
+        }
+    }
 }
 
 /// Whether blocking is enforced, as reported to the UI.
@@ -112,6 +134,9 @@ pub enum ApiError {
     /// The pause request is malformed or its duration is out of range.
     #[error("Pause must be a whole number of minutes from 1 to {MAX_PAUSE_MINUTES}")]
     InvalidPause,
+    /// The capture settings are malformed or the body size limit is out of range.
+    #[error("Body size limit must be a whole number of KB from 1 to {MAX_BODY_LIMIT_KB}")]
+    InvalidCapture,
     /// Authentication is missing or invalid.
     #[error("Authentication required")]
     Unauthorized,
@@ -121,6 +146,9 @@ pub enum ApiError {
     /// The requested rules file does not exist or cannot be edited.
     #[error("Rules file not found")]
     UnknownRulesFile,
+    /// The requested capture was never made or is no longer retained.
+    #[error("Captured request not found")]
+    UnknownCapture,
     /// The rules file changed since the client read it.
     #[error("{0} changed. Reload before saving.")]
     Conflict(String),
@@ -154,11 +182,13 @@ impl ApiError {
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             Self::CrossOrigin => StatusCode::FORBIDDEN,
             Self::BodyTimeout => StatusCode::REQUEST_TIMEOUT,
-            Self::InvalidLogin | Self::InvalidRules | Self::InvalidPause | Self::Validation(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::InvalidLogin
+            | Self::InvalidRules
+            | Self::InvalidPause
+            | Self::InvalidCapture
+            | Self::Validation(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::NotFound | Self::UnknownRulesFile => StatusCode::NOT_FOUND,
+            Self::NotFound | Self::UnknownRulesFile | Self::UnknownCapture => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::NotActivated {
                 ..
@@ -273,7 +303,7 @@ pub struct Api {
     rules: RuleFiles,
     /// Activates saved rules.
     reload: ReloadHandle,
-    /// Domain counters, transfer totals, and recent HTTP requests.
+    /// Domain counters, transfer totals, recent HTTP requests, and capture settings.
     stats: DomainStats,
     /// The active policy, whose blocking the UI can pause.
     policy: Arc<PolicyStore>,
@@ -338,6 +368,12 @@ impl Api {
                 _ => Err(ApiError::MethodNotAllowed),
             };
         }
+        if let Some(id) = path.strip_prefix(CAPTURE_PREFIX) {
+            if method != Method::GET {
+                return Err(ApiError::MethodNotAllowed);
+            }
+            return self.capture_details(id).await;
+        }
         match (method, path.as_str()) {
             (Method::GET, "/api/session") => {
                 Ok(json(StatusCode::OK, &serde_json::json!({ "username": self.auth.username() })))
@@ -359,6 +395,10 @@ impl Api {
                 Ok(json(StatusCode::OK, &self.stats.allowances_snapshot()))
             }
             (Method::GET, "/api/domains") => Ok(json(StatusCode::OK, &self.stats.snapshot())),
+            (Method::GET, "/api/capture") => {
+                Ok(json(StatusCode::OK, &CaptureStatus::of(self.stats.capture_settings())))
+            }
+            (Method::PUT, "/api/capture") => self.set_capture(request).await,
             (Method::POST, "/api/traffic/reset") => {
                 self.stats.reset();
                 Ok(json(StatusCode::OK, &serde_json::json!({})))
@@ -406,6 +446,37 @@ impl Api {
         self.policy.pause().pause(Duration::from_secs(pause.minutes * 60));
         tracing::warn!(minutes = pause.minutes, "blocking paused from the web UI");
         Ok(json(StatusCode::OK, &BlockingStatus::of(&self.policy)))
+    }
+
+    /// Turn capturing of HTTP headers and bodies on or off with a body size limit.
+    async fn set_capture(&self, request: Request) -> Result<Response, ApiError> {
+        let status: CaptureStatus = read_json(request).await.map_err(|error| match error {
+            BodyError::Timeout => ApiError::BodyTimeout,
+            BodyError::Invalid => ApiError::InvalidCapture,
+        })?;
+        if !(1..=MAX_BODY_LIMIT_KB).contains(&status.body_limit_kb) {
+            return Err(ApiError::InvalidCapture);
+        }
+        let settings = self.stats.capture_settings();
+        if status.enabled != settings.enabled() {
+            tracing::warn!(
+                enabled = status.enabled,
+                body_limit_kb = status.body_limit_kb,
+                "HTTP header and body capture changed from the web UI"
+            );
+        }
+        settings.set(status.enabled, status.body_limit_kb);
+        Ok(json(StatusCode::OK, &CaptureStatus::of(settings)))
+    }
+
+    /// Return one retained capture, decoding its bodies off the async runtime.
+    async fn capture_details(&self, id: &str) -> Result<Response, ApiError> {
+        let id: u64 = id.parse().map_err(|_| ApiError::UnknownCapture)?;
+        let capture = self.stats.capture(id).ok_or(ApiError::UnknownCapture)?;
+        let details = tokio::task::spawn_blocking(move || capture.details())
+            .await
+            .map_err(InternalError::Task)?;
+        Ok(json(StatusCode::OK, &details))
     }
 
     /// List every editable rule file with its number of allow tables, if it is valid.
@@ -1017,8 +1088,8 @@ mod tests {
         let harness = harness(temporary.path(), "secret");
         let stats = &harness.api.stats;
         stats.record(&Host::new("example.com"), crate::telemetry::Protocol::Dns, true);
-        stats.record_denial(&Host::new("example.com"), "GET", "/denied", None);
-        stats.record_allowance(&Host::new("example.com"), "GET", "/allowed", None, None);
+        stats.record_denial(&Host::new("example.com"), "GET", "/denied", None, None);
+        stats.record_allowance(&Host::new("example.com"), "GET", "/allowed", None, None, None);
         let body = serde_json::json!({});
         let anonymous = request(Method::POST, "/api/traffic/reset", None, &body);
         let response = harness.api.response(anonymous).await;
@@ -1032,6 +1103,61 @@ mod tests {
         assert!(stats.snapshot().is_empty());
         assert!(stats.denials_snapshot().is_empty());
         assert!(stats.allowances_snapshot().is_empty());
+    }
+
+    /// Capture settings start off, validate their limit, and expose retained captures by id.
+    #[tokio::test]
+    async fn toggles_capture_and_serves_captured_requests() {
+        let temporary = tempfile::tempdir().unwrap();
+        let harness = harness(temporary.path(), "secret");
+        let bearer = login(&harness.api, "secret").await;
+        let auth = Some(("authorization", bearer.as_str()));
+        let response = harness.api.response(request(Method::GET, "/api/capture", auth, &())).await;
+        let status: CaptureStatus = decode(response).await;
+        assert_eq!(
+            status,
+            CaptureStatus {
+                enabled: false,
+                body_limit_kb: 32
+            }
+        );
+        for invalid in [
+            serde_json::json!({"enabled": true, "body_limit_kb": 0}),
+            serde_json::json!({"enabled": true, "body_limit_kb": MAX_BODY_LIMIT_KB + 1}),
+            serde_json::json!({"enabled": true}),
+        ] {
+            let response =
+                harness.api.response(request(Method::PUT, "/api/capture", auth, &invalid)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{invalid}");
+        }
+        let enable = serde_json::json!({"enabled": true, "body_limit_kb": 64});
+        let response =
+            harness.api.response(request(Method::PUT, "/api/capture", auth, &enable)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let settings = harness.api.stats.capture_settings();
+        assert!(settings.enabled());
+        assert_eq!(settings.body_limit_kb(), 64);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-client", HeaderValue::from_static("yes"));
+        let capture = settings.begin(&headers).unwrap();
+        let host = Host::new("example.com");
+        harness.api.stats.record_denial(&host, "POST", "/denied", None, Some(capture.clone()));
+        let denials = request(Method::GET, "/api/http-denials", auth, &());
+        let listed: serde_json::Value = decode(harness.api.response(denials).await).await;
+        assert_eq!(listed[0]["capture_id"], capture.id());
+        let path = format!("/api/captures/{}", capture.id());
+        let response = harness.api.response(request(Method::GET, &path, auth, &())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let details: serde_json::Value = decode(response).await;
+        assert_eq!(details["request"]["headers"][0]["name"], "x-client");
+        assert_eq!(details["body_limit"], 64 * 1024);
+        for missing in ["/api/captures/999", "/api/captures/x", "/api/captures/"] {
+            let response = harness.api.response(request(Method::GET, missing, auth, &())).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{missing}");
+        }
+        let anonymous = harness.api.response(request(Method::GET, &path, None, &())).await;
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// Reject cross-origin mutations, unknown endpoints, methods, and disabled credentials.

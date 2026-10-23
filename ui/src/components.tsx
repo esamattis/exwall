@@ -121,6 +121,21 @@ export function PlayIcon(props: IconProps) {
     return <Icon {...props} paths={["M7 4.5v15L19 12z"]} />;
 }
 
+/** A cross for closing dialogs. */
+export function CloseIcon(props: IconProps) {
+    return <Icon {...props} paths={["M6 6l12 12", "M18 6 6 18"]} />;
+}
+
+/** A dot inside a ring for recording request details. */
+export function RecordIcon(props: IconProps) {
+    return (
+        <Icon
+            {...props}
+            paths={["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6"]}
+        />
+    );
+}
+
 /** A spinning ring shown while work is in progress. */
 export function Spinner({ className = "size-4" }: IconProps) {
     return (
@@ -378,6 +393,32 @@ export function Switch({
             </div>
         </div>
     );
+}
+
+/** Units used when formatting transferred byte counts. */
+const byteUnits = ["B", "kB", "MB", "GB", "TB", "PB"];
+
+/** Format a byte count with a decimal unit, such as `1.5 MB`. */
+export function formatBytes(bytes: number): string {
+    let value = bytes;
+    let unit = 0;
+    while (value >= 1000 && unit < byteUnits.length - 1) {
+        value /= 1000;
+        unit += 1;
+    }
+    const digits = unit === 0 || value >= 100 ? 0 : 1;
+    return `${value.toFixed(digits)} ${byteUnits[unit]}`;
+}
+
+/** Color HTTP methods by how much they can change on the server. */
+export function methodBadge(method: string): string {
+    if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
+        return "badge-info";
+    }
+    if (method === "DELETE") {
+        return "badge-block";
+    }
+    return "badge-warn";
 }
 
 /** Return the current time, refreshed periodically so relative labels stay accurate. */

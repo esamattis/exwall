@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, type MouseEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
@@ -25,12 +25,16 @@ import {
     FilterInput,
     PageHeader,
     RefreshIcon,
+    RecordIcon,
     RelativeTime,
     Spinner,
     TrashIcon,
+    formatBytes,
+    methodBadge,
     useNow,
     useToast,
 } from "./components.tsx";
+import { CaptureButton, RequestDialog } from "./capture.tsx";
 import { ruleAnchor } from "./rules.tsx";
 
 /** The traffic views selectable from the tab bar; `requests` lists blocked requests. */
@@ -76,21 +80,6 @@ function domainEntries(domains: DomainStats[], outcome: "allow" | "block"): Doma
             left.entry.domain.localeCompare(right.entry.domain),
     );
     return entries;
-}
-
-/** Units used when formatting transferred byte counts. */
-const byteUnits = ["B", "kB", "MB", "GB", "TB", "PB"];
-
-/** Format a byte count with a decimal unit, such as `1.5 MB`. */
-function formatBytes(bytes: number): string {
-    let value = bytes;
-    let unit = 0;
-    while (value >= 1000 && unit < byteUnits.length - 1) {
-        value /= 1000;
-        unit += 1;
-    }
-    const digits = unit === 0 || value >= 100 ? 0 : 1;
-    return `${value.toFixed(digits)} ${byteUnits[unit]}`;
 }
 
 /** Describe a completed domain allowance for the confirmation toast. */
@@ -239,6 +228,7 @@ export function TrafficPage({ view }: { view: TrafficView }) {
                 description="DNS lookups and HTTP(S) requests checked since exwall started or the last reset. Counters live in memory and reset on restart."
                 actions={
                     <>
+                        <CaptureButton />
                         {updatedAt > 0 && (
                             <span className="text-xs text-zinc-500">
                                 Updated {new Date(updatedAt).toLocaleTimeString()}
@@ -660,21 +650,21 @@ function RuleSource({ rule }: { rule: string | undefined }) {
     );
 }
 
-/** Color HTTP methods by how much they can change on the server. */
-function methodBadge(method: string): string {
-    if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
-        return "badge-info";
-    }
-    if (method === "DELETE") {
-        return "badge-block";
-    }
-    return "badge-warn";
+/** Identify a retained request row, whose repeats are grouped by query string too. */
+function rowKey(request: HttpRequest): string {
+    return `${request.domain} ${request.method} ${requestPath(request)}`;
+}
+
+/** Report whether a click landed on a link or button rather than on the row itself. */
+function isControlClick(event: MouseEvent): boolean {
+    return event.target instanceof Element && event.target.closest("a, button") !== null;
 }
 
 /**
  * Show the most recently seen unique HTTP requests with one outcome and how often each repeated.
  * Each can be allowed by exact method and path, which also keeps requests made while blocking is
- * paused allowed afterwards; allowed requests also show what allowed them.
+ * paused allowed afterwards; allowed requests also show what allowed them. Clicking a request
+ * opens a dialog with its decoded query string and any captured headers and bodies.
  */
 function RequestsTable({
     outcome,
@@ -695,6 +685,8 @@ function RequestsTable({
     locateRule: LocateRule;
     onAllow: (request: HttpRequest) => void;
 }) {
+    const [selectedKey, setSelectedKey] = useState<string | null>(null);
+    const selected = requests.find((request) => rowKey(request) === selectedKey);
     const title = outcome === "allow" ? "Allowed requests" : "Blocked requests";
     const verb = outcome === "allow" ? "allowed" : "denied";
     if (requests.length === 0) {
@@ -713,7 +705,8 @@ function RequestsTable({
             <p className="border-b border-white/5 px-4 py-2 text-xs text-zinc-500">
                 The {requestCapacity} most recently seen {verb} HTTP(S) requests, newest first, with
                 repeats of the same method, path, and query string counted together. Allowing a
-                request adds a rule for its exact method and path, with any query string.
+                request adds a rule for its exact method and path, with any query string. Click a
+                request to see its details.
             </p>
             <table className="w-full text-left text-sm">
                 <caption className="sr-only">{title}, latest first</caption>
@@ -740,10 +733,16 @@ function RequestsTable({
                         const label = requestKey(request);
                         const path = requestPath(request);
                         const done = allowed[label] === true;
+                        const key = rowKey(request);
                         return (
                             <tr
-                                key={`${request.domain} ${request.method} ${path}`}
-                                className="transition hover:bg-white/[0.03]"
+                                key={key}
+                                className="cursor-pointer transition hover:bg-white/[0.03]"
+                                onClick={(event) => {
+                                    if (!isControlClick(event)) {
+                                        setSelectedKey(key);
+                                    }
+                                }}
                             >
                                 <th
                                     scope="row"
@@ -759,14 +758,34 @@ function RequestsTable({
                                         {request.method}
                                     </span>
                                 </td>
-                                <td
-                                    className="max-w-md truncate px-4 py-2.5 font-mono text-[13px] text-zinc-300"
-                                    title={path}
-                                >
-                                    {request.pathname}
-                                    {request.query !== undefined && (
-                                        <span className="text-zinc-500">?{request.query}</span>
-                                    )}
+                                <td className="max-w-md px-4 py-2.5 font-mono text-[13px] text-zinc-300">
+                                    <span className="flex min-w-0 items-center gap-1.5">
+                                        <button
+                                            type="button"
+                                            className="truncate text-left hover:text-white focus-visible:underline focus-visible:outline-none"
+                                            aria-label={`Show details of ${request.method} ${request.domain}${path}`}
+                                            title={path}
+                                            onClick={() => setSelectedKey(key)}
+                                        >
+                                            {request.pathname}
+                                            {request.query !== undefined && (
+                                                <span className="text-zinc-500">
+                                                    ?{request.query}
+                                                </span>
+                                            )}
+                                        </button>
+                                        {request.capture_id !== undefined && (
+                                            <span
+                                                className="shrink-0 text-sky-300"
+                                                title="Headers and bodies captured"
+                                            >
+                                                <RecordIcon className="size-3.5" />
+                                                <span className="sr-only">
+                                                    Headers and bodies captured
+                                                </span>
+                                            </span>
+                                        )}
+                                    </span>
                                 </td>
                                 <td className="px-4 py-2.5 text-right text-zinc-300 tabular-nums">
                                     {request.count.toLocaleString()}
@@ -804,6 +823,16 @@ function RequestsTable({
                     })}
                 </tbody>
             </table>
+            {selected && (
+                <RequestDialog
+                    key={selectedKey}
+                    request={selected}
+                    outcome={outcome}
+                    allowedBy={<RuleSource rule={selected.rule} />}
+                    now={now}
+                    onClose={() => setSelectedKey(null)}
+                />
+            )}
         </div>
     );
 }
