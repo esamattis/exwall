@@ -621,6 +621,7 @@ mod tests {
         config::RuntimeSettings,
         policy::{Host, LoadError, MissingDirectory, Policy, load_rules},
         runtime::{PolicyStore, Reloader},
+        telemetry::{HttpRequest, Protocol},
         ui::{
             auth::{Credentials, FileSessionStore, RandomTokens},
             rules_doc::Draft,
@@ -1087,9 +1088,28 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let harness = harness(temporary.path(), "secret");
         let stats = &harness.api.stats;
-        stats.record(&Host::new("example.com"), crate::telemetry::Protocol::Dns, true);
-        stats.record_denial(&Host::new("example.com"), "GET", "/denied", None, None);
-        stats.record_allowance(&Host::new("example.com"), "GET", "/allowed", None, None, None);
+        stats.record(&Host::new("example.com"), Protocol::Dns, true);
+        stats.record_denial(HttpRequest::new(
+            Protocol::Https,
+            &Host::new("example.com"),
+            None,
+            "GET",
+            "/denied",
+            None,
+            None,
+        ));
+        stats.record_allowance(
+            HttpRequest::new(
+                Protocol::Https,
+                &Host::new("example.com"),
+                None,
+                "GET",
+                "/allowed",
+                None,
+                None,
+            ),
+            None,
+        );
         let body = serde_json::json!({});
         let anonymous = request(Method::POST, "/api/traffic/reset", None, &body);
         let response = harness.api.response(anonymous).await;
@@ -1142,7 +1162,15 @@ mod tests {
         headers.insert("x-client", HeaderValue::from_static("yes"));
         let capture = settings.begin(&headers).unwrap();
         let host = Host::new("example.com");
-        harness.api.stats.record_denial(&host, "POST", "/denied", None, Some(capture.clone()));
+        harness.api.stats.record_denial(HttpRequest::new(
+            Protocol::Https,
+            &host,
+            None,
+            "POST",
+            "/denied",
+            None,
+            Some(capture.clone()),
+        ));
         let denials = request(Method::GET, "/api/http-denials", auth, &());
         let listed: serde_json::Value = decode(harness.api.response(denials).await).await;
         assert_eq!(listed[0]["capture_id"], capture.id());

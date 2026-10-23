@@ -385,8 +385,7 @@ fn request_path(request: &Request) -> (String, String) {
 
 /// Build the absolute URI that forwards a request to `host`, or `None` if it is invalid.
 ///
-/// The port comes from the request authority, the CONNECT target, or the
-/// original destination, defaulting to the scheme's port.
+/// The port is chosen by [`destination_port`].
 fn destination_uri(
     scheme: &str,
     authority: &Authority,
@@ -394,17 +393,25 @@ fn destination_uri(
     host: &Host,
     path: &str,
 ) -> Option<Uri> {
+    let port = destination_port(scheme, authority, target);
+    Uri::parse(format!("{scheme}://{}:{port}{path}", host.uri_host())).ok()
+}
+
+/// Select the port a request is forwarded to.
+///
+/// The port comes from the request authority, the CONNECT target, or the
+/// original destination, defaulting to the scheme's port.
+fn destination_port(scheme: &str, authority: &Authority, target: &Target) -> u16 {
     let default_port = if scheme == "https" {
         443
     } else {
         80
     };
-    let port = authority
+    authority
         .port_u16()
         .or_else(|| target.tunnel.as_ref().and_then(Authority::port_u16))
         .or_else(|| target.original.map(|address| address.port()))
-        .unwrap_or(default_port);
-    Uri::parse(format!("{scheme}://{}:{port}{path}", host.uri_host())).ok()
+        .unwrap_or(default_port)
 }
 
 /// Authorize a request strictly by the allow rules.
@@ -582,6 +589,8 @@ pub fn initial_event(request: &Request, target: &Target) -> RequestEvent {
     if !is_connect {
         event.pathname = Some(request.uri().path_or_root().into_owned());
         event.query = request.uri().query().map(|query| query.to_string());
+        event.port = request_authority(request, target)
+            .map(|authority| destination_port(scheme, &authority, target));
     }
     event
 }
@@ -1045,7 +1054,8 @@ inject_headers = [{ name = 'Authorization', value = 'secret' }]
         assert_eq!(plan.source, MatchSource::Paused);
     }
 
-    /// Initial events capture full URLs, pathnames, and query strings, but no path for CONNECT.
+    /// Initial events capture full URLs, pathnames, query strings, and destination ports, but
+    /// no path or port for CONNECT.
     #[test]
     fn initial_events_describe_requests() {
         let event = initial_event(
@@ -1059,8 +1069,19 @@ inject_headers = [{ name = 'Authorization', value = 'secret' }]
         assert_eq!(event.url, "https://h.test:8080/p?q=1");
         assert_eq!(event.pathname.as_deref(), Some("/p"));
         assert_eq!(event.query.as_deref(), Some("q=1"));
+        assert_eq!(event.port, Some(8080));
         let event = initial_event(&request("/p", &[("Host", "h.test")]), &Target::default());
         assert_eq!(event.query, None);
+        assert_eq!(event.port, Some(80));
+        let event = initial_event(
+            &request("/p", &[("Host", "h.test")]),
+            &Target {
+                original: Some("192.0.2.1:8443".parse().unwrap()),
+                tls: true,
+                ..Target::default()
+            },
+        );
+        assert_eq!(event.port, Some(8443));
         let event = initial_event(
             &connect_request("h.test:443"),
             &Target {
@@ -1071,5 +1092,6 @@ inject_headers = [{ name = 'Authorization', value = 'secret' }]
         assert_eq!(event.url, "https://h.test:443/");
         assert_eq!(event.pathname, None);
         assert_eq!(event.query, None);
+        assert_eq!(event.port, None);
     }
 }

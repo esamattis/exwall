@@ -643,9 +643,10 @@ function RuleSource({ rule }: { rule: string | undefined }) {
     );
 }
 
-/** Identify a retained request row, whose repeats are grouped by query string too. */
+/** Identify a retained request row, whose repeats are grouped by scheme, port, and query string too. */
 function rowKey(request: HttpRequest): string {
-    return `${request.domain} ${request.method} ${requestPath(request)}`;
+    const port = request.port ?? "";
+    return `${request.scheme} ${request.domain} ${port} ${request.method} ${requestPath(request)}`;
 }
 
 /** Report whether a click landed on a link or button rather than on the row itself. */

@@ -99,7 +99,10 @@ export interface DomainStats {
 
 /** One retained HTTP request and its repeats, grouped by method, pathname, and query string. */
 export interface HttpRequest {
+    scheme: "http" | "https";
     domain: string;
+    /** The destination port; absent when it is the scheme's default. */
+    port?: number;
     method: string;
     pathname: string;
     /** The raw query string without `?`; absent when the request had none. */

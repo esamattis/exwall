@@ -446,6 +446,10 @@ export function RequestDialog({
     }, []);
     const query = request.query === undefined ? [] : parseQuery(request.query);
     const target = `${request.pathname}${request.query === undefined ? "" : `?${request.query}`}`;
+    // IPv6 addresses are retained bare but need brackets in a URL.
+    const host = request.domain.includes(":") ? `[${request.domain}]` : request.domain;
+    const authority = request.port === undefined ? host : `${host}:${request.port}`;
+    const url = `${request.scheme}://${authority}${target}`;
     return (
         <dialog
             ref={dialog}
@@ -489,7 +493,7 @@ export function RequestDialog({
                             )}
                         </p>
                     </div>
-                    <CopyButton text={`${request.domain}${target}`} label="Copy host and path" />
+                    <CopyButton text={url} label="Copy URL" />
                     <button
                         type="button"
                         className="btn btn-icon btn-ghost"

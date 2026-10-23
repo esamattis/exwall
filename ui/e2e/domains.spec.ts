@@ -617,6 +617,12 @@ test("request rows open details with decoded query strings and opt-in captured h
     await expect
         .poll(() => page.evaluate(() => navigator.clipboard.readText()))
         .toBe("café au lait");
+    await dialog.getByRole("button", { name: "Copy URL", exact: true }).click();
+    await expect
+        .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+        .toBe(
+            `http://127.0.0.1:${fixture.upstreamPort}/uncaptured?q=caf%C3%A9+au+lait&next=%2Fhome`,
+        );
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
 

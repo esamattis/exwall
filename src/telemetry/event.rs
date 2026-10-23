@@ -85,6 +85,9 @@ pub struct RequestEvent {
     /// The raw HTTP query string without `?`, retained for request history; `None` when the
     /// request has no query, and for CONNECT and DNS.
     pub query: Option<String>,
+    /// The HTTP destination port, retained for request history; `None` for CONNECT and DNS,
+    /// and when the request has no authority.
+    pub port: Option<u16>,
     /// Captured headers and bodies, while capturing is enabled; never written to the access log.
     pub capture: Option<Capture>,
     /// The HTTP status returned to the client.
@@ -118,6 +121,7 @@ impl RequestEvent {
             subjects: Vec::new(),
             pathname: None,
             query: None,
+            port: None,
             capture: None,
             http_status: None,
             dns_rcode: None,
