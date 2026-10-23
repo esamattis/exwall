@@ -55,6 +55,13 @@ impl EventSink {
     /// A full queue drops the event and counts it so the actor can report the loss.
     pub fn submit(&self, event: RequestEvent) {
         self.stats.record_event(&event);
+        self.log(event);
+    }
+
+    /// Queue the event for the access log without updating statistics.
+    ///
+    /// A full queue drops the event and counts it so the actor can report the loss.
+    fn log(&self, event: RequestEvent) {
         match self.sender.try_send(event) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
@@ -71,6 +78,7 @@ impl EventSink {
         PendingEvent {
             sink: self.clone(),
             event: Some(event),
+            recorded: false,
         }
     }
 }
@@ -81,6 +89,8 @@ pub struct PendingEvent {
     sink: EventSink,
     /// The event, present until the guard is dropped.
     event: Option<RequestEvent>,
+    /// Whether statistics already include the event, so dropping only writes the log row.
+    recorded: bool,
 }
 
 impl PendingEvent {
@@ -88,13 +98,30 @@ impl PendingEvent {
     pub fn event(&mut self) -> &mut RequestEvent {
         self.event.as_mut().expect("pending event exists until the guard is dropped")
     }
+
+    /// Update statistics and request history from the event now, and write only the
+    /// access-log row when the guard is dropped.
+    ///
+    /// A WebSocket is shown in the web UI as soon as it opens, while its log row waits
+    /// for it to close so that the row can report how it ended.
+    pub fn record_now(&mut self) {
+        if std::mem::replace(&mut self.recorded, true) {
+            return;
+        }
+        let event = self.event.as_ref().expect("pending event exists until the guard is dropped");
+        self.sink.stats.record_event(event);
+    }
 }
 
 impl Drop for PendingEvent {
     /// Submit exactly one event, including requests interrupted before a response exists.
     fn drop(&mut self) {
         if let Some(event) = self.event.take() {
-            self.sink.submit(event);
+            if self.recorded {
+                self.sink.log(event);
+            } else {
+                self.sink.submit(event);
+            }
         }
     }
 }
@@ -115,6 +142,24 @@ mod tests {
         drop(answered);
         assert_eq!(receiver.events.recv().await.unwrap().failure, Some(Failure::Cancelled));
         assert_eq!(receiver.events.recv().await.unwrap().failure, None);
+    }
+
+    /// An event recorded early is counted in statistics once and still logged on drop.
+    #[tokio::test]
+    async fn early_recording_counts_once() {
+        let (sink, mut receiver) = EventSink::channel(4);
+        let mut event = RequestEvent::http(Protocol::Wss, "GET", "wss://test.example/");
+        event.decide(crate::policy::Decision::Allow);
+        event.subjects = vec![crate::policy::Host::new("test.example")];
+        let mut guard = sink.track(event);
+        guard.event().respond_http(101);
+        guard.record_now();
+        guard.record_now();
+        assert_eq!(sink.stats().snapshot()[0].http.allow, 1);
+        assert!(receiver.events.try_recv().is_err());
+        drop(guard);
+        assert_eq!(receiver.events.recv().await.unwrap().http_status, Some(101));
+        assert_eq!(sink.stats().snapshot()[0].http.allow, 1);
     }
 
     /// A full queue never blocks handlers; losses are counted for reporting.

@@ -6,6 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { exchange, tlsExchange } from "#playwright_helpers/proxy_fixture.mts";
 import { queryDns } from "#playwright_helpers/dns.mts";
 import { runCommand, stopProcess } from "#playwright_helpers/processes.mts";
+import { websocketExchange } from "#playwright_helpers/websocket.mts";
 
 test("local proxy protocols, TLS trust, streaming, DNS, reloads, UI API, and access logs", async ({
     request,
@@ -88,6 +89,7 @@ test("local proxy protocols, TLS trust, streaming, DNS, reloads, UI API, and acc
         path: "/allowed?query=retained",
         authorization: null,
         trace: null,
+        upgrade: null,
     });
     expect((await http("/allowed", "GET", {}, "127.0.0.1", true)).status).toBe(200);
     expect((await http("/allowed?upstream_status=502")).status).toBe(502);
@@ -104,13 +106,73 @@ test("local proxy protocols, TLS trust, streaming, DNS, reloads, UI API, and acc
     for (const [path, method, headers, expected] of [
         ["/secure", "GET", {}, 403],
         ["/allowed", "GET", { Host: "denied.test" }, 421],
-        ["/allowed", "GET", { Upgrade: "websocket" }, 501],
         ["/denied", "GET", {}, 403],
         ["/allowed", "POST", {}, 403],
     ] satisfies [string, string, Record<string, string>, number][]) {
         expect((await http(path, method, headers)).status).toBe(expected);
     }
     expect((await http("/allowed", "GET", {}, "denied.test")).status).toBe(403);
+    // Upgrade offers other than WebSocket are stripped, so the client stays on HTTP/1.1.
+    const offers: Record<string, string>[] = [
+        {
+            Upgrade: "h2c",
+            Connection: "Upgrade, HTTP2-Settings",
+            "HTTP2-Settings": "AAMAAABkAAQAAP__",
+        },
+        { Upgrade: "websocket" },
+        { Upgrade: "TLS/1.0", Connection: "Upgrade" },
+    ];
+    for (const offer of offers) {
+        const response = await http("/allowed", "GET", offer);
+        expect(response.status).toBe(200);
+        expect(JSON.parse(response.body).upgrade).toBeNull();
+    }
+    const h2c = await runCommand([
+        "curl",
+        "--silent",
+        "--show-error",
+        "--noproxy",
+        "",
+        "--http2",
+        "--proxy",
+        `http://127.0.0.1:${proxyPort}`,
+        `http://127.0.0.1:${upstreamPort}/allowed`,
+        "--write-out",
+        "\n%{http_version}",
+    ]);
+    expect(h2c.endsWith("\n1.1")).toBe(true);
+    expect(JSON.parse(h2c.slice(0, h2c.lastIndexOf("\n"))).upgrade).toBeNull();
+    // WebSockets are relayed wherever the rules allow their handshake GET.
+    const plainSocket = await websocketExchange({
+        proxyPort,
+        port: upstreamPort,
+        path: "/allowed",
+    });
+    expect(plainSocket).toEqual({
+        status: 101,
+        accepted: true,
+        greeting: { path: "/allowed", authorization: null },
+        echo: "echo:hello",
+        closeCode: 1000,
+    });
+    for (const tunnel of [false, true]) {
+        const secureSocket = await websocketExchange({
+            proxyPort,
+            port: securePort,
+            path: "/secure",
+            secure: { ca: cert, tunnel },
+        });
+        expect(secureSocket).toEqual({
+            status: 101,
+            accepted: true,
+            greeting: { path: "/secure", authorization: "replacement" },
+            echo: "echo:hello",
+            closeCode: 1000,
+        });
+    }
+    expect(await websocketExchange({ proxyPort, port: upstreamPort, path: "/denied" })).toEqual({
+        status: 403,
+    });
     for (const tunnel of [false, true]) {
         const response = await tlsExchange(proxyPort, securePort, cert, "/secure", tunnel);
         expect(response.status).toBe(200);
@@ -256,6 +318,25 @@ test("local proxy protocols, TLS trust, streaming, DNS, reloads, UI API, and acc
             error: "-",
         })),
         { protocol: "https", decision: "DENY", http_status: "403", error: "-" },
+        {
+            protocol: "ws",
+            decision: "ALLOW",
+            rule: `${fixture.rule}:allow#2`,
+            method: "GET",
+            url: `ws://127.0.0.1:${upstreamPort}/allowed`,
+            http_status: "101",
+            error: "-",
+        },
+        {
+            protocol: "wss",
+            decision: "ALLOW",
+            rule: `${fixture.rule}:allow#1`,
+            method: "GET",
+            url: `wss://localhost:${securePort}/secure`,
+            http_status: "101",
+            error: "-",
+        },
+        { protocol: "ws", decision: "DENY", rule: "-", http_status: "403", error: "-" },
         { protocol: "https", decision: "ALLOW", http_status: "502", error: "UPSTREAM_FAILURE" },
         {
             protocol: "http",

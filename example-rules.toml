@@ -74,6 +74,8 @@
 #   upstream request is sent.
 # * HTTP authorization and `inject_headers` use the first matching rule.
 #   Headers are not merged across matching rules.
+# * A WebSocket (ws:// or wss://) opens with a GET request, which is matched
+#   like any other request. There is no separate WebSocket setting.
 #
 # ─── Examples ─────────────────────────────────────────────────────────────────
 #

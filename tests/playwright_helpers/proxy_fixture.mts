@@ -10,6 +10,7 @@ import { once } from "node:events";
 import type { Socket } from "node:net";
 import type { RequestOptions, Server, RequestListener } from "node:http";
 import { startDns } from "#playwright_helpers/dns.mts";
+import { serveWebSocket } from "#playwright_helpers/websocket.mts";
 import { debugBinaryPath } from "#playwright_helpers/fixture_constants.mts";
 import {
     bounded,
@@ -130,6 +131,33 @@ export async function exchange(options: RequestOptions, socket?: Socket, body?: 
     }
 }
 
+/** Ask the proxy on a connected socket to CONNECT to `localhost:port`, ready for TLS. */
+export async function openTunnel(socket: Socket, port: number) {
+    const received = bounded(
+        new Promise<void>((resolve, reject) => {
+            let header = "";
+            /** Consume exactly the CONNECT response before beginning TLS. */
+            function data(chunk: Buffer) {
+                header += chunk.toString();
+                if (header.endsWith("\r\n\r\n")) {
+                    socket.off("data", data);
+                    if (!header.startsWith("HTTP/1.1 200")) {
+                        reject(new Error(header));
+                    } else {
+                        resolve();
+                    }
+                }
+            }
+            socket.on("data", data);
+            socket.once("error", reject);
+        }),
+        3000,
+        "CONNECT response",
+    );
+    socket.write(`CONNECT localhost:${port} HTTP/1.1\r\nHost: localhost:${port}\r\n\r\n`);
+    await received;
+}
+
 /** Wrap direct TLS or a CONNECT tunnel while preserving the proxy's authority validation. */
 export async function tlsExchange(
     proxyPort: number,
@@ -143,31 +171,7 @@ export async function tlsExchange(
     try {
         await once(socket, "connect");
         if (tunnel) {
-            const received = bounded(
-                new Promise<void>((resolve, reject) => {
-                    let header = "";
-                    /** Consume exactly the CONNECT response before beginning TLS. */
-                    function data(chunk: Buffer) {
-                        header += chunk.toString();
-                        if (header.endsWith("\r\n\r\n")) {
-                            socket.off("data", data);
-                            if (!header.startsWith("HTTP/1.1 200")) {
-                                reject(new Error(header));
-                            } else {
-                                resolve();
-                            }
-                        }
-                    }
-                    socket.on("data", data);
-                    socket.once("error", reject);
-                }),
-                3000,
-                "CONNECT response",
-            );
-            socket.write(
-                `CONNECT localhost:${upstreamPort} HTTP/1.1\r\nHost: localhost:${upstreamPort}\r\n\r\n`,
-            );
-            await received;
+            await openTunnel(socket, upstreamPort);
         }
         const secure = connect({ socket, servername: "localhost", ca });
         await bounded(once(secure, "secureConnect"), 3000, "TLS handshake");
@@ -185,7 +189,10 @@ export async function tlsExchange(
     }
 }
 
-/** Start echo upstreams, DNS, and a real exwall server with its production file watcher. */
+/**
+ * Start echo upstreams, which also accept WebSockets, DNS, and a real exwall server with its
+ * production file watcher.
+ */
 export async function startProtocolFixture() {
     const root = await mkdtemp(join(tmpdir(), "exwall-protocol-"));
     const binary = resolve(debugBinaryPath);
@@ -226,6 +233,7 @@ export async function startProtocolFixture() {
                     path: req.url,
                     authorization: req.headers.authorization ?? null,
                     trace: req.headers["x-trace"] ?? null,
+                    upgrade: req.headers.upgrade ?? null,
                 });
                 res.writeHead(req.url === "/allowed?upstream_status=502" ? 502 : 200, {
                     "content-length": Buffer.byteLength(body),
@@ -254,10 +262,13 @@ export async function startProtocolFixture() {
             }
             return address.port;
         }
-        const upstreamPort = await listen(createServer(handler));
-        const securePort = await listen(
-            createTlsServer({ ...material, ALPNProtocols: ["http/1.1"] }, handler),
-        );
+        const plainServer = createServer(handler);
+        const secureServer = createTlsServer({ ...material, ALPNProtocols: ["http/1.1"] }, handler);
+        for (const server of [plainServer, secureServer]) {
+            server.on("upgrade", serveWebSocket);
+        }
+        const upstreamPort = await listen(plainServer);
+        const securePort = await listen(secureServer);
         const roguePort = await listen(createTlsServer(rogueMaterial, handler));
         const dns = await startDns("127.0.0.1");
         cleanup.push(() => dns.close());

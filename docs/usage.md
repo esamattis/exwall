@@ -127,6 +127,20 @@ the file) decides its headers.
 
 See [example-rules.toml](../example-rules.toml) for every option.
 
+### WebSockets
+
+WebSockets (`ws://` and `wss://`) work wherever your rules allow their opening
+request, which is a `GET` to the WebSocket's URL. There is no separate setting:
+the rule's domain, path, and method filters apply as usual, and `inject_headers`
+adds its headers to the opening request. Once open, a WebSocket stays open until
+either side closes it, even if the rules change. A WebSocket on which neither side
+sends anything, not even a ping, for 10 minutes is closed.
+
+Only WebSockets over HTTP/1.1 are supported. Browsers that would use HTTP/2 fall
+back to a separate HTTP/1.1 connection on their own. Other protocol upgrades,
+such as HTTP/2 over plain HTTP (h2c), are not passed on: the request is answered
+over HTTP/1.1 like any other.
+
 ## Configuration
 
 `/etc/exwall/config.toml` is documented inline; see
@@ -174,9 +188,11 @@ ssh -L 58000:127.0.0.1:58000 your-server
 ```
 
 - **Traffic** lists blocked and allowed domains with request counts and the
-  HTTP(S) body bytes sent up and received down, and the latest blocked
-  requests. Allow a blocked domain, its subdomains, a DNS-only lookup, or one
-  exact request with a single click.
+  HTTP(S) body bytes and WebSocket message bytes sent up and received down,
+  and the latest blocked requests. WebSockets are marked **WS**. Allow a
+  blocked domain, its subdomains, a DNS-only lookup, or one exact request with
+  a single click. With **Capture** on, a request's details show its headers
+  and bodies, or for a WebSocket the first messages in each direction.
 - **Rules** lists every `*.toml` file in `/etc/exwall/rules.d/` and edits any
   of them; comments and formatting are kept. **Edit as TOML** switches to a
   text editor for the whole file. Invalid files open directly in the TOML
@@ -217,6 +233,7 @@ Access log lines look like this:
 TIMESTAMP PROTOCOL RESULT RULE HTTP_METHOD URL HTTP_STATUS DNS_RCODE ERROR
 2026-10-07T12:34:56Z https ALLOW /etc/exwall/rules.d/10-examples.toml:allow#1 GET https://github.com:443/api 200 - -
 2026-10-07T12:34:57Z http DENY - POST http://denied.test/upload 403 - -
+2026-10-07T12:34:57Z wss ALLOW /etc/exwall/rules.d/10-examples.toml:allow#3 GET wss://ws.example.com:443/socket 101 - -
 2026-10-07T12:34:58Z dns DENY - - dns://denied.test/A - REFUSED - x3
 ```
 
@@ -225,9 +242,15 @@ blocking was paused from the web UI. A trailing `x3`
 means the same request was repeated three times within a second. `ERROR` explains
 failures such as `UPSTREAM_TIMEOUT` or `UPSTREAM_FAILURE`.
 
+A WebSocket is logged once, with the protocol `ws` or `wss`, when it closes; the
+line carries the time it opened, so WebSocket lines can appear out of time order,
+and they are never merged with an `x` count. `ERROR` shows how it ended if neither side closed
+it properly: `IDLE_TIMEOUT`, `CLIENT_DISCONNECTED`, `UPSTREAM_FAILURE`,
+`DISCONNECTED` when a connection broke on an unknown side, or `CANCELLED` when
+exwall stopped.
+
 ## Limitations
 
-- WebSocket connections are blocked.
 - Only processes on this host are filtered, and users who can change the firewall
   (such as root) can turn it off.
 - Users can still resolve names through systemd-resolved's D-Bus interface, so

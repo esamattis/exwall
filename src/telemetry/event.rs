@@ -1,4 +1,4 @@
-//! Typed request events, recorded once per HTTP request, CONNECT, or DNS message.
+//! Typed request events, recorded once per HTTP request, CONNECT, WebSocket, or DNS message.
 
 use super::capture::Capture;
 use crate::policy::{Decision, Host, MatchSource};
@@ -13,6 +13,10 @@ pub enum Protocol {
     Http,
     /// HTTP over TLS, including explicit CONNECT setup.
     Https,
+    /// A plaintext WebSocket, from its HTTP/1.1 handshake until it closes.
+    Ws,
+    /// A WebSocket over TLS, from its HTTP/1.1 handshake until it closes.
+    Wss,
 }
 
 impl Protocol {
@@ -22,7 +26,14 @@ impl Protocol {
             Self::Dns => "dns",
             Self::Http => "http",
             Self::Https => "https",
+            Self::Ws => "ws",
+            Self::Wss => "wss",
         }
+    }
+
+    /// Report whether the protocol is carried over TLS, so its default port is 443.
+    pub fn is_tls(self) -> bool {
+        matches!(self, Self::Https | Self::Wss)
     }
 }
 
@@ -45,6 +56,13 @@ pub enum Failure {
     Cancelled,
     /// The DNS concurrency limit prevented request processing.
     Overloaded,
+    /// An open WebSocket carried no messages for longer than the idle timeout.
+    IdleTimeout,
+    /// The client ended an open WebSocket without a close handshake.
+    ClientDisconnected,
+    /// An open WebSocket broke without a close handshake because one of its
+    /// connections could no longer be written to, and the side is unknown.
+    Disconnected,
 }
 
 impl Failure {
@@ -59,6 +77,9 @@ impl Failure {
             Self::ConnectSetup => "CONNECT_SETUP",
             Self::Cancelled => "CANCELLED",
             Self::Overloaded => "OVERLOADED",
+            Self::IdleTimeout => "IDLE_TIMEOUT",
+            Self::ClientDisconnected => "CLIENT_DISCONNECTED",
+            Self::Disconnected => "DISCONNECTED",
         }
     }
 }

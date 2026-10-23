@@ -5,6 +5,7 @@ use crate::{
         Decision, Enforcement, Host, MatchSource, RuleId, RuleSet,
         path_safety::{is_clean_pathname, is_unambiguous_pathname},
     },
+    proxy::websocket::is_websocket_handshake,
     telemetry::{Failure, Protocol, RequestEvent},
 };
 use rama::{
@@ -13,7 +14,11 @@ use rama::{
     net::{address::Authority, uri::Uri},
     tls::SecureTransport,
 };
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
+use tokio::sync::OwnedSemaphorePermit;
+
+/// The request header carrying HTTP/2 settings in an h2c upgrade offer.
+const HTTP2_SETTINGS: HeaderName = HeaderName::from_static("http2-settings");
 
 /// Connection routing information retained while filtering HTTP requests.
 #[derive(Clone, Debug, Default)]
@@ -24,6 +29,11 @@ pub struct Target {
     pub tunnel: Option<Authority>,
     /// Whether the connection was TLS-terminated by the proxy.
     pub tls: bool,
+    /// The client connection's slot under the proxy's connection limit.
+    ///
+    /// Tasks that outlive the HTTP connection, such as an open WebSocket or a
+    /// CONNECT tunnel, keep a clone so the connection keeps counting toward the limit.
+    pub slot: Option<Arc<OwnedSemaphorePermit>>,
 }
 
 /// An authorized request's fixed destination and header injections.
@@ -55,8 +65,6 @@ pub struct ConnectPlan {
 pub enum Rejection {
     /// CONNECT inside an intercepted connection.
     NestedConnect,
-    /// A protocol upgrade such as WebSocket.
-    UpgradeUnsupported,
     /// No URI authority, Host header, tunnel, or original destination.
     MissingAuthority,
     /// The Host header cannot be parsed.
@@ -122,7 +130,6 @@ impl Rejection {
     pub fn status(&self) -> StatusCode {
         match self {
             Self::NestedConnect => StatusCode::METHOD_NOT_ALLOWED,
-            Self::UpgradeUnsupported => StatusCode::NOT_IMPLEMENTED,
             Self::MissingAuthority
             | Self::InvalidHostHeader
             | Self::UnsupportedScheme {
@@ -154,7 +161,6 @@ impl Rejection {
     pub fn message(&self) -> &'static str {
         match self {
             Self::NestedConnect => "nested CONNECT is not allowed\n",
-            Self::UpgradeUnsupported => "protocol upgrades are not supported\n",
             Self::MissingAuthority => "missing or invalid authority\n",
             Self::InvalidHostHeader => "invalid Host header\n",
             Self::HostMismatch => "Host differs from request authority\n",
@@ -432,9 +438,6 @@ fn authorize_by_rules(
     if request.method() == Method::CONNECT {
         return Err(Rejection::NestedConnect);
     }
-    if request.headers().contains_key(header::UPGRADE) {
-        return Err(Rejection::UpgradeUnsupported);
-    }
     let authority = request_authority(request, target).ok_or(Rejection::MissingAuthority)?;
     let host = authority_host(&authority);
     if let Some(value) = request.headers().get(header::HOST) {
@@ -532,6 +535,12 @@ pub fn authorize_connect(
 }
 
 /// Route the request to its authorized destination and replace client hop-by-hop headers.
+///
+/// Removing the hop-by-hop headers also strips every protocol upgrade offer:
+/// `Upgrade`, `Connection` with the headers it names, and `HTTP2-Settings`. A
+/// client offering h2c or any other upgrade is answered with an ordinary
+/// response and stays on HTTP/1.1, where its later requests are still filtered.
+/// WebSocket handshakes restore their own upgrade headers afterwards.
 pub fn apply_plan(request: &mut Request, plan: &ForwardPlan) {
     *request.uri_mut() = plan.destination.clone();
     // TE: trailers is legal on HTTP/2 and advertises support for gRPC trailers.
@@ -543,6 +552,7 @@ pub fn apply_plan(request: &mut Request, plan: &ForwardPlan) {
         .flat_map(|value| value.split(','))
         .any(|value| value.trim().eq_ignore_ascii_case("trailers"));
     rama::http::layer::remove_header::remove_hop_by_hop_request_headers(request.headers_mut());
+    request.headers_mut().remove(HTTP2_SETTINGS);
     if accepts_trailers {
         request.headers_mut().insert(header::TE, HeaderValue::from_static("trailers"));
     }
@@ -552,12 +562,16 @@ pub fn apply_plan(request: &mut Request, plan: &ForwardPlan) {
 }
 
 /// Capture the protocol, method, and full URL before filtering, for absolute and origin-form requests.
+///
+/// A WebSocket handshake is described with the `ws` or `wss` protocol and URL scheme.
 pub fn initial_event(request: &Request, target: &Target) -> RequestEvent {
     let scheme = request_scheme(request, target);
-    let protocol = if scheme == "https" {
-        Protocol::Https
-    } else {
-        Protocol::Http
+    let websocket = is_websocket_handshake(request);
+    let protocol = match (scheme == "https", websocket) {
+        (true, true) => Protocol::Wss,
+        (true, false) => Protocol::Https,
+        (false, true) => Protocol::Ws,
+        (false, false) => Protocol::Http,
     };
     let authority = request
         .uri()
@@ -585,6 +599,11 @@ pub fn initial_event(request: &Request, target: &Target) -> RequestEvent {
         }
         None => request.uri().to_string(),
     };
+    let url = if websocket {
+        websocket_url(url)
+    } else {
+        url
+    };
     let mut event = RequestEvent::http(protocol, request.method().as_str(), url);
     if !is_connect {
         event.pathname = Some(request.uri().path_or_root().into_owned());
@@ -600,7 +619,23 @@ pub fn record_plan(event: &mut RequestEvent, plan: &ForwardPlan) {
     event.decide(Decision::Allow);
     event.matched(plan.source.clone());
     event.subjects = vec![plan.host.clone()];
-    event.url = plan.destination.to_string();
+    let url = plan.destination.to_string();
+    event.url = if matches!(event.protocol, Protocol::Ws | Protocol::Wss) {
+        websocket_url(url)
+    } else {
+        url
+    };
+}
+
+/// Replace an `http` or `https` URL scheme with `ws` or `wss`.
+fn websocket_url(url: String) -> String {
+    if let Some(rest) = url.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        url
+    }
 }
 
 #[cfg(test)]
@@ -853,21 +888,93 @@ inject_headers = [{ name = 'Authorization', value = 'secret' }]
         assert_eq!(request.headers()["te"], "trailers");
     }
 
-    /// Reject conflicting authority metadata and unsupported upgrades before forwarding.
+    /// Reject conflicting authority metadata before forwarding.
     #[test]
-    fn rejects_conflicting_hosts_and_raw_upgrades() {
+    fn rejects_conflicting_hosts() {
         let rules = injecting_rules();
-        let mut request = request("http://allowed.test/allowed", &[("Host", "denied.test")]);
+        let request = request("http://allowed.test/allowed", &[("Host", "denied.test")]);
         let rejection =
             authorize(&request, &Target::default(), &rules, Enforcement::Enforced).unwrap_err();
         assert_eq!(rejection, Rejection::HostMismatch);
         assert_eq!(rejection.status(), StatusCode::MISDIRECTED_REQUEST);
-        request.headers_mut().insert("host", "allowed.test".parse().unwrap());
-        request.headers_mut().insert("upgrade", "websocket".parse().unwrap());
+    }
+
+    /// Non-WebSocket upgrade offers such as h2c are authorized like any request and
+    /// forwarded without their upgrade negotiation, so the client stays on HTTP/1.1.
+    #[test]
+    fn strips_non_websocket_upgrade_offers() {
+        let rules = rules("[[allow]]\ndomain = 'allowed.test'");
+        for (upgrade, connection) in
+            [("h2c", "Upgrade, HTTP2-Settings"), ("websocket", "Upgrade"), ("TLS/1.0", "upgrade")]
+        {
+            let mut forwarded = request(
+                "http://allowed.test/x",
+                &[
+                    ("Upgrade", upgrade),
+                    ("Connection", connection),
+                    ("HTTP2-Settings", "AAMAAABkAAQAAP__"),
+                ],
+            );
+            if upgrade == "websocket" {
+                // Only a GET can open a WebSocket.
+                *forwarded.method_mut() = Method::HEAD;
+            }
+            assert!(!is_websocket_handshake(&forwarded), "{upgrade}");
+            let event = initial_event(&forwarded, &Target::default());
+            assert_eq!(event.protocol, Protocol::Http, "{upgrade}");
+            let plan = prepare(&mut forwarded, &Target::default(), &rules).unwrap();
+            assert_eq!(plan.source.to_string(), "test:allow#1");
+            for name in ["upgrade", "connection", "http2-settings"] {
+                assert!(!forwarded.headers().contains_key(name), "{upgrade}: {name}");
+            }
+        }
+    }
+
+    /// WebSocket handshakes follow the normal rules and are described as `ws` or `wss`.
+    #[test]
+    fn authorizes_websocket_handshakes_like_other_requests() {
+        let handshake = |uri: &str| {
+            request(
+                uri,
+                &[
+                    ("Upgrade", "WebSocket"),
+                    ("Connection", "keep-alive, Upgrade"),
+                    ("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="),
+                    ("Sec-WebSocket-Version", "13"),
+                ],
+            )
+        };
+        let rules = rules(
+            "[[allow]]\ndomain = 'allowed.test'\npathname = '/socket'\ninject_headers = [{ name = 'Authorization', value = 'secret' }]",
+        );
+        let mut allowed = handshake("https://allowed.test/socket?x=1");
+        assert!(is_websocket_handshake(&allowed));
+        let mut event = initial_event(&allowed, &Target::default());
+        assert_eq!(event.protocol, Protocol::Wss);
+        assert_eq!(event.url, "wss://allowed.test/socket?x=1");
+        let plan = prepare(&mut allowed, &Target::default(), &rules).unwrap();
+        record_plan(&mut event, &plan);
+        assert_eq!(event.url, "wss://allowed.test:443/socket?x=1");
+        assert_eq!(allowed.headers()["authorization"], "secret");
+        assert_eq!(allowed.headers()["sec-websocket-key"], "dGhlIHNhbXBsZSBub25jZQ==");
+
+        let plaintext = handshake("http://allowed.test/socket");
         let rejection =
-            authorize(&request, &Target::default(), &rules, Enforcement::Enforced).unwrap_err();
-        assert_eq!(rejection.status(), StatusCode::NOT_IMPLEMENTED);
-        assert_eq!(rejection.decision(), Decision::Unevaluated);
+            authorize(&plaintext, &Target::default(), &rules, Enforcement::Enforced).unwrap_err();
+        assert!(matches!(rejection, Rejection::InjectionRequiresHttps { .. }));
+        let event = initial_event(&plaintext, &Target::default());
+        assert_eq!(
+            (event.protocol, event.url.as_str()),
+            (Protocol::Ws, "ws://allowed.test/socket")
+        );
+
+        let denied = handshake("https://allowed.test/other");
+        let rejection =
+            authorize(&denied, &Target::default(), &rules, Enforcement::Enforced).unwrap_err();
+        assert_eq!(rejection.decision(), Decision::Deny);
+        let plan = authorize(&denied, &Target::default(), &rules, Enforcement::Paused).unwrap();
+        assert_eq!(plan.source, MatchSource::Paused);
+        assert!(plan.inject_headers.is_empty());
     }
 
     /// Origin-form requests use the Host header, then the tunnel or original destination.
@@ -917,7 +1024,6 @@ inject_headers = [{ name = 'Authorization', value = 'secret' }]
         let rule = RuleId::new("r", 1);
         let cases = [
             (Rejection::NestedConnect, 405, "-", "INVALID_REQUEST"),
-            (Rejection::UpgradeUnsupported, 501, "-", "INVALID_REQUEST"),
             (Rejection::MissingAuthority, 400, "-", "INVALID_REQUEST"),
             (Rejection::InvalidHostHeader, 400, "-", "INVALID_REQUEST"),
             (Rejection::HostMismatch, 421, "-", "INVALID_REQUEST"),

@@ -5,7 +5,11 @@
 //! each body. Bodies are captured while they stream: the proxy forwards every frame as
 //! soon as it arrives and only keeps cheap references to the captured prefix until the
 //! body ends, when the prefix is copied into one buffer.
+//!
+//! A WebSocket handshake captures its headers the same way, and then the first
+//! [`WEBSOCKET_MESSAGE_LIMIT`] messages in each direction instead of bodies.
 
+use super::{event::Failure, stats::Direction};
 use rama::{
     bytes::{Bytes, BytesMut},
     http::HeaderMap,
@@ -18,6 +22,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 /// The body size limit used until the UI chooses another one, in KiB.
@@ -26,6 +31,8 @@ pub const DEFAULT_BODY_LIMIT_KB: u32 = 32;
 pub const MAX_BODY_LIMIT_KB: u32 = 1024;
 /// The most decompressed bytes shown for one captured body.
 const DECODED_LIMIT: usize = 4 * 1024 * 1024;
+/// The most WebSocket messages kept in each direction; later ones are only counted.
+pub const WEBSOCKET_MESSAGE_LIMIT: usize = 50;
 
 /// The runtime capture switch and body size limit shared by the proxy and the UI API.
 #[derive(Clone)]
@@ -89,6 +96,7 @@ impl CaptureSettings {
                     body: None,
                 },
                 response: None,
+                websocket: None,
             }),
         })))
     }
@@ -143,6 +151,78 @@ struct Exchange {
     request: Message,
     /// The response returned to the client.
     response: Option<Message>,
+    /// The messages of a WebSocket, once its handshake succeeded.
+    websocket: Option<WebSocketLog>,
+}
+
+/// What a captured WebSocket message carried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageKind {
+    /// A UTF-8 text message.
+    Text,
+    /// A binary message.
+    Binary,
+    /// A close message; its payload is the close reason.
+    Close,
+}
+
+/// One WebSocket message kept in a capture.
+#[derive(Clone, Debug)]
+struct CapturedFrame {
+    /// Which way the message travelled.
+    direction: Direction,
+    /// What the message carried.
+    kind: MessageKind,
+    /// The decoded payload size, including bytes that were not kept.
+    size: u64,
+    /// The leading payload bytes kept within the direction's byte budget.
+    bytes: Bytes,
+    /// The close status code of a close message, if it had one.
+    code: Option<u16>,
+    /// How long after the WebSocket opened the message arrived.
+    at: Duration,
+}
+
+/// Message and byte totals for one direction of a WebSocket.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct MessageTally {
+    /// Text and binary messages seen, including those not kept.
+    pub messages: u64,
+    /// Decoded text and binary payload bytes seen.
+    pub bytes: u64,
+    /// Messages of any kind kept in the capture.
+    #[serde(skip)]
+    kept: usize,
+    /// Payload bytes kept in the capture.
+    #[serde(skip)]
+    captured: usize,
+}
+
+/// How a captured WebSocket ended.
+#[derive(Clone, Copy, Debug)]
+struct WebSocketEnd {
+    /// How long the WebSocket stayed open.
+    duration: Duration,
+    /// Which side sent the first close message, if any did.
+    closed_by: Option<Direction>,
+    /// Why the WebSocket ended abnormally, if it did.
+    failure: Option<Failure>,
+}
+
+/// The messages of a captured WebSocket.
+#[derive(Clone, Debug)]
+struct WebSocketLog {
+    /// When the handshake completed.
+    opened: Instant,
+    /// The kept messages in arrival order.
+    messages: Vec<CapturedFrame>,
+    /// Totals from the client to the upstream.
+    up: MessageTally,
+    /// Totals from the upstream to the client.
+    down: MessageTally,
+    /// How the WebSocket ended, once it has.
+    ended: Option<WebSocketEnd>,
 }
 
 /// Which message of an exchange a body belongs to.
@@ -200,6 +280,80 @@ impl Capture {
         });
     }
 
+    /// Mark the exchange as an open WebSocket whose messages are captured from now on.
+    pub fn start_websocket(&self) {
+        self.exchange().websocket = Some(WebSocketLog {
+            opened: Instant::now(),
+            messages: Vec::new(),
+            up: MessageTally::default(),
+            down: MessageTally::default(),
+            ended: None,
+        });
+    }
+
+    /// Record one decoded WebSocket message travelling in `direction`.
+    ///
+    /// Text and binary messages count toward the direction's totals. Messages are kept
+    /// up to [`WEBSOCKET_MESSAGE_LIMIT`] per direction, and their payloads share the
+    /// capture's body limit as one byte budget per direction; close reasons are
+    /// always kept.
+    pub fn record_websocket_message(
+        &self,
+        direction: Direction,
+        kind: MessageKind,
+        payload: &[u8],
+        code: Option<u16>,
+    ) {
+        let body_limit = self.0.body_limit;
+        let mut exchange = self.exchange();
+        let Some(log) = &mut exchange.websocket else {
+            return;
+        };
+        let at = log.opened.elapsed();
+        let tally = match direction {
+            Direction::Up => &mut log.up,
+            Direction::Down => &mut log.down,
+        };
+        if kind != MessageKind::Close {
+            tally.messages += 1;
+            tally.bytes = tally.bytes.saturating_add(payload.len() as u64);
+        }
+        if tally.kept >= WEBSOCKET_MESSAGE_LIMIT {
+            return;
+        }
+        // A close reason is at most 123 bytes and explains the close, so it is always kept.
+        let room = if kind == MessageKind::Close {
+            payload.len()
+        } else {
+            body_limit.saturating_sub(tally.captured)
+        };
+        let bytes = &payload[..room.min(payload.len())];
+        tally.kept += 1;
+        if kind != MessageKind::Close {
+            tally.captured += bytes.len();
+        }
+        log.messages.push(CapturedFrame {
+            direction,
+            kind,
+            size: payload.len() as u64,
+            bytes: Bytes::copy_from_slice(bytes),
+            code,
+            at,
+        });
+    }
+
+    /// Record how a WebSocket ended: which side closed it first, and any failure.
+    pub fn finish_websocket(&self, closed_by: Option<Direction>, failure: Option<Failure>) {
+        let mut exchange = self.exchange();
+        if let Some(log) = &mut exchange.websocket {
+            log.ended = Some(WebSocketEnd {
+                duration: log.opened.elapsed(),
+                closed_by,
+                failure,
+            });
+        }
+    }
+
     /// Record a complete response generated by the proxy itself.
     pub fn record_local_response(&self, status: u16, headers: &HeaderMap, body: &'static str) {
         self.record_response(status, headers);
@@ -229,6 +383,7 @@ impl Capture {
             body_limit: self.0.body_limit,
             request: MessageDetails::of(&exchange.request),
             response: exchange.response.as_ref().map(MessageDetails::of),
+            websocket: exchange.websocket.as_ref().map(WebSocketDetails::of),
         }
     }
 }
@@ -316,6 +471,115 @@ pub struct CaptureDetails {
     pub request: MessageDetails,
     /// The response returned to the client, once its headers exist.
     pub response: Option<MessageDetails>,
+    /// The messages of a WebSocket; absent for other requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<WebSocketDetails>,
+}
+
+/// The captured messages of a WebSocket as reported to the UI.
+#[derive(Debug, Serialize)]
+pub struct WebSocketDetails {
+    /// The most messages kept in each direction.
+    pub message_limit: usize,
+    /// The kept messages in arrival order.
+    pub messages: Vec<WebSocketMessageDetails>,
+    /// Totals from the client to the upstream.
+    pub up: MessageTally,
+    /// Totals from the upstream to the client.
+    pub down: MessageTally,
+    /// How the WebSocket ended; absent while it is open.
+    pub ended: Option<WebSocketEndDetails>,
+}
+
+impl WebSocketDetails {
+    /// Describe a captured WebSocket.
+    fn of(log: &WebSocketLog) -> Self {
+        Self {
+            message_limit: WEBSOCKET_MESSAGE_LIMIT,
+            messages: log.messages.iter().map(WebSocketMessageDetails::of).collect(),
+            up: log.up,
+            down: log.down,
+            ended: log.ended.map(|ended| WebSocketEndDetails {
+                duration_ms: duration_ms(ended.duration),
+                closed_by: ended.closed_by.map(peer_name),
+                failure: ended.failure.map(Failure::name),
+            }),
+        }
+    }
+}
+
+/// One captured WebSocket message as reported to the UI.
+#[derive(Debug, Serialize)]
+pub struct WebSocketMessageDetails {
+    /// `up` from the client to the upstream, or `down` back to the client.
+    pub direction: &'static str,
+    /// What the message carried.
+    pub kind: MessageKind,
+    /// The decoded payload size.
+    pub size: u64,
+    /// The payload bytes kept.
+    pub captured: usize,
+    /// Milliseconds after the WebSocket opened.
+    pub at_ms: u64,
+    /// The close status code of a close message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<u16>,
+    /// The kept payload as text, when it is valid UTF-8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// The kept payload in hexadecimal, when it is not text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hex: Option<String>,
+}
+
+impl WebSocketMessageDetails {
+    /// Describe a kept message, as text when possible and in hexadecimal otherwise.
+    fn of(frame: &CapturedFrame) -> Self {
+        let cut = frame.size > frame.bytes.len() as u64;
+        let text = text(&frame.bytes, cut);
+        let hex = if text.is_none() {
+            Some(frame.bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+        } else {
+            None
+        };
+        Self {
+            direction: match frame.direction {
+                Direction::Up => "up",
+                Direction::Down => "down",
+            },
+            kind: frame.kind,
+            size: frame.size,
+            captured: frame.bytes.len(),
+            at_ms: duration_ms(frame.at),
+            code: frame.code,
+            text,
+            hex,
+        }
+    }
+}
+
+/// How a WebSocket ended, as reported to the UI.
+#[derive(Debug, Serialize)]
+pub struct WebSocketEndDetails {
+    /// How long the WebSocket stayed open, in milliseconds.
+    pub duration_ms: u64,
+    /// `client` or `server`, whichever sent the first close message; absent when neither did.
+    pub closed_by: Option<&'static str>,
+    /// The access-log error token for an abnormal end; absent after a close handshake.
+    pub failure: Option<&'static str>,
+}
+
+/// Name the peer that sends messages travelling in `direction`.
+fn peer_name(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Up => "client",
+        Direction::Down => "server",
+    }
+}
+
+/// Convert a duration to whole milliseconds, saturating.
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// A request or response as reported to the UI.
@@ -381,7 +645,8 @@ impl BodyDetails {
             complete: body.complete,
             encoding,
             decoded,
-            text: text(bytes),
+            // Truncation and decompression limits can both cut a body short.
+            text: text(bytes, true),
         }
     }
 }
@@ -416,11 +681,14 @@ fn has_zlib_header(bytes: &[u8]) -> bool {
     }
 }
 
-/// Return the bytes as text, dropping a multi-byte character cut off by truncation.
-fn text(bytes: &[u8]) -> Option<String> {
+/// Return the bytes as text, or `None` when they are not valid UTF-8.
+///
+/// When `cut` says the bytes may have been cut short, a multi-byte character
+/// cut off at the end is dropped instead of making the bytes invalid.
+fn text(bytes: &[u8], cut: bool) -> Option<String> {
     match std::str::from_utf8(bytes) {
         Ok(text) => Some(text.to_owned()),
-        Err(error) if error.error_len().is_none() => {
+        Err(error) if cut && error.error_len().is_none() => {
             let valid = &bytes[..error.valid_up_to()];
             Some(String::from_utf8_lossy(valid).into_owned())
         }
@@ -537,9 +805,46 @@ mod tests {
     /// Text cut inside a multi-byte character keeps the complete characters before it.
     #[test]
     fn trims_characters_split_by_truncation() {
-        assert_eq!(text("aé".as_bytes()).as_deref(), Some("aé"));
-        assert_eq!(text(&"aé".as_bytes()[..2]).as_deref(), Some("a"));
-        assert_eq!(text(&[b'a', 0xff, b'b']), None);
+        assert_eq!(text("aé".as_bytes(), true).as_deref(), Some("aé"));
+        assert_eq!(text(&"aé".as_bytes()[..2], true).as_deref(), Some("a"));
+        assert_eq!(text(&"aé".as_bytes()[..2], false), None);
+        assert_eq!(text(&[b'a', 0xff, b'b'], true), None);
+    }
+
+    /// WebSocket captures keep the first messages per direction within the byte budget.
+    #[test]
+    fn records_websocket_messages_within_limits() {
+        let capture = settings(1).begin(&HeaderMap::new()).unwrap();
+        capture.record_websocket_message(Direction::Up, MessageKind::Text, b"ignored", None);
+        assert!(capture.details().websocket.is_none());
+        capture.record_response(101, &HeaderMap::new());
+        capture.start_websocket();
+        capture.record_websocket_message(Direction::Up, MessageKind::Text, b"hello", None);
+        capture.record_websocket_message(Direction::Down, MessageKind::Binary, &[0xff; 2000], None);
+        for _ in 0..WEBSOCKET_MESSAGE_LIMIT {
+            capture.record_websocket_message(Direction::Up, MessageKind::Binary, b"x", None);
+        }
+        capture.record_websocket_message(Direction::Down, MessageKind::Close, b"bye", Some(1000));
+        capture.finish_websocket(Some(Direction::Down), None);
+        let websocket = capture.details().websocket.unwrap();
+        assert_eq!(websocket.messages.len(), WEBSOCKET_MESSAGE_LIMIT + 2);
+        assert_eq!((websocket.up.messages, websocket.up.bytes), (51, 55));
+        assert_eq!((websocket.down.messages, websocket.down.bytes), (1, 2000));
+        let first = &websocket.messages[0];
+        assert_eq!((first.direction, first.kind), ("up", MessageKind::Text));
+        assert_eq!(first.text.as_deref(), Some("hello"));
+        let binary = &websocket.messages[1];
+        assert_eq!((binary.size, binary.captured), (2000, 1024));
+        assert_eq!(binary.text, None);
+        assert_eq!(binary.hex.as_deref().map(str::len), Some(2048));
+        let close = websocket.messages.last().unwrap();
+        assert_eq!((close.kind, close.code), (MessageKind::Close, Some(1000)));
+        assert_eq!(close.text.as_deref(), Some("bye"));
+        let ended = websocket.ended.unwrap();
+        assert_eq!((ended.closed_by, ended.failure), (Some("server"), None));
+        let serialized = serde_json::to_value(capture.details()).unwrap();
+        assert_eq!(serialized["websocket"]["messages"][0]["kind"], "text");
+        assert_eq!(serialized["websocket"]["up"]["messages"], 51);
     }
 
     /// Local responses are recorded complete with their status, headers, and body.

@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
     api,
+    isWebSocket,
     maxBodyLimitKb,
     parseQuery,
     updateCapture,
@@ -9,7 +10,9 @@ import {
     type CaptureSettings,
     type CapturedBody,
     type CapturedMessage,
+    type CapturedWebSocket,
     type HttpRequest,
+    type WebSocketMessage,
 } from "./api.ts";
 import {
     CloseIcon,
@@ -119,7 +122,7 @@ export function CaptureButton() {
                     <Switch
                         label="Capture headers and bodies"
                         title="Capture headers and bodies"
-                        description="Record request and response headers and bodies of new HTTP(S) requests."
+                        description="Record request and response headers and bodies of new HTTP(S) requests, and WebSocket messages."
                         checked={current.enabled}
                         disabled={update.isPending || !validLimit}
                         onChange={(enabled) =>
@@ -317,15 +320,18 @@ function BodyView({
     );
 }
 
-/** Show one captured request or response: its headers and body. */
+/** Show one captured request or response: its headers and, unless it opened a WebSocket, its body. */
 function MessageView({
     side,
     message,
     limitKb,
+    showBody = true,
 }: {
     side: "request" | "response";
     message: CapturedMessage;
     limitKb: number;
+    /** Whether to show the body; a WebSocket handshake shows its messages instead. */
+    showBody?: boolean;
 }) {
     return (
         <>
@@ -339,11 +345,157 @@ function MessageView({
                     pairs={message.headers}
                 />
             )}
-            <div className="mt-5">
-                <SectionTitle>Body</SectionTitle>
-                <BodyView side={side} body={message.body} limitKb={limitKb} />
-            </div>
+            {showBody && (
+                <div className="mt-5">
+                    <SectionTitle>Body</SectionTitle>
+                    <BodyView side={side} body={message.body} limitKb={limitKb} />
+                </div>
+            )}
         </>
+    );
+}
+
+/** Format a duration in milliseconds for people, such as `850 ms`, `12.3 s`, or `4 min 5 s`. */
+function formatDuration(ms: number): string {
+    if (ms < 1000) {
+        return `${ms} ms`;
+    }
+    if (ms < 59_950) {
+        return `${(ms / 1000).toFixed(1)} s`;
+    }
+    const total = Math.round(ms / 1000);
+    return `${Math.floor(total / 60)} min ${total % 60} s`;
+}
+
+/** Describe whether a WebSocket is open, or how and when it ended. */
+function webSocketState(websocket: CapturedWebSocket): string {
+    const ended = websocket.ended;
+    if (ended === null) {
+        return "Open";
+    }
+    const after = `after ${formatDuration(ended.duration_ms)}`;
+    if (ended.failure !== null) {
+        return `Ended ${after}: ${ended.failure}`;
+    }
+    if (ended.closed_by !== null) {
+        return `Closed by the ${ended.closed_by} ${after}`;
+    }
+    return `Ended ${after}`;
+}
+
+/** Group hexadecimal digits into bytes separated by spaces. */
+function spacedHex(hex: string): string {
+    return hex.replace(/(..)(?!$)/g, "$1 ");
+}
+
+/** Show the kept payload of one WebSocket message, or its close code and reason. */
+function WebSocketPayload({ message }: { message: WebSocketMessage }) {
+    if (message.kind === "close") {
+        return (
+            <span className="text-zinc-300">
+                {message.code === undefined ? "No close code" : `Code ${message.code}`}
+                {message.text !== undefined && message.text !== "" && `: ${message.text}`}
+            </span>
+        );
+    }
+    const content = message.text ?? spacedHex(message.hex ?? "");
+    return (
+        <>
+            {message.captured < message.size && (
+                <span className="mb-1 block font-sans text-xs text-amber-200/90">
+                    {message.captured === 0
+                        ? "Not kept: the capture limit was reached."
+                        : `Showing the first ${bytes(message.captured)}.`}
+                </span>
+            )}
+            {content !== "" && (
+                <span className="block max-h-48 overflow-auto break-all whitespace-pre-wrap text-zinc-200">
+                    {content}
+                </span>
+            )}
+        </>
+    );
+}
+
+/** List the captured messages of a WebSocket with its totals and state. */
+function WebSocketMessages({
+    websocket,
+    limitKb,
+}: {
+    websocket: CapturedWebSocket;
+    limitKb: number;
+}) {
+    const kept = (direction: WebSocketMessage["direction"]) =>
+        websocket.messages.filter((message) => message.direction === direction).length;
+    const limited =
+        kept("up") >= websocket.message_limit || kept("down") >= websocket.message_limit;
+    const tally = (count: number, size: number) =>
+        `${count.toLocaleString()} message${count === 1 ? "" : "s"} (${bytes(size)})`;
+    return (
+        <section aria-label="WebSocket messages" className="mt-6">
+            <SectionTitle>Messages</SectionTitle>
+            <p className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
+                <span
+                    className={`badge ${websocket.ended === null ? "badge-allow" : "badge-neutral"}`}
+                >
+                    {webSocketState(websocket)}
+                </span>
+                <span>Client sent {tally(websocket.up.messages, websocket.up.bytes)}</span>
+                <span>Server sent {tally(websocket.down.messages, websocket.down.bytes)}</span>
+            </p>
+            {limited && (
+                <p className="mb-2 text-xs text-amber-200/90">
+                    Only the first {websocket.message_limit} messages in each direction are kept.
+                </p>
+            )}
+            <p className="mb-2 text-xs text-zinc-500">
+                Messages are shown decoded, with up to {limitKb} KB of content kept in each
+                direction. Pings and pongs are not listed.
+            </p>
+            {websocket.messages.length === 0 ? (
+                <p className="text-sm text-zinc-500">No messages yet.</p>
+            ) : (
+                <div className="overflow-x-auto rounded-lg border border-white/10">
+                    <table className="w-full text-left text-[13px]">
+                        <caption className="sr-only">WebSocket messages</caption>
+                        <thead className="border-b border-white/10 bg-white/[0.02] text-xs text-zinc-400">
+                            <tr>
+                                <th className="px-3 py-1.5 font-medium">Time</th>
+                                <th className="px-3 py-1.5 font-medium">Direction</th>
+                                <th className="px-3 py-1.5 font-medium">Type</th>
+                                <th className="px-3 py-1.5 text-right font-medium">Size</th>
+                                <th className="px-3 py-1.5 font-medium">Content</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/5">
+                            {websocket.messages.map((message, index) => (
+                                <tr key={index} className="align-top">
+                                    <td className="px-3 py-1.5 whitespace-nowrap text-zinc-500 tabular-nums">
+                                        +{formatDuration(message.at_ms)}
+                                    </td>
+                                    <td
+                                        className={`px-3 py-1.5 whitespace-nowrap ${message.direction === "up" ? "text-sky-300" : "text-emerald-300"}`}
+                                    >
+                                        {message.direction === "up"
+                                            ? "Client → server"
+                                            : "Server → client"}
+                                    </td>
+                                    <td className="px-3 py-1.5">
+                                        <span className="badge badge-neutral">{message.kind}</span>
+                                    </td>
+                                    <td className="px-3 py-1.5 text-right whitespace-nowrap text-zinc-400 tabular-nums">
+                                        {bytes(message.size)}
+                                    </td>
+                                    <td className="min-w-[16rem] px-3 py-1.5 font-mono">
+                                        <WebSocketPayload message={message} />
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+        </section>
     );
 }
 
@@ -368,6 +520,8 @@ function CapturedExchange({ id, now }: { id: number; now: number }) {
     const capture = details.data;
     const limitKb = capture.body_limit / 1024;
     const status = capture.response?.status;
+    const websocket = capture.websocket;
+    const showBody = websocket === undefined;
     return (
         <>
             <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
@@ -394,7 +548,12 @@ function CapturedExchange({ id, now }: { id: number; now: number }) {
             <div className="grid gap-6 xl:grid-cols-2">
                 <section aria-label="Captured request" className="min-w-0">
                     <h3 className="mb-3 text-sm font-semibold text-white">Request</h3>
-                    <MessageView side="request" message={capture.request} limitKb={limitKb} />
+                    <MessageView
+                        side="request"
+                        message={capture.request}
+                        limitKb={limitKb}
+                        showBody={showBody}
+                    />
                 </section>
                 <section aria-label="Captured response" className="min-w-0">
                     <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-white">
@@ -410,11 +569,28 @@ function CapturedExchange({ id, now }: { id: number; now: number }) {
                     {capture.response === null ? (
                         <p className="text-sm text-zinc-500">No response has been received yet.</p>
                     ) : (
-                        <MessageView side="response" message={capture.response} limitKb={limitKb} />
+                        <MessageView
+                            side="response"
+                            message={capture.response}
+                            limitKb={limitKb}
+                            showBody={showBody}
+                        />
                     )}
                 </section>
             </div>
+            {websocket !== undefined && (
+                <WebSocketMessages websocket={websocket} limitKb={limitKb} />
+            )}
         </>
+    );
+}
+
+/** Mark a request as a WebSocket handshake. */
+export function WebSocketBadge() {
+    return (
+        <span className="badge badge-neutral font-mono" title="WebSocket">
+            WS
+        </span>
     );
 }
 
@@ -472,6 +648,7 @@ export function RequestDialog({
                             <span className={`badge font-mono ${methodBadge(request.method)}`}>
                                 {request.method}
                             </span>
+                            {isWebSocket(request) && <WebSocketBadge />}
                             <span className="font-mono break-all">
                                 {request.domain}
                                 <span className="text-zinc-400">{request.pathname}</span>
@@ -540,8 +717,10 @@ export function RequestDialog({
                     </section>
                     {request.capture_id === undefined ? (
                         <p className="rounded-lg border border-white/10 bg-white/[0.02] px-4 py-3 text-sm text-zinc-400">
-                            Headers and bodies were not captured for this request. Turn on Capture
-                            at the top of the page, then repeat the request.
+                            {isWebSocket(request)
+                                ? "Headers and messages were not captured for this WebSocket."
+                                : "Headers and bodies were not captured for this request."}{" "}
+                            Turn on Capture at the top of the page, then repeat the request.
                         </p>
                     ) : (
                         <CapturedExchange id={request.capture_id} now={now} />

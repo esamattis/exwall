@@ -1,5 +1,5 @@
 //! Request telemetry: typed events, the access log, in-memory domain and transfer statistics,
-//! and opt-in captures of HTTP headers and bodies.
+//! and opt-in captures of HTTP headers, bodies, and WebSocket messages.
 //!
 //! Handlers submit [`RequestEvent`]s through an [`EventSink`]. Formatting and
 //! batching are pure; only the writer actor touches the filesystem.
@@ -15,7 +15,7 @@ mod writer;
 pub use batcher::Batcher;
 pub use capture::{
     BodyRecorder, Capture, CaptureDetails, CaptureSettings, DEFAULT_BODY_LIMIT_KB,
-    MAX_BODY_LIMIT_KB, Side,
+    MAX_BODY_LIMIT_KB, MessageKind, Side, WEBSOCKET_MESSAGE_LIMIT,
 };
 pub use event::{Failure, Protocol, RequestEvent};
 pub use sink::{EventReceiver, EventSink, PendingEvent};

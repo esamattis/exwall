@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { fixtureOperation, fixtureRules, networkRequest } from "#playwright_helpers/client.mts";
 import { queryDns } from "#playwright_helpers/dns.mts";
 import { exchange, tlsExchange } from "#playwright_helpers/proxy_fixture.mts";
+import { websocketExchange } from "#playwright_helpers/websocket.mts";
 
 /** Select one view of the Traffic page by its tab label. */
 async function showTab(page: Page, label: string) {
@@ -688,6 +689,53 @@ test("request rows open details with decoded query strings and opt-in captured h
     await expect(dialog.getByRole("region", { name: "Captured request" })).toContainText(
         "No body.",
     );
+});
+
+test("WebSocket rows are marked WS and their details list the captured messages", async ({
+    page,
+    protocolProxy: fixture,
+}) => {
+    const ui = `http://127.0.0.1:${fixture.uiPort}`;
+    await loginBrowser(page, ui, "integration-password");
+    const enabled = await page.request.put(`${ui}/api/capture`, {
+        headers: await sessionHeaders(page),
+        data: { enabled: true, body_limit_kb: 32 },
+    });
+    expect(enabled.status()).toBe(200);
+    const socket = (path: string) =>
+        websocketExchange({ proxyPort: fixture.proxyPort, port: fixture.upstreamPort, path });
+    expect((await socket("/allowed")).status).toBe(101);
+    expect((await socket("/denied")).status).toBe(403);
+
+    await page.goto(`${ui}/?view=allowed-requests`);
+    const rows = page.getByRole("tabpanel").locator("tbody tr");
+    const allowed = rows.filter({ hasText: "/allowed" });
+    await expect(allowed.getByRole("cell").nth(0)).toHaveText("GETWS");
+    await allowed.getByRole("cell").nth(3).click();
+    const dialog = page.getByRole("dialog", { name: "GET WS 127.0.0.1/allowed" });
+    await expect(dialog).toBeVisible();
+    await expect(
+        dialog.getByRole("region", { name: "Captured response" }).getByText("101", { exact: true }),
+    ).toBeVisible();
+    await expect(dialog.getByText("Body", { exact: true })).toHaveCount(0);
+    const messages = dialog.getByRole("region", { name: "WebSocket messages" });
+    await expect(messages.getByText(/^Closed by the client after/)).toBeVisible();
+    await expect(messages.getByText("Client sent 1 message (5 bytes)")).toBeVisible();
+    await expect(
+        messages.getByRole("table", { name: "WebSocket messages" }).locator("tbody tr"),
+    ).toHaveText([
+        /Server → client.*text.*"path":"\/allowed"/,
+        /Client → server.*text.*5 bytes.*hello/,
+        /Server → client.*text.*echo:hello/,
+        // The upstream's close reply ends the handshake and is not relayed.
+        /Client → server.*close.*Code 1000/,
+    ]);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+
+    await showTab(page, "Blocked requests");
+    const denied = rows.filter({ hasText: "/denied" });
+    await expect(denied.getByRole("cell").nth(0)).toHaveText("GETWS");
 });
 
 test("HTTP allow actions remove only fully covered DNS-only rules, including duplicate allowances", async ({

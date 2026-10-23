@@ -1,6 +1,9 @@
 //! Pure, clock-driven batching and deduplication of access-log events.
 
-use super::{event::RequestEvent, format};
+use super::{
+    event::{Protocol, RequestEvent},
+    format,
+};
 use std::{collections::HashMap, time::Duration};
 use tokio::time::Instant;
 
@@ -29,10 +32,17 @@ impl Batcher {
 
     /// Add an event received at `now`; the first event of a batch starts its window.
     ///
-    /// Matching messages keep the first occurrence's position and timestamp.
+    /// Matching messages keep the first occurrence's position and timestamp. A
+    /// WebSocket that was opened is never merged: its row arrives when it closes but
+    /// carries the time it opened, so identical rows in one window may describe
+    /// WebSockets opened far apart.
     pub fn push(&mut self, event: RequestEvent, now: Instant) {
         if self.deadline.is_none() {
             self.deadline = Some(now + self.window);
+        }
+        if is_opened_websocket(&event) {
+            self.entries.push((event, 1));
+            return;
         }
         let message = format::message(&event);
         if let Some(&position) = self.positions.get(&message) {
@@ -59,6 +69,12 @@ impl Batcher {
         self.positions.clear();
         std::mem::take(&mut self.entries)
     }
+}
+
+/// Report whether an event describes a WebSocket that was opened, rather than a
+/// refused or failed handshake.
+fn is_opened_websocket(event: &RequestEvent) -> bool {
+    matches!(event.protocol, Protocol::Ws | Protocol::Wss) && event.http_status == Some(101)
 }
 
 #[cfg(test)]
@@ -128,5 +144,24 @@ mod tests {
         let entries = batcher.take();
         assert_eq!(entries.len(), 9);
         assert!(entries.iter().all(|(_, count)| *count == 1));
+    }
+
+    /// Opened WebSockets get a row each, while refused handshakes are still merged.
+    #[test]
+    fn never_merges_opened_websockets() {
+        let now = Instant::now();
+        let mut batcher = Batcher::new(Duration::from_secs(1));
+        let websocket = |status| {
+            let mut event = event(0);
+            event.protocol = Protocol::Wss;
+            event.respond_http(status);
+            event
+        };
+        batcher.push(websocket(101), now);
+        batcher.push(websocket(101), now);
+        batcher.push(websocket(403), now);
+        batcher.push(websocket(403), now);
+        let counts: Vec<_> = batcher.take().into_iter().map(|(_, count)| count).collect();
+        assert_eq!(counts, [1, 1, 2]);
     }
 }

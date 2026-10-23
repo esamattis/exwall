@@ -7,6 +7,7 @@ import {
     api,
     coversDomain,
     coversRequest,
+    isWebSocket,
     parseRuleLabel,
     resetTraffic,
     rulesPath,
@@ -34,7 +35,7 @@ import {
     useNow,
     useToast,
 } from "./components.tsx";
-import { CaptureButton, RequestDialog } from "./capture.tsx";
+import { CaptureButton, RequestDialog, WebSocketBadge } from "./capture.tsx";
 import { ruleAnchor } from "./rules.tsx";
 
 /** The traffic views selectable from the tab bar; `requests` lists blocked requests. */
@@ -698,9 +699,9 @@ function RequestsTable({
         <div className="relative overflow-x-auto">
             <p className="border-b border-white/5 px-4 py-2 text-xs text-zinc-500">
                 The {requestCapacity} most recently seen {verb} HTTP(S) requests, newest first, with
-                repeats of the same method, path, and query string counted together. Allowing a
-                request adds a rule for its exact method and path, with any query string. Click a
-                request to see its details.
+                repeats of the same method, path, and query string counted together. WebSockets are
+                marked WS. Allowing a request adds a rule for its exact method and path, with any
+                query string. Click a request to see its details.
             </p>
             <table className="w-full text-left text-sm">
                 <caption className="sr-only">{title}, latest first</caption>
@@ -746,10 +747,13 @@ function RequestsTable({
                                     {request.domain}
                                 </th>
                                 <td className="px-4 py-2.5">
-                                    <span
-                                        className={`badge font-mono ${methodBadge(request.method)}`}
-                                    >
-                                        {request.method}
+                                    <span className="flex items-center gap-1">
+                                        <span
+                                            className={`badge font-mono ${methodBadge(request.method)}`}
+                                        >
+                                            {request.method}
+                                        </span>
+                                        {isWebSocket(request) && <WebSocketBadge />}
                                     </span>
                                 </td>
                                 <td className="max-w-md px-4 py-2.5 font-mono text-[13px] text-zinc-300">

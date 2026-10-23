@@ -99,7 +99,8 @@ export interface DomainStats {
 
 /** One retained HTTP request and its repeats, grouped by method, pathname, and query string. */
 export interface HttpRequest {
-    scheme: "http" | "https";
+    /** The URL scheme; `ws` and `wss` mark WebSocket handshakes. */
+    scheme: "http" | "https" | "ws" | "wss";
     domain: string;
     /** The destination port; absent when it is the scheme's default. */
     port?: number;
@@ -115,6 +116,11 @@ export interface HttpRequest {
     timestamp: string;
     /** The latest captured repeat's headers and bodies; absent when none was captured. */
     capture_id?: number;
+}
+
+/** Report whether a retained request is a WebSocket handshake rather than plain HTTP(S). */
+export function isWebSocket(request: HttpRequest): boolean {
+    return request.scheme === "ws" || request.scheme === "wss";
 }
 
 /** One query string parameter, percent- and form-decoded. */
@@ -188,6 +194,53 @@ export interface CaptureDetails {
     request: CapturedMessage;
     /** The response returned to the client, or null before its headers arrive. */
     response: CapturedMessage | null;
+    /** The messages of a WebSocket whose handshake succeeded; absent for other requests. */
+    websocket?: CapturedWebSocket;
+}
+
+/** Message and byte totals for one direction of a WebSocket. */
+export interface WebSocketTally {
+    /** Text and binary messages, including those not kept. */
+    messages: number;
+    /** Decoded text and binary payload bytes. */
+    bytes: number;
+}
+
+/** One captured WebSocket message. */
+export interface WebSocketMessage {
+    /** `up` from the client to the server, or `down` back to the client. */
+    direction: "up" | "down";
+    kind: "text" | "binary" | "close";
+    /** The decoded payload size. */
+    size: number;
+    /** The payload bytes kept. */
+    captured: number;
+    /** Milliseconds after the WebSocket opened. */
+    at_ms: number;
+    /** The close status code of a close message. */
+    code?: number;
+    /** The kept payload as text, or a close reason. */
+    text?: string;
+    /** The kept payload in hexadecimal, when it is not text. */
+    hex?: string;
+}
+
+/** The captured messages of a WebSocket. */
+export interface CapturedWebSocket {
+    /** The most messages kept in each direction. */
+    message_limit: number;
+    /** The kept messages in arrival order. */
+    messages: WebSocketMessage[];
+    up: WebSocketTally;
+    down: WebSocketTally;
+    /** How the WebSocket ended, or null while it is open. */
+    ended: {
+        duration_ms: number;
+        /** Which side sent the first close message, or null when neither did. */
+        closed_by: "client" | "server" | null;
+        /** The access-log error token for an abnormal end, or null. */
+        failure: string | null;
+    } | null;
 }
 
 /** The firewall host, identified in the page header. */

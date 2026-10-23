@@ -71,7 +71,7 @@ pub struct DomainSummary {
 /// Requests are grouped by scheme, domain, port, method, pathname, and query string.
 #[derive(Clone, Debug, Serialize)]
 pub struct HttpRequest {
-    /// The URL scheme, `http` or `https`.
+    /// The URL scheme: `http`, `https`, or `ws` and `wss` for WebSocket handshakes.
     pub scheme: &'static str,
     /// The normalized request host.
     pub domain: String,
@@ -119,7 +119,7 @@ impl HttpRequest {
         query: Option<&str>,
         capture: Option<Capture>,
     ) -> Self {
-        let default_port = if protocol == Protocol::Https {
+        let default_port = if protocol.is_tls() {
             443
         } else {
             80
@@ -309,7 +309,7 @@ impl DomainStats {
         let summary = domains.touch(host, timestamp);
         let counts = match protocol {
             Protocol::Dns => &mut summary.dns,
-            Protocol::Http | Protocol::Https => &mut summary.http,
+            Protocol::Http | Protocol::Https | Protocol::Ws | Protocol::Wss => &mut summary.http,
         };
         if allowed {
             counts.allow += 1;
