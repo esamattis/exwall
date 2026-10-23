@@ -390,7 +390,7 @@ test("last 200 unique HTTP denials refresh manually and allow only an exact meth
     };
     expect((await page.request.get(`${ui}/api/http-denials`)).status()).toBe(401);
     await loginBrowser(page, ui, "integration-password");
-    await page.goto(`${ui}/?view=requests`);
+    await page.goto(`${ui}/traffic/blocked-requests`);
     const section = page.getByRole("tabpanel");
     await expect(section.getByText("No blocked requests yet")).toBeVisible();
     expect(await queryDns("127.0.0.1", fixture.dnsPort, "denied.test")).toBe(5);
@@ -614,7 +614,7 @@ test("request rows open details with decoded query strings and opt-in captured h
             body,
         );
     await loginBrowser(page, ui, "integration-password");
-    await page.goto(`${ui}/?view=requests`);
+    await page.goto(`${ui}/traffic/blocked-requests`);
     const capture = page.getByRole("button", { name: "Capture", exact: true });
     await expect(capture).toBeVisible();
 
@@ -723,7 +723,7 @@ test("WebSocket rows are marked WS and their details list the captured messages"
     expect((await socket("/allowed")).status).toBe(101);
     expect((await socket("/denied")).status).toBe(403);
 
-    await page.goto(`${ui}/?view=allowed-requests`);
+    await page.goto(`${ui}/traffic/allowed-requests`);
     const rows = page.getByRole("tabpanel").locator("tbody tr");
     const allowed = rows.filter({ hasText: "/allowed" });
     await expect(allowed.getByRole("cell").nth(0)).toHaveText("GETWS");
@@ -837,7 +837,7 @@ test("HTTP allow actions remove only fully covered DNS-only rules, including dup
                 })
             ).status(),
         ).toBe(200);
-        await page.goto(entry.button === denial ? `${ui}/?view=requests` : `${ui}/`);
+        await page.goto(entry.button === denial ? `${ui}/traffic/blocked-requests` : `${ui}/`);
         await page.getByRole("button", { name: entry.button, exact: true }).click();
         let message = "Domain allowed on all routes and methods.";
         if (entry.button === denial) {
@@ -864,7 +864,7 @@ test("HTTP allow actions remove only fully covered DNS-only rules, including dup
     }
 });
 
-test("rule files show absolute paths that copy to the clipboard", async ({
+test("rule files show absolute paths that copy to the clipboard and explain automatic reloads", async ({
     page,
     context,
     protocolProxy: fixture,
@@ -873,6 +873,14 @@ test("rule files show absolute paths that copy to the clipboard", async ({
     await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: ui });
     await loginBrowser(page, ui, "integration-password");
     await page.goto(`${ui}/rules`);
+    await expect(page.getByText(fixture.rules, { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: `Copy path ${fixture.rules}`, exact: true }).click();
+    await expect
+        .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+        .toBe(fixture.rules);
+    await expect(
+        page.getByText(/in the directory with any editor reloads the rules automatically/),
+    ).toBeVisible();
     const files = page.getByRole("list", { name: "Rule files", exact: true });
     const path = join(fixture.rules, "1-test.toml");
     await expect(files.getByText(path, { exact: true })).toBeVisible();
@@ -887,6 +895,64 @@ test("rule files show absolute paths that copy to the clipboard", async ({
     await expect(
         page.getByRole("button", { name: `Copy path ${path}`, exact: true }),
     ).toBeVisible();
+});
+
+test("traffic views have nested routes, and former view links redirect to them", async ({
+    page,
+    protocolProxy: fixture,
+}) => {
+    const ui = `http://127.0.0.1:${fixture.uiPort}`;
+    await loginBrowser(page, ui, "integration-password");
+    await page.goto(ui);
+    await expect(page).toHaveURL(`${ui}/traffic/blocked`);
+    await page.goto(`${ui}/traffic`);
+    await expect(page).toHaveURL(`${ui}/traffic/blocked`);
+    const legacy = [
+        ["requests", "blocked-requests"],
+        ["allowed", "allowed"],
+        ["allowed-requests", "allowed-requests"],
+        ["unknown", "blocked"],
+    ];
+    for (const [view, route] of legacy) {
+        await page.goto(`${ui}/?view=${view}`);
+        await expect(page).toHaveURL(`${ui}/traffic/${route}`);
+    }
+    await expect(page.getByRole("tab", { name: /^Blocked domains/ })).toHaveAttribute(
+        "aria-selected",
+        "true",
+    );
+    await showTab(page, "Allowed requests");
+    await expect(page).toHaveURL(`${ui}/traffic/allowed-requests`);
+    await expect(page.getByText("No allowed requests yet")).toBeVisible();
+    await page.getByRole("link", { name: "Rules", exact: true }).click();
+    await expect(page).toHaveURL(`${ui}/rules`);
+    await page.getByRole("link", { name: "Traffic", exact: true }).click();
+    await expect(page).toHaveURL(`${ui}/traffic/blocked`);
+    await page.goto(`${ui}/domains`);
+    await expect(page).toHaveURL(`${ui}/traffic/blocked`);
+});
+
+test("the Traffic page shows the access log path, trimming, and format, and copies the path", async ({
+    page,
+    context,
+    protocolProxy: fixture,
+}) => {
+    const ui = `http://127.0.0.1:${fixture.uiPort}`;
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: ui });
+    await loginBrowser(page, ui, "integration-password");
+    await page.goto(ui);
+    const note = page.getByRole("region", { name: "Full access log", exact: true });
+    await expect(note.getByText(fixture.accessLog, { exact: true })).toBeVisible();
+    await expect(note).toContainText(
+        "After every 100 lines, exwall checks the file size. Once it is over 10.5 MB, the file is cut down to its newest 1,000 lines.",
+    );
+    await expect(note).toContainText(
+        "TIMESTAMP PROTOCOL RESULT RULE HTTP_METHOD URL HTTP_STATUS DNS_RCODE ERROR",
+    );
+    await note.getByRole("button", { name: `Copy path ${fixture.accessLog}`, exact: true }).click();
+    await expect
+        .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+        .toBe(fixture.accessLog);
 });
 
 test("broken rule files open as TOML with their error and are repaired from the editor", async ({

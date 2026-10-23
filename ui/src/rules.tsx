@@ -13,7 +13,7 @@ import {
     type InjectedHeader,
     type RuleDraft,
     type RuleFileContents,
-    type RuleFileSummary,
+    type RuleFileListing,
     type RulesDocument,
 } from "./api.ts";
 import {
@@ -101,10 +101,35 @@ function RuleCount({ rules }: { rules: number | null }) {
 /** The query listing every rule file, shared by the list and the editor's path display. */
 const ruleFilesQuery = {
     queryKey: ["rules"],
-    queryFn: () => api<RuleFileSummary[]>("rules"),
+    queryFn: () => api<RuleFileListing>("rules"),
     retry: false,
     refetchOnWindowFocus: false,
 };
+
+/**
+ * Explain what happens to rule files edited directly in the rules directory,
+ * depending on whether the service watches it.
+ */
+function RuleReloadNote({ watching }: { watching: boolean }) {
+    if (watching) {
+        return (
+            <span className="mt-2 block">
+                Adding, editing, or removing <code className="text-zinc-300">*.toml</code> files in
+                the directory with any editor reloads the rules automatically. If a change is
+                invalid, the previous rules stay active, the error goes to the service log, and the
+                file is marked invalid here until it is fixed.
+            </span>
+        );
+    }
+    return (
+        <span className="mt-2 block">
+            Automatic reloading is off (<code className="text-zinc-300">watch_rules = false</code>
+            ), so files changed directly in the directory take effect only after{" "}
+            <code className="text-zinc-300">sudo systemctl reload exwall</code>. Saves from this
+            page apply immediately.
+        </span>
+    );
+}
 
 /** List every rule file in the rules directory with a link to its editor. */
 export function RuleFilesPage() {
@@ -118,7 +143,7 @@ export function RuleFilesPage() {
         );
     } else if (files.error) {
         content = <ErrorBanner>{files.error.message}</ErrorBanner>;
-    } else if (files.data.length === 0) {
+    } else if (files.data.files.length === 0) {
         content = (
             <div className="panel">
                 <EmptyState title="No rule files yet">
@@ -130,7 +155,7 @@ export function RuleFilesPage() {
     } else {
         content = (
             <ul aria-label="Rule files" className="panel divide-y divide-white/10">
-                {files.data.map((file) => (
+                {files.data.files.map((file) => (
                     <li key={file.name} className="flex items-center gap-2 pr-2">
                         <div className="flex min-w-0 flex-1 flex-col gap-0.5 py-2 pl-4">
                             <Link
@@ -164,9 +189,15 @@ export function RuleFilesPage() {
                 title="Rules"
                 description={
                     <>
+                        {files.data && (
+                            <span className="mb-1 block">
+                                <FilePath path={files.data.directory} />
+                            </span>
+                        )}
                         Rule files in the rules directory, loaded in name order. Domains allowed
                         from the Traffic page are added to{" "}
                         <code className="text-zinc-300">{webRulesFile}</code>.
+                        {files.data && <RuleReloadNote watching={files.data.watch_rules} />}
                     </>
                 }
                 refresh={
@@ -227,7 +258,7 @@ export function RulesPage({ file }: { file: string }) {
         );
     }
     const { revision, rules: drafts } = rules.data;
-    const path = files.data?.find((summary) => summary.name === file)?.path;
+    const path = files.data?.files.find((summary) => summary.name === file)?.path;
     const key = `${generation}:${revision}`;
 
     /** Load the file again and remount the editor with its contents. */

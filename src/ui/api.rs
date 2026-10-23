@@ -7,6 +7,7 @@ use super::{
     rules_doc::{RuleFileContents, RulesDocument, edit_document, inspect_document},
 };
 use crate::{
+    config::AccessLogConfig,
     error::ErrorChain,
     policy::RuleSet,
     runtime::{PolicyStore, ReloadError, ReloadHandle},
@@ -227,6 +228,17 @@ impl From<AuthError> for ApiError {
     }
 }
 
+/// The rules directory, whether it is watched for changes, and its rule files.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct RuleFileListing {
+    /// The rules directory's absolute path on the host.
+    directory: String,
+    /// Whether edits made directly in the directory are reloaded automatically.
+    watch_rules: bool,
+    /// The editable rule files in the loader's order.
+    files: Vec<RuleFileSummary>,
+}
+
 /// One rule file in the directory listing.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct RuleFileSummary {
@@ -307,6 +319,8 @@ pub struct Api {
     stats: DomainStats,
     /// The active policy, whose blocking the UI can pause.
     policy: Arc<PolicyStore>,
+    /// Where the access log is written and when it is trimmed, fixed until restart.
+    access_log: AccessLogConfig,
     /// Serializes rule reads and writes.
     lock: Mutex<()>,
 }
@@ -319,6 +333,7 @@ impl Api {
         reload: ReloadHandle,
         stats: DomainStats,
         policy: Arc<PolicyStore>,
+        access_log: AccessLogConfig,
     ) -> Self {
         Self {
             auth,
@@ -326,6 +341,7 @@ impl Api {
             reload,
             stats,
             policy,
+            access_log,
             lock: Mutex::new(()),
         }
     }
@@ -388,6 +404,7 @@ impl Api {
                     .map_err(InternalError::Task)?;
                 Ok(json(StatusCode::OK, &host))
             }
+            (Method::GET, "/api/access-log") => Ok(json(StatusCode::OK, &self.access_log)),
             (Method::GET, "/api/http-denials") => {
                 Ok(json(StatusCode::OK, &self.stats.denials_snapshot()))
             }
@@ -479,9 +496,11 @@ impl Api {
         Ok(json(StatusCode::OK, &details))
     }
 
-    /// List every editable rule file with its number of allow tables, if it is valid.
-    async fn list_rule_files(&self) -> Result<Vec<RuleFileSummary>, InternalError> {
+    /// List every editable rule file with its number of allow tables, if it is valid,
+    /// together with the directory and its current automatic reload setting.
+    async fn list_rule_files(&self) -> Result<RuleFileListing, InternalError> {
         let rules = self.rules.clone();
+        let watch_rules = self.policy.load().runtime.watch_rules;
         tokio::task::spawn_blocking(move || {
             let names = rules.list().map_err(InternalError::RulesDirectory)?;
             let summaries = names
@@ -499,7 +518,11 @@ impl Api {
                     }
                 })
                 .collect();
-            Ok(summaries)
+            Ok(RuleFileListing {
+                directory: rules.directory().to_string_lossy().into_owned(),
+                watch_rules,
+                files: summaries,
+            })
         })
         .await?
     }
@@ -666,6 +689,10 @@ mod tests {
             handle,
             DomainStats::default(),
             store.clone(),
+            AccessLogConfig {
+                path: directory.join("access.log"),
+                ..AccessLogConfig::default()
+            },
         );
         Harness {
             api,
@@ -840,6 +867,37 @@ mod tests {
         assert!(!host.addresses.iter().any(|entry| entry.address.is_loopback()));
     }
 
+    /// Access-log settings require a session and report the configured path and retention.
+    #[tokio::test]
+    async fn reports_access_log_settings_to_signed_in_users() {
+        let temporary = tempfile::tempdir().unwrap();
+        let harness = harness(temporary.path(), "password");
+        let anonymous =
+            harness.api.response(request(Method::GET, "/api/access-log", None, &())).await;
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+        let bearer = login(&harness.api, "password").await;
+        let response = harness
+            .api
+            .response(request(
+                Method::GET,
+                "/api/access-log",
+                Some(("authorization", &bearer)),
+                &(),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let settings: serde_json::Value = decode(response).await;
+        assert_eq!(
+            settings,
+            serde_json::json!({
+                "path": temporary.path().join("access.log"),
+                "check_interval": 100,
+                "max_size_bytes": 10 * 1024 * 1024,
+                "keep_entries": 1000,
+            })
+        );
+    }
+
     /// Blocking pauses for the requested minutes, rejects invalid durations, and resumes on request.
     #[tokio::test]
     async fn pauses_and_resumes_blocking() {
@@ -972,7 +1030,8 @@ mod tests {
         assert!(Arc::ptr_eq(&before, &harness.store.snapshot()));
     }
 
-    /// List rule files with their rule counts and edit any of them by percent-encoded name.
+    /// List rule files with their rule counts, directory, and reload setting, and edit any
+    /// of them by percent-encoded name.
     #[tokio::test]
     async fn lists_and_edits_every_rule_file() {
         let temporary = tempfile::tempdir().unwrap();
@@ -988,20 +1047,28 @@ mod tests {
         let auth = Some(("authorization", basic.as_str()));
         let response = harness.api.response(request(Method::GET, "/api/rules", auth, &())).await;
         assert_eq!(response.status(), StatusCode::OK);
-        let files: Vec<RuleFileSummary> = decode(response).await;
+        let listing: RuleFileListing = decode(response).await;
+        assert_eq!(listing.directory, harness.rules.to_string_lossy());
+        assert!(listing.watch_rules);
         let summary = |name: &str, rules| RuleFileSummary {
             name: name.to_owned(),
             path: harness.rules.join(name).to_string_lossy().into_owned(),
             rules,
         };
         assert_eq!(
-            files,
+            listing.files,
             [
                 summary("05-web.toml", Some(0)),
                 summary("10 admin.toml", Some(2)),
                 summary("20-broken.toml", None)
             ]
         );
+        let mut unwatched = (*harness.store.snapshot()).clone();
+        unwatched.runtime.watch_rules = false;
+        harness.store.replace(unwatched);
+        let response = harness.api.response(request(Method::GET, "/api/rules", auth, &())).await;
+        let listing: RuleFileListing = decode(response).await;
+        assert!(!listing.watch_rules);
         fs::remove_file(harness.rules.join("20-broken.toml")).unwrap();
         let path = "/api/rules/10%20admin.toml";
         let response = harness.api.response(request(Method::GET, path, auth, &())).await;
@@ -1037,8 +1104,8 @@ mod tests {
         let basic = format!("Basic {}", STANDARD.encode("admin:secret"));
         let auth = Some(("authorization", basic.as_str()));
         let listing = harness.api.response(request(Method::GET, "/api/rules", auth, &())).await;
-        let files: Vec<RuleFileSummary> = decode(listing).await;
-        assert_eq!(files[0].rules, None);
+        let listing: RuleFileListing = decode(listing).await;
+        assert_eq!(listing.files[0].rules, None);
         let response = harness.api.response(request(Method::GET, WEB_RULES_PATH, auth, &())).await;
         assert_eq!(response.status(), StatusCode::OK);
         let broken: RuleFileContents = decode(response).await;

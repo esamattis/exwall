@@ -31,6 +31,15 @@ export interface RuleFileContents {
     error?: string;
 }
 
+/** The rules directory, whether direct edits there are reloaded, and its rule files. */
+export interface RuleFileListing {
+    /** The rules directory's absolute path on the host. */
+    directory: string;
+    /** Whether files edited directly in the directory are reloaded automatically. */
+    watch_rules: boolean;
+    files: RuleFileSummary[];
+}
+
 /** One rule file in the rules directory. */
 export interface RuleFileSummary {
     name: string;
@@ -83,6 +92,18 @@ async function readWebRules(): Promise<RulesDocument> {
         );
     }
     return { revision, rules };
+}
+
+/** Where the service writes its access log and when it trims the file. */
+export interface AccessLogSettings {
+    /** The absolute path on the host. */
+    path: string;
+    /** How many lines are written between file size checks. */
+    check_interval: number;
+    /** The size in bytes above which a check trims the file. */
+    max_size_bytes: number;
+    /** How many of the newest lines a trim keeps. */
+    keep_entries: number;
 }
 
 /** Current counters for a domain, without individual request history. */

@@ -1,6 +1,6 @@
-import { useState, type MouseEvent, type ReactNode } from "react";
+import { createContext, useContext, useState, type MouseEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, Outlet, useLocation } from "@tanstack/react-router";
 import {
     allowDomain,
     allowRequest,
@@ -12,6 +12,7 @@ import {
     resetTraffic,
     rulesPath,
     webRulesFile,
+    type AccessLogSettings,
     type DomainAllowance,
     type DomainStats,
     type HttpRequest,
@@ -21,6 +22,7 @@ import {
 } from "./api.ts";
 import {
     CheckIcon,
+    CopyButton,
     EmptyState,
     ErrorBanner,
     FilterInput,
@@ -38,13 +40,19 @@ import {
 import { CaptureButton, RequestDialog, RequestTiming, WebSocketBadge } from "./capture.tsx";
 import { ruleAnchor } from "./rules.tsx";
 
-/** The traffic views selectable from the tab bar; `requests` lists blocked requests. */
-export type TrafficView = "blocked" | "allowed" | "requests" | "allowed-requests";
+/**
+ * The traffic views selectable from the tab bar, each routed at `/traffic/<view>`;
+ * `blocked` and `allowed` list domains.
+ */
+export type TrafficView = "blocked" | "allowed" | "blocked-requests" | "allowed-requests";
 
-/** Validate the `view` search parameter, defaulting to blocked domains. */
-export function parseTrafficView(value: unknown): TrafficView {
-    if (value === "allowed" || value === "requests" || value === "allowed-requests") {
+/** Map a `?view=` value from the former single-page Traffic URLs to its routed view. */
+export function legacyTrafficView(value: unknown): TrafficView {
+    if (value === "allowed" || value === "allowed-requests") {
         return value;
+    }
+    if (value === "requests") {
+        return "blocked-requests";
     }
     return "blocked";
 }
@@ -105,12 +113,54 @@ function allowanceLabel(allowance: DomainAllowance): string {
     return "Allowed";
 }
 
-/** Show seen domains and recent requests, with one-click allow actions. */
-export function TrafficPage({ view }: { view: TrafficView }) {
+/** An allow action shared by the layout and its views: whether it runs, and how to start it. */
+interface AllowAction<T> {
+    isPending: boolean;
+    mutate: (target: T) => void;
+}
+
+/** Traffic data and actions the layout shares with the view in its tab panel. */
+interface TrafficState {
+    /** Domain counters, absent until loaded. */
+    domains: DomainStats[] | undefined;
+    /** Recently denied HTTP(S) requests, absent until loaded. */
+    denials: HttpRequest[] | undefined;
+    /** Recently allowed HTTP(S) requests, absent until loaded. */
+    allowances: HttpRequest[] | undefined;
+    /** The lowercased filter text; empty when nothing is filtered. */
+    needle: string;
+    /** The current time for relative timestamps, in milliseconds since the epoch. */
+    now: number;
+    locateRule: LocateRule;
+    /** Domains allowed from this page since it loaded, by domain. */
+    allowedDomains: Record<string, DomainAllowance>;
+    /** Requests allowed from this page since it loaded, by `requestKey`. */
+    allowedRequests: Record<string, boolean>;
+    domainAllow: AllowAction<DomainAllowance>;
+    requestAllow: AllowAction<HttpRequest>;
+}
+
+/** Carries the layout's traffic state to the routed view. */
+const TrafficContext = createContext<TrafficState | null>(null);
+
+/** Read the traffic state of the enclosing `TrafficLayout`. */
+function useTraffic(): TrafficState {
+    const state = useContext(TrafficContext);
+    if (!state) {
+        throw new Error("Traffic views must render inside TrafficLayout");
+    }
+    return state;
+}
+
+/**
+ * Show traffic counters, the view tabs, and the access log note around the routed
+ * view, which shares this layout's data, filter, and one-click allow actions.
+ */
+export function TrafficLayout() {
     const client = useQueryClient();
-    const navigate = useNavigate();
     const toast = useToast();
     const now = useNow();
+    const pathname = useLocation({ select: (location) => location.pathname });
     const [filter, setFilter] = useState("");
     const [allowedDomains, setAllowedDomains] = useState<Record<string, DomainAllowance>>({});
     const [allowedRequests, setAllowedRequests] = useState<Record<string, boolean>>({});
@@ -168,15 +218,21 @@ export function TrafficPage({ view }: { view: TrafficView }) {
         },
     });
     const refreshing = domains.isFetching || denials.isFetching || allowances.isFetching;
-    const blocked = domainEntries(domains.data ?? [], "block");
-    const allowed = domainEntries(domains.data ?? [], "allow");
-    const needle = filter.trim().toLowerCase();
     const tabs: { id: TrafficView; label: string; count: number | undefined }[] = [
-        { id: "blocked", label: "Blocked domains", count: domains.data && blocked.length },
-        { id: "allowed", label: "Allowed domains", count: domains.data && allowed.length },
-        { id: "requests", label: "Blocked requests", count: denials.data?.length },
+        {
+            id: "blocked",
+            label: "Blocked domains",
+            count: domains.data && domainEntries(domains.data, "block").length,
+        },
+        {
+            id: "allowed",
+            label: "Allowed domains",
+            count: domains.data && domainEntries(domains.data, "allow").length,
+        },
+        { id: "blocked-requests", label: "Blocked requests", count: denials.data?.length },
         { id: "allowed-requests", label: "Allowed requests", count: allowances.data?.length },
     ];
+    const view = tabs.find((tab) => pathname === `/traffic/${tab.id}`)?.id;
     const updatedAt = Math.max(
         domains.dataUpdatedAt,
         denials.dataUpdatedAt,
@@ -184,44 +240,18 @@ export function TrafficPage({ view }: { view: TrafficView }) {
     );
     const actionError = domainAllow.error ?? requestAllow.error ?? reset.error;
     const loadError = domains.error ?? denials.error ?? allowances.error;
-    const requests = view === "requests" ? denials.data : allowances.data;
-    let panel: ReactNode = (
-        <p role="status" className="flex items-center gap-2 px-4 py-10 text-sm text-zinc-400">
-            <Spinner /> Loading traffic…
-        </p>
-    );
-    if ((view === "requests" || view === "allowed-requests") && requests) {
-        panel = (
-            <RequestsTable
-                outcome={view === "requests" ? "block" : "allow"}
-                requests={requests.filter(
-                    (request) =>
-                        request.domain.toLowerCase().includes(needle) ||
-                        requestPath(request).toLowerCase().includes(needle),
-                )}
-                filtered={needle !== "" && requests.length > 0}
-                now={now}
-                isPending={requestAllow.isPending}
-                allowed={allowedRequests}
-                locateRule={locateRule}
-                onAllow={requestAllow.mutate}
-            />
-        );
-    } else if ((view === "blocked" || view === "allowed") && domains.data) {
-        const entries = view === "blocked" ? blocked : allowed;
-        panel = (
-            <DomainsTable
-                outcome={view === "blocked" ? "block" : "allow"}
-                entries={entries.filter(({ entry }) => entry.domain.toLowerCase().includes(needle))}
-                filtered={needle !== "" && entries.length > 0}
-                now={now}
-                isPending={domainAllow.isPending}
-                allowed={allowedDomains}
-                locateRule={locateRule}
-                onAllow={domainAllow.mutate}
-            />
-        );
-    }
+    const state: TrafficState = {
+        domains: domains.data,
+        denials: denials.data,
+        allowances: allowances.data,
+        needle: filter.trim().toLowerCase(),
+        now,
+        locateRule,
+        allowedDomains,
+        allowedRequests,
+        domainAllow,
+        requestAllow,
+    };
     return (
         <>
             <PageHeader
@@ -283,16 +313,13 @@ export function TrafficPage({ view }: { view: TrafficView }) {
                         {tabs.map((tab) => {
                             const selected = tab.id === view;
                             return (
-                                <button
+                                <Link
                                     key={tab.id}
                                     id={`tab-${tab.id}`}
-                                    type="button"
+                                    to={`/traffic/${tab.id}`}
                                     role="tab"
                                     aria-selected={selected}
-                                    aria-controls={`panel-${tab.id}`}
-                                    onClick={() =>
-                                        void navigate({ to: "/", search: { view: tab.id } })
-                                    }
+                                    aria-controls="traffic-panel"
                                     className={`flex items-center gap-2 border-b-2 whitespace-nowrap px-3 py-2.5 text-sm font-medium transition ${
                                         selected
                                             ? "border-emerald-400 text-white"
@@ -311,7 +338,7 @@ export function TrafficPage({ view }: { view: TrafficView }) {
                                             {tab.count}
                                         </span>
                                     )}
-                                </button>
+                                </Link>
                             );
                         })}
                     </div>
@@ -319,7 +346,7 @@ export function TrafficPage({ view }: { view: TrafficView }) {
                         <FilterInput
                             label="Filter"
                             placeholder={
-                                view === "requests" || view === "allowed-requests"
+                                view === "blocked-requests" || view === "allowed-requests"
                                     ? "Filter domains or paths"
                                     : "Filter domains"
                             }
@@ -328,11 +355,144 @@ export function TrafficPage({ view }: { view: TrafficView }) {
                         />
                     </div>
                 </div>
-                <div role="tabpanel" id={`panel-${view}`} aria-labelledby={`tab-${view}`}>
-                    {panel}
+                <div
+                    role="tabpanel"
+                    id="traffic-panel"
+                    aria-labelledby={view === undefined ? undefined : `tab-${view}`}
+                >
+                    <TrafficContext value={state}>
+                        <Outlet />
+                    </TrafficContext>
                 </div>
             </div>
+            <AccessLogNote />
         </>
+    );
+}
+
+/** The access log's column header line, as documented for operators. */
+const accessLogColumns =
+    "TIMESTAMP PROTOCOL RESULT RULE HTTP_METHOD URL HTTP_STATUS DNS_RCODE ERROR";
+
+/** Sample access-log lines illustrating an allowed request, a denial, and merged repeats. */
+const accessLogExample = [
+    "2026-10-07T12:34:56Z https ALLOW /etc/exwall/rules.d/10-examples.toml:allow#1 GET https://github.com:443/api 200 - -",
+    "2026-10-07T12:34:57Z http DENY - POST http://denied.test/upload?id=7 403 - -",
+    "2026-10-07T12:34:58Z dns DENY - - dns://denied.test/A - REFUSED - x3",
+].join("\n");
+
+/**
+ * Point to the full access log on the host, with a button copying its path, and
+ * explain how the file is trimmed and how its lines are formatted.
+ */
+function AccessLogNote() {
+    // The settings are fixed until the service restarts.
+    const settings = useQuery({
+        queryKey: ["access-log"],
+        queryFn: () => api<AccessLogSettings>("access-log"),
+        staleTime: Infinity,
+        ...manualQuery,
+    });
+    if (!settings.data) {
+        return null;
+    }
+    const { path, check_interval, max_size_bytes, keep_entries } = settings.data;
+    return (
+        <section
+            aria-labelledby="access-log-heading"
+            className="panel mt-6 space-y-3 p-4 text-sm text-zinc-400"
+        >
+            <h2 id="access-log-heading" className="font-medium text-zinc-200">
+                Full access log
+            </h2>
+            <p>
+                This page keeps counters and only the {requestCapacity} most recently seen requests
+                of each outcome, in memory. Every DNS query and HTTP(S) request is also written, one
+                line each, to the access log on this host, which is kept across restarts and
+                readable with sudo:
+            </p>
+            <div className="flex min-w-0 items-center gap-1">
+                <code className="truncate font-mono text-[13px] text-zinc-100" title={path}>
+                    {path}
+                </code>
+                <CopyButton text={path} label={`Copy path ${path}`} />
+            </div>
+            <p>
+                After every {check_interval.toLocaleString()} lines, exwall checks the file size.
+                Once it is over {formatBytes(max_size_bytes)}, the file is cut down to its newest{" "}
+                {keep_entries.toLocaleString()} lines.
+            </p>
+            <p>
+                Each line has these space-separated columns, with <code>-</code> for an empty one:
+            </p>
+            <pre className="overflow-x-auto rounded-md bg-black/30 px-3 py-2 font-mono text-xs text-zinc-300">
+                {`${accessLogColumns}\n${accessLogExample}`}
+            </pre>
+            <p>
+                <code>RULE</code> is the rule file and number that allowed the request, or{" "}
+                <code>@paused</code> while blocking was paused. Identical lines within one second
+                are merged into the first, with a trailing count such as <code>x3</code>; lines that
+                differ in any column, including the URL's query string, stay separate. A WebSocket
+                is logged once, when it closes, with the time it opened.
+            </p>
+        </section>
+    );
+}
+
+/** The placeholder shown in the tab panel until its traffic data loads. */
+function TrafficLoading() {
+    return (
+        <p role="status" className="flex items-center gap-2 px-4 py-10 text-sm text-zinc-400">
+            <Spinner /> Loading traffic…
+        </p>
+    );
+}
+
+/** The routed tab listing domains with one outcome, filtered by the layout's filter text. */
+export function DomainsView({ outcome }: { outcome: "allow" | "block" }) {
+    const traffic = useTraffic();
+    if (!traffic.domains) {
+        return <TrafficLoading />;
+    }
+    const entries = domainEntries(traffic.domains, outcome);
+    return (
+        <DomainsTable
+            outcome={outcome}
+            entries={entries.filter(({ entry }) =>
+                entry.domain.toLowerCase().includes(traffic.needle),
+            )}
+            filtered={traffic.needle !== "" && entries.length > 0}
+            now={traffic.now}
+            isPending={traffic.domainAllow.isPending}
+            allowed={traffic.allowedDomains}
+            locateRule={traffic.locateRule}
+            onAllow={traffic.domainAllow.mutate}
+        />
+    );
+}
+
+/** The routed tab listing recent requests with one outcome, filtered by domain or path. */
+export function RequestsView({ outcome }: { outcome: "allow" | "block" }) {
+    const traffic = useTraffic();
+    const requests = outcome === "block" ? traffic.denials : traffic.allowances;
+    if (!requests) {
+        return <TrafficLoading />;
+    }
+    return (
+        <RequestsTable
+            outcome={outcome}
+            requests={requests.filter(
+                (request) =>
+                    request.domain.toLowerCase().includes(traffic.needle) ||
+                    requestPath(request).toLowerCase().includes(traffic.needle),
+            )}
+            filtered={traffic.needle !== "" && requests.length > 0}
+            now={traffic.now}
+            isPending={traffic.requestAllow.isPending}
+            allowed={traffic.allowedRequests}
+            locateRule={traffic.locateRule}
+            onAllow={traffic.requestAllow.mutate}
+        />
     );
 }
 
@@ -346,7 +506,14 @@ interface StatTile {
 }
 
 /** Summarize domain counters as a row of headline numbers that open their related tabs. */
-function StatTiles({ domains, view }: { domains: DomainStats[] | undefined; view: TrafficView }) {
+function StatTiles({
+    domains,
+    view,
+}: {
+    domains: DomainStats[] | undefined;
+    /** The routed view, highlighting the tile that opens it. */
+    view: TrafficView | undefined;
+}) {
     const sum = (pick: (entry: DomainStats) => number) =>
         domains?.reduce((total, entry) => total + pick(entry), 0);
     const tiles: StatTile[] = [
@@ -368,7 +535,7 @@ function StatTiles({ domains, view }: { domains: DomainStats[] | undefined; view
             value: sum((entry) => entry.dns.block + entry.http.block),
             dot: "bg-rose-400",
             hint: "DNS lookups and HTTP requests",
-            view: "requests",
+            view: "blocked-requests",
         },
         {
             label: "Allowed",
@@ -400,8 +567,7 @@ function StatTiles({ domains, view }: { domains: DomainStats[] | undefined; view
                                 tile.label
                             ) : (
                                 <Link
-                                    to="/"
-                                    search={{ view: tile.view }}
+                                    to={`/traffic/${tile.view}`}
                                     aria-current={selected ? "page" : undefined}
                                     className="after:absolute after:inset-0 after:rounded-[inherit] focus-visible:outline-none"
                                 >

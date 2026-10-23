@@ -54,10 +54,14 @@ test("local proxy protocols, TLS trust, streaming, DNS, reloads, UI API, and acc
     expect(
         (await readdir(join(fixture.root, "sessions"))).filter((name) => name.endsWith(".json")),
     ).toHaveLength(1);
-    expect(await (await request.get(`${ui}/api/rules`, { headers })).json()).toEqual([
-        { name: "05-web.toml", path: join(fixture.rules, "05-web.toml"), rules: 0 },
-        { name: "1-test.toml", path: join(fixture.rules, "1-test.toml"), rules: 2 },
-    ]);
+    expect(await (await request.get(`${ui}/api/rules`, { headers })).json()).toEqual({
+        directory: fixture.rules,
+        watch_rules: true,
+        files: [
+            { name: "05-web.toml", path: join(fixture.rules, "05-web.toml"), rules: 0 },
+            { name: "1-test.toml", path: join(fixture.rules, "1-test.toml"), rules: 2 },
+        ],
+    });
     const webRules = `${ui}/api/rules/05-web.toml`;
     expect((await request.get(`${ui}/api/rules/missing.toml`, { headers })).status()).toBe(404);
     let document = await (await request.get(webRules, { headers })).json();

@@ -4,7 +4,7 @@
 //! (firewall, resolver, logging, access log, UI), while [`RuntimeSettings`] is
 //! the subset that SIGHUP republishes to running request handlers.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
     net::{IpAddr, Ipv4Addr},
@@ -130,7 +130,9 @@ impl Default for UiConfig {
 }
 
 /// Access-log destination and periodic size-based retention settings.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+///
+/// The web UI shows them on the Traffic page.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AccessLogConfig {
     /// File receiving access-log rows.

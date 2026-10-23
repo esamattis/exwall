@@ -382,7 +382,14 @@ fn build_api(
         Arc::new(FileSessionStore::new(ui.sessions_dir.clone())),
         Arc::new(RandomTokens),
     );
-    Api::new(auth, RuleFiles::new(cli.rules_dir.clone()), reload, sink.stats().clone(), policy)
+    Api::new(
+        auth,
+        RuleFiles::new(cli.rules_dir.clone()),
+        reload,
+        sink.stats().clone(),
+        policy,
+        config.startup.access_log.clone(),
+    )
 }
 
 /// Wait for a stop signal or the first failure, forwarding SIGHUP to the reloader.

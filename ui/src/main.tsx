@@ -30,7 +30,7 @@ import {
     ToastProvider,
 } from "./components.tsx";
 import { RuleFilesPage, RulesPage } from "./rules.tsx";
-import { parseTrafficView, TrafficPage } from "./traffic.tsx";
+import { DomainsView, legacyTrafficView, RequestsView, TrafficLayout } from "./traffic.tsx";
 import "./style.css";
 import iconUrl from "../../assets/icon.svg";
 
@@ -189,16 +189,14 @@ function AppShell() {
         <div className="min-h-screen">
             <header className="sticky top-0 z-30 border-b border-white/10 bg-zinc-950/80 backdrop-blur">
                 <div className="mx-auto flex h-14 max-w-6xl items-center gap-6 px-4 sm:px-6">
-                    <Link to="/" search={{}} aria-label="exwall home">
+                    <Link to="/traffic" aria-label="exwall home">
                         <Brand />
                     </Link>
                     <HostLabel />
                     <nav aria-label="Main" className="flex gap-1">
                         <Link
-                            to="/"
-                            search={{}}
+                            to="/traffic"
                             className={navLink}
-                            activeOptions={{ exact: true, includeSearch: false }}
                             activeProps={{ className: "bg-white/10 text-white" }}
                         >
                             Traffic
@@ -354,21 +352,60 @@ const appRoute = createRoute({
     },
     component: AppShell,
 });
-const trafficRoute = createRoute({
+/** The start page, which opens Traffic and keeps former `/?view=` links working. */
+const homeRoute = createRoute({
     getParentRoute: () => appRoute,
     path: "/",
-    validateSearch: (search: Record<string, unknown>): { view?: string } =>
-        search.view === undefined ? {} : { view: parseTrafficView(search.view) },
-    component: () => <TrafficPage view={parseTrafficView(trafficRoute.useSearch().view)} />,
+    validateSearch: (search: Record<string, unknown>): { view?: unknown } =>
+        search.view === undefined ? {} : { view: search.view },
+    beforeLoad: ({ search }) => {
+        throw redirect({ to: `/traffic/${legacyTrafficView(search.view)}`, replace: true });
+    },
+});
+const trafficRoute = createRoute({
+    getParentRoute: () => appRoute,
+    path: "/traffic",
+    component: TrafficLayout,
+});
+const trafficIndexRoute = createRoute({
+    getParentRoute: () => trafficRoute,
+    path: "/",
+    beforeLoad: () => {
+        throw redirect({ to: "/traffic/blocked", replace: true });
+    },
+});
+const blockedDomainsRoute = createRoute({
+    getParentRoute: () => trafficRoute,
+    path: "blocked",
+    component: () => <DomainsView outcome="block" />,
+});
+const allowedDomainsRoute = createRoute({
+    getParentRoute: () => trafficRoute,
+    path: "allowed",
+    component: () => <DomainsView outcome="allow" />,
+});
+const blockedRequestsRoute = createRoute({
+    getParentRoute: () => trafficRoute,
+    path: "blocked-requests",
+    component: () => <RequestsView outcome="block" />,
+});
+const allowedRequestsRoute = createRoute({
+    getParentRoute: () => trafficRoute,
+    path: "allowed-requests",
+    component: () => <RequestsView outcome="allow" />,
 });
 const rulesRoute = createRoute({
     getParentRoute: () => appRoute,
     path: "/rules",
+});
+const ruleFilesRoute = createRoute({
+    getParentRoute: () => rulesRoute,
+    path: "/",
     component: RuleFilesPage,
 });
 const ruleFileRoute = createRoute({
-    getParentRoute: () => appRoute,
-    path: "/rules/$file",
+    getParentRoute: () => rulesRoute,
+    path: "$file",
     component: RuleFileEditor,
 });
 
@@ -381,14 +418,24 @@ const domainsRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/domains",
     beforeLoad: () => {
-        throw redirect({ to: "/", search: {} });
+        throw redirect({ to: "/traffic", replace: true });
     },
 });
 const router = createRouter({
     routeTree: rootRoute.addChildren([
         loginRoute,
         domainsRoute,
-        appRoute.addChildren([trafficRoute, rulesRoute, ruleFileRoute]),
+        appRoute.addChildren([
+            homeRoute,
+            trafficRoute.addChildren([
+                trafficIndexRoute,
+                blockedDomainsRoute,
+                allowedDomainsRoute,
+                blockedRequestsRoute,
+                allowedRequestsRoute,
+            ]),
+            rulesRoute.addChildren([ruleFilesRoute, ruleFileRoute]),
+        ]),
     ]),
 });
 

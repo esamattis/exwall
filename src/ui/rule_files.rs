@@ -58,6 +58,13 @@ impl RuleFiles {
         Ok(names)
     }
 
+    /// The absolute path of the rules directory, for display.
+    ///
+    /// The path is made absolute without touching the filesystem, like [`Self::path`].
+    pub fn directory(&self) -> PathBuf {
+        std::path::absolute(&self.directory).unwrap_or_else(|_| self.directory.clone())
+    }
+
     /// The absolute path of the rule file `name`, for display.
     ///
     /// The path is made absolute without touching the filesystem; a relative
