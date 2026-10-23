@@ -160,8 +160,13 @@ export function Spinner({ className = "size-4" }: IconProps) {
     );
 }
 
-/** Copy text, falling back to a selection copy where the Clipboard API is unavailable. */
-async function copyText(text: string): Promise<void> {
+/**
+ * Copy text, falling back to a selection copy where the Clipboard API is unavailable.
+ * The `anchor` is the element that triggered the copy; the fallback's temporary field
+ * is placed in its modal dialog, if any, because a modal dialog makes the rest of the
+ * page inert and a field outside it cannot be selected.
+ */
+async function copyText(text: string, anchor: HTMLElement): Promise<void> {
     // The UI is often served over plain HTTP on a LAN address, which is not a secure context.
     if (window.isSecureContext && navigator.clipboard) {
         await navigator.clipboard.writeText(text);
@@ -172,10 +177,11 @@ async function copyText(text: string): Promise<void> {
     field.readOnly = true;
     field.style.position = "fixed";
     field.style.opacity = "0";
-    document.body.append(field);
+    (anchor.closest("dialog") ?? document.body).append(field);
     field.select();
     const copied = document.execCommand("copy");
     field.remove();
+    anchor.focus();
     if (!copied) {
         throw new Error("Copy failed");
     }
@@ -203,8 +209,8 @@ export function CopyButton({ text, label }: { text: string; label: string }) {
             className={`btn btn-icon btn-ghost shrink-0 ${state === "failed" ? "text-rose-300" : ""}`}
             aria-label={label}
             title={title}
-            onClick={() => {
-                copyText(text).then(
+            onClick={(event) => {
+                copyText(text, event.currentTarget).then(
                     () => setState("copied"),
                     () => setState("failed"),
                 );
