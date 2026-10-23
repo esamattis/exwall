@@ -262,7 +262,7 @@ export function TrafficPage({ view }: { view: TrafficView }) {
                     </>
                 }
             />
-            <StatTiles domains={domains.data} />
+            <StatTiles domains={domains.data} view={view} />
             {loadError && (
                 <div className="mb-4">
                     <ErrorBanner>{loadError.message}</ErrorBanner>
@@ -336,11 +336,20 @@ export function TrafficPage({ view }: { view: TrafficView }) {
     );
 }
 
-/** Summarize domain counters as a row of headline numbers. */
-function StatTiles({ domains }: { domains: DomainStats[] | undefined }) {
+/** A headline number, optionally linked to the traffic view that lists its entries. */
+interface StatTile {
+    label: string;
+    value: number | undefined;
+    dot: string;
+    hint: string;
+    view?: TrafficView;
+}
+
+/** Summarize domain counters as a row of headline numbers that open their related tabs. */
+function StatTiles({ domains, view }: { domains: DomainStats[] | undefined; view: TrafficView }) {
     const sum = (pick: (entry: DomainStats) => number) =>
         domains?.reduce((total, entry) => total + pick(entry), 0);
-    const tiles: { label: string; value: number | undefined; dot: string; hint: string }[] = [
+    const tiles: StatTile[] = [
         {
             label: "Domains seen",
             value: domains?.length,
@@ -352,34 +361,61 @@ function StatTiles({ domains }: { domains: DomainStats[] | undefined }) {
             value: domains?.filter((entry) => entry.last_denied !== null).length,
             dot: "bg-rose-400",
             hint: "At least one denial",
+            view: "blocked",
         },
         {
             label: "Blocked",
             value: sum((entry) => entry.dns.block + entry.http.block),
             dot: "bg-rose-400",
             hint: "DNS lookups and HTTP requests",
+            view: "requests",
         },
         {
             label: "Allowed",
             value: sum((entry) => entry.dns.allow + entry.http.allow),
             dot: "bg-emerald-400",
             hint: "DNS lookups and HTTP requests",
+            view: "allowed-requests",
         },
     ];
     return (
         <dl className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
-            {tiles.map((tile) => (
-                <div key={tile.label} className="panel px-4 py-3">
-                    <dt className="flex items-center gap-2 text-xs font-medium text-zinc-400">
-                        <span className={`size-1.5 rounded-full ${tile.dot}`} aria-hidden="true" />
-                        {tile.label}
-                    </dt>
-                    <dd className="mt-1 text-2xl font-semibold text-white tabular-nums">
-                        {tile.value === undefined ? "–" : tile.value.toLocaleString()}
-                    </dd>
-                    <dd className="text-xs text-zinc-500">{tile.hint}</dd>
-                </div>
-            ))}
+            {tiles.map((tile) => {
+                const selected = tile.view !== undefined && tile.view === view;
+                return (
+                    <div
+                        key={tile.label}
+                        className={`panel relative px-4 py-3 transition ${
+                            tile.view === undefined
+                                ? ""
+                                : "has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-emerald-400/60 hover:border-white/20 hover:bg-white/[0.03]"
+                        } ${selected ? "border-white/20" : ""}`}
+                    >
+                        <dt className="flex items-center gap-2 text-xs font-medium text-zinc-400">
+                            <span
+                                className={`size-1.5 rounded-full ${tile.dot}`}
+                                aria-hidden="true"
+                            />
+                            {tile.view === undefined ? (
+                                tile.label
+                            ) : (
+                                <Link
+                                    to="/"
+                                    search={{ view: tile.view }}
+                                    aria-current={selected ? "page" : undefined}
+                                    className="after:absolute after:inset-0 after:rounded-[inherit] focus-visible:outline-none"
+                                >
+                                    {tile.label}
+                                </Link>
+                            )}
+                        </dt>
+                        <dd className="mt-1 text-2xl font-semibold text-white tabular-nums">
+                            {tile.value === undefined ? "–" : tile.value.toLocaleString()}
+                        </dd>
+                        <dd className="text-xs text-zinc-500">{tile.hint}</dd>
+                    </div>
+                );
+            })}
         </dl>
     );
 }

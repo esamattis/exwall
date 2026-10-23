@@ -151,7 +151,17 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
     await expect(allowedRows.nth(0).getByRole("cell").nth(3)).toHaveText("0 B");
     await expect(allowedRows.nth(0).getByRole("cell").nth(4)).toHaveText(/^\d+(\.\d)? k?B$/i);
 
-    await showTab(page, "Blocked domains");
+    // Stat tiles open the tab that lists the entries they count.
+    await page.getByRole("link", { name: "Blocked", exact: true }).click();
+    await expect(page.getByRole("tab", { name: /^Blocked requests/ })).toHaveAttribute(
+        "aria-selected",
+        "true",
+    );
+    await page.getByRole("link", { name: "Blocked domains", exact: true }).click();
+    await expect(page.getByRole("tab", { name: /^Blocked domains/ })).toHaveAttribute(
+        "aria-selected",
+        "true",
+    );
     await page
         .getByRole("tabpanel")
         .getByRole("button", { name: "Allow 127.0.0.1 completely", exact: true })
