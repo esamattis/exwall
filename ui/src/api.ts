@@ -102,8 +102,8 @@ export interface AccessLogSettings {
     check_interval: number;
     /** The size in bytes above which a check trims the file. */
     max_size_bytes: number;
-    /** How many of the newest lines a trim keeps. */
-    keep_entries: number;
+    /** The most bytes of the newest complete lines a trim keeps. */
+    keep_size_bytes: number;
 }
 
 /** Current counters for a domain, without individual request history. */

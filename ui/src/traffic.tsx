@@ -396,7 +396,7 @@ function AccessLogNote() {
     if (!settings.data) {
         return null;
     }
-    const { path, check_interval, max_size_bytes, keep_entries } = settings.data;
+    const { path, check_interval, max_size_bytes, keep_size_bytes } = settings.data;
     return (
         <section
             aria-labelledby="access-log-heading"
@@ -419,8 +419,8 @@ function AccessLogNote() {
             </div>
             <p>
                 After every {check_interval.toLocaleString()} lines, exwall checks the file size.
-                Once it is over {formatBytes(max_size_bytes)}, the file is cut down to its newest{" "}
-                {keep_entries.toLocaleString()} lines.
+                Once it is over {formatBytes(max_size_bytes)}, the oldest lines are removed so that
+                about {formatBytes(keep_size_bytes)} of the newest lines remain.
             </p>
             <p>
                 Each line has these space-separated columns, with <code>-</code> for an empty one:

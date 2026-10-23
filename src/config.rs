@@ -4,7 +4,7 @@
 //! (firewall, resolver, logging, access log, UI), while [`RuntimeSettings`] is
 //! the subset that SIGHUP republishes to running request handlers.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{
     fs, io,
     net::{IpAddr, Ipv4Addr},
@@ -132,7 +132,7 @@ impl Default for UiConfig {
 /// Access-log destination and periodic size-based retention settings.
 ///
 /// The web UI shows them on the Traffic page.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AccessLogConfig {
     /// File receiving access-log rows.
@@ -141,8 +141,16 @@ pub struct AccessLogConfig {
     pub check_interval: u64,
     /// Size above which the file is trimmed at a check.
     pub max_size_bytes: u64,
-    /// Number of newest rows retained when trimming.
-    pub keep_entries: usize,
+    /// Obsolete row-count retention from exwall 0.3 and earlier, accepted so
+    /// installed configurations keep loading but otherwise ignored.
+    pub keep_entries: Option<u64>,
+}
+
+impl AccessLogConfig {
+    /// Upper bound on the newest complete rows kept when trimming, half the size limit.
+    pub fn keep_size_bytes(&self) -> u64 {
+        self.max_size_bytes / 2
+    }
 }
 
 impl Default for AccessLogConfig {
@@ -152,7 +160,7 @@ impl Default for AccessLogConfig {
             path: "/var/log/exwall/access.log".into(),
             check_interval: 100,
             max_size_bytes: 10 * 1024 * 1024,
-            keep_entries: 1000,
+            keep_entries: None,
         }
     }
 }
@@ -329,10 +337,7 @@ impl Config {
         if raw.access_log.path.file_name().is_none() {
             return Err(InvalidConfig::AccessLogPath);
         }
-        if raw.access_log.check_interval == 0
-            || raw.access_log.max_size_bytes == 0
-            || raw.access_log.keep_entries == 0
-        {
+        if raw.access_log.check_interval == 0 || raw.access_log.max_size_bytes == 0 {
             return Err(InvalidConfig::AccessLogRetention);
         }
         if raw.bypass_users.iter().any(String::is_empty) {
@@ -413,7 +418,6 @@ mod tests {
             "[access_log]\npath = '/'",
             "[access_log]\ncheck_interval = 0",
             "[access_log]\nmax_size_bytes = 0",
-            "[access_log]\nkeep_entries = 0",
             "[access_log]\ntypo = 1",
             "[[iptables.bypass]]\nnetwork = '::1'\nport = 0",
         ] {
@@ -440,7 +444,7 @@ mod tests {
     #[test]
     fn access_log_configuration() {
         let config = Config::parse(
-            "[access_log]\npath = '/tmp/access.log'\ncheck_interval = 5\nmax_size_bytes = 4096\nkeep_entries = 20",
+            "[access_log]\npath = '/tmp/access.log'\ncheck_interval = 5\nmax_size_bytes = 4096",
         )
         .unwrap();
         assert_eq!(
@@ -449,9 +453,17 @@ mod tests {
                 path: "/tmp/access.log".into(),
                 check_interval: 5,
                 max_size_bytes: 4096,
-                keep_entries: 20,
+                keep_entries: None,
             }
         );
+        assert_eq!(config.startup.access_log.keep_size_bytes(), 2048);
+    }
+
+    /// Keep loading configurations installed with the obsolete row-count retention.
+    #[test]
+    fn accepts_obsolete_keep_entries() {
+        let config = Config::parse("[access_log]\nkeep_entries = 1000").unwrap();
+        assert_eq!(config.startup.access_log.keep_size_bytes(), 5 * 1024 * 1024);
     }
 
     /// Accept multiple literal bind interfaces, partial overrides, and disabled UI.

@@ -8,9 +8,8 @@ use super::{
 };
 use crate::config::AccessLogConfig;
 use std::{
-    collections::VecDeque,
     fs::{File, OpenOptions},
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, BufWriter, Seek, SeekFrom, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering},
@@ -240,22 +239,17 @@ impl AccessLogWriter {
         Ok(())
     }
 
-    /// Atomically replace an oversized log with its newest complete rows in order.
+    /// Atomically replace an oversized log with its newest complete rows that fit
+    /// within the retained size, in order.
     fn retain_tail(&mut self) -> io::Result<()> {
         let mut reader = BufReader::new(File::open(&self.config.path)?);
-        let mut tail = VecDeque::new();
-        loop {
-            let mut line = Vec::new();
-            if reader.read_until(b'\n', &mut line)? == 0 {
-                break;
-            }
-            // An interrupted write is not a complete access-log row.
-            if line.last() == Some(&b'\n') {
-                tail.push_back(line);
-                if tail.len() > self.config.keep_entries {
-                    tail.pop_front();
-                }
-            }
+        let length = reader.get_ref().metadata()?.len();
+        let keep = self.config.keep_size_bytes().min(length);
+        // Start one byte early so a row beginning exactly at the cut is kept whole.
+        let cut = length - keep;
+        if cut > 0 {
+            reader.seek(SeekFrom::Start(cut - 1))?;
+            reader.skip_until(b'\n')?;
         }
         let parent = self
             .config
@@ -263,12 +257,21 @@ impl AccessLogWriter {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
+        let replacement = tempfile::NamedTempFile::new_in(parent)?;
         replacement.as_file().set_permissions(self.file.metadata()?.permissions())?;
-        for line in tail {
-            replacement.write_all(&line)?;
+        let mut output = BufWriter::new(replacement);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            if reader.read_until(b'\n', &mut line)? == 0 {
+                break;
+            }
+            // An interrupted write is not a complete access-log row.
+            if line.last() == Some(&b'\n') {
+                output.write_all(&line)?;
+            }
         }
-        replacement.flush()?;
+        let replacement = output.into_inner().map_err(|error| error.into_error())?;
         replacement.persist(&self.config.path).map_err(|error| error.error)?;
         self.file = open_append(&self.config.path)?;
         Ok(())
@@ -319,34 +322,55 @@ mod tests {
         );
     }
 
-    /// Check retention only at the interval, preserve newest rows, and continue appending.
+    /// Concatenate single-count rows for the given event indexes.
+    fn rows(indexes: std::ops::Range<usize>) -> String {
+        indexes.map(|index| line(&event(index), 1)).collect()
+    }
+
+    /// Check retention only at the interval, keep the newest complete rows fitting
+    /// in half the size limit, and continue appending.
     #[test]
     fn retains_tail_at_configured_size_checks() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("access.log");
-        std::fs::write(&path, line(&event(0), 1)).unwrap();
+        let row = line(&event(0), 1).len() as u64;
+        assert_eq!(rows(0..7).len() as u64, 7 * row);
+        std::fs::write(&path, rows(0..3)).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        // Half the limit is two and a half rows, so the cut falls inside a row.
         let mut writer = AccessLogWriter::open(AccessLogConfig {
             path: path.clone(),
             check_interval: 3,
-            max_size_bytes: 1,
-            keep_entries: 2,
+            max_size_bytes: 5 * row,
+            keep_entries: None,
         })
         .unwrap();
-        writer.append(&event(1), 1).unwrap();
-        writer.append(&event(2), 1).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
         writer.append(&event(3), 1).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            line(&event(2), 1) + &line(&event(3), 1)
-        );
         writer.append(&event(4), 1).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            line(&event(2), 1) + &line(&event(3), 1) + &line(&event(4), 1)
-        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), rows(0..5));
+        writer.append(&event(5), 1).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), rows(4..6));
+        writer.append(&event(6), 1).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), rows(4..7));
         assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o640);
+    }
+
+    /// Keep a row that starts exactly where the retained half begins.
+    #[test]
+    fn retains_row_starting_at_exact_cut() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("access.log");
+        let row = line(&event(0), 1).len() as u64;
+        std::fs::write(&path, rows(0..4)).unwrap();
+        let mut writer = AccessLogWriter::open(AccessLogConfig {
+            path: path.clone(),
+            check_interval: 1,
+            max_size_bytes: 4 * row,
+            keep_entries: None,
+        })
+        .unwrap();
+        writer.append(&event(4), 1).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), rows(3..5));
     }
 
     /// Keep every row when a size inspection finds the log below the threshold.
@@ -358,7 +382,7 @@ mod tests {
             path: path.clone(),
             check_interval: 1,
             max_size_bytes: 4096,
-            keep_entries: 1,
+            keep_entries: None,
         })
         .unwrap();
         writer.append(&event(0), 1).unwrap();

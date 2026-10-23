@@ -19,7 +19,7 @@ use rama::http::{
     header,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{io, sync::Arc, time::Duration};
+use std::{io, path::Path, sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -87,6 +87,31 @@ impl BlockingStatus {
         let remaining = policy.pause().remaining();
         Self {
             paused_seconds_remaining: remaining.map(|left| left.as_millis().div_ceil(1000) as u64),
+        }
+    }
+}
+
+/// Where the access log is written and how it is trimmed, as reported to the UI.
+#[derive(Debug, Serialize)]
+struct AccessLogSettings<'a> {
+    /// The access-log file on the host.
+    path: &'a Path,
+    /// Rows written between file-size checks.
+    check_interval: u64,
+    /// Size above which a check trims the file.
+    max_size_bytes: u64,
+    /// Most bytes of newest complete rows a trim keeps.
+    keep_size_bytes: u64,
+}
+
+impl<'a> AccessLogSettings<'a> {
+    /// Describe the configured access-log destination and retention.
+    fn of(config: &'a AccessLogConfig) -> Self {
+        Self {
+            path: &config.path,
+            check_interval: config.check_interval,
+            max_size_bytes: config.max_size_bytes,
+            keep_size_bytes: config.keep_size_bytes(),
         }
     }
 }
@@ -404,7 +429,9 @@ impl Api {
                     .map_err(InternalError::Task)?;
                 Ok(json(StatusCode::OK, &host))
             }
-            (Method::GET, "/api/access-log") => Ok(json(StatusCode::OK, &self.access_log)),
+            (Method::GET, "/api/access-log") => {
+                Ok(json(StatusCode::OK, &AccessLogSettings::of(&self.access_log)))
+            }
             (Method::GET, "/api/http-denials") => {
                 Ok(json(StatusCode::OK, &self.stats.denials_snapshot()))
             }
@@ -893,7 +920,7 @@ mod tests {
                 "path": temporary.path().join("access.log"),
                 "check_interval": 100,
                 "max_size_bytes": 10 * 1024 * 1024,
-                "keep_entries": 1000,
+                "keep_size_bytes": 5 * 1024 * 1024,
             })
         );
     }

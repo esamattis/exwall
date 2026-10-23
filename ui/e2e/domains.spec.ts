@@ -944,7 +944,7 @@ test("the Traffic page shows the access log path, trimming, and format, and copi
     const note = page.getByRole("region", { name: "Full access log", exact: true });
     await expect(note.getByText(fixture.accessLog, { exact: true })).toBeVisible();
     await expect(note).toContainText(
-        "After every 100 lines, exwall checks the file size. Once it is over 10.5 MB, the file is cut down to its newest 1,000 lines.",
+        "After every 100 lines, exwall checks the file size. Once it is over 10.5 MB, the oldest lines are removed so that about 5.2 MB of the newest lines remain.",
     );
     await expect(note).toContainText(
         "TIMESTAMP PROTOCOL RESULT RULE HTTP_METHOD URL HTTP_STATUS DNS_RCODE ERROR",

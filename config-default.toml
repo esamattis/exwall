@@ -42,12 +42,12 @@ bypass_users = ["root", "_apt"]
 # port = 1234
 
 # Access logs are independent of log_level. Restart to apply these settings.
-# Every check_interval entries, trim an oversized file to its last keep_entries.
+# Every check_interval entries, trim a file larger than max_size_bytes to its
+# newest entries fitting in half of max_size_bytes.
 [access_log]
 path = "/var/log/exwall/access.log"
 check_interval = 100
 max_size_bytes = 10485760
-keep_entries = 1000
 
 # Embedded web UI. Restart to apply changes. Hosts are literal bind addresses.
 # The default listens on every IPv4 address. Use ["127.0.0.1"] for localhost
