@@ -2,11 +2,11 @@
 //! with their optional captures.
 
 use super::{
-    capture::{Capture, CaptureSettings},
-    event::{Protocol, RequestEvent},
+    capture::{Capture, CaptureSettings, duration_ms},
+    event::{Protocol, RequestClock, RequestEvent},
 };
 use crate::policy::{Decision, Host};
-use serde::Serialize;
+use serde::{Serialize, ser::SerializeStruct};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
@@ -66,9 +66,51 @@ pub struct DomainSummary {
     pub last_updated: jiff::Timestamp,
 }
 
+/// How long a request's repeats took, and which of them are still open.
+#[derive(Clone, Debug)]
+struct Timing {
+    /// The latest repeat's clock.
+    latest: RequestClock,
+    /// Earlier repeats that were still open when a later repeat was recorded.
+    earlier: Vec<RequestClock>,
+}
+
+impl Timing {
+    /// Count the repeats that have not ended yet, including the latest.
+    fn pending(&self) -> usize {
+        self.earlier
+            .iter()
+            .chain(std::iter::once(&self.latest))
+            .filter(|clock| !clock.is_finished())
+            .count()
+    }
+
+    /// Take over the open repeats of `previous` as earlier repeats of this one.
+    fn follow(&mut self, previous: Timing) {
+        self.earlier = previous.earlier;
+        self.earlier.push(previous.latest);
+        self.earlier.retain(|clock| !clock.is_finished());
+    }
+}
+
+impl Serialize for Timing {
+    /// Report the latest repeat's duration, so far if it is still open, in whole
+    /// milliseconds as `duration_ms`, whether it has ended as `finished`, and the
+    /// number of open repeats as `pending`.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_struct("Timing", 3)?;
+        state.serialize_field("duration_ms", &duration_ms(self.latest.elapsed()))?;
+        state.serialize_field("finished", &self.latest.is_finished())?;
+        state.serialize_field("pending", &self.pending())?;
+        state.end()
+    }
+}
+
 /// Repeats of one allowed or denied HTTP or HTTPS request, excluding CONNECT setup.
 ///
 /// Requests are grouped by scheme, domain, port, method, pathname, and query string.
+/// An allowed request is retained while it is still pending, and its timing updates
+/// in place until it ends.
 #[derive(Clone, Debug, Serialize)]
 pub struct HttpRequest {
     /// The URL scheme: `http`, `https`, or `ws` and `wss` for WebSocket handshakes.
@@ -102,6 +144,9 @@ pub struct HttpRequest {
     /// When the latest repeat was recorded.
     #[serde(serialize_with = "serialize_timestamp")]
     pub timestamp: jiff::Timestamp,
+    /// How long the latest repeat took and how many repeats are still open.
+    #[serde(flatten)]
+    timing: Timing,
 }
 
 impl HttpRequest {
@@ -135,7 +180,28 @@ impl HttpRequest {
             capture,
             count: 1,
             timestamp: jiff::Timestamp::now(),
+            timing: Timing {
+                latest: RequestClock::start(),
+                earlier: Vec::new(),
+            },
         }
+    }
+
+    /// Time the request with `clock`, which ends when the request does, instead of a
+    /// clock that started when the request was described.
+    pub fn with_clock(mut self, clock: RequestClock) -> Self {
+        self.timing.latest = clock;
+        self
+    }
+
+    /// Return how long the latest repeat took, or has been open so far.
+    pub fn duration(&self) -> std::time::Duration {
+        self.timing.latest.elapsed()
+    }
+
+    /// Count the repeats still open, including the latest.
+    pub fn pending(&self) -> usize {
+        self.timing.pending()
     }
 
     /// Report whether `other` is a repeat of this request.
@@ -167,6 +233,7 @@ impl RecentRequests {
             if request.capture.is_none() {
                 request.capture = previous.capture;
             }
+            request.timing.follow(previous.timing);
         } else if requests.len() == REQUEST_CAPACITY {
             requests.pop_front();
         }
@@ -290,7 +357,8 @@ impl DomainStats {
             pathname,
             event.query.as_deref(),
             event.capture.clone(),
-        );
+        )
+        .with_clock(event.clock.clone());
         if allowed {
             let rule = event.matches.first().and_then(Option::as_ref).map(ToString::to_string);
             self.record_allowance(request, rule);
@@ -863,5 +931,50 @@ mod tests {
                 block: 2
             }
         );
+    }
+
+    /// Describe an allowed GET of `/stream` on `example.com` as a request event.
+    fn allowed_stream_event() -> RequestEvent {
+        let mut event = RequestEvent::http(Protocol::Https, "GET", "-");
+        event.subjects = vec![host("example.com")];
+        event.pathname = Some("/stream".into());
+        event.decide(Decision::Allow);
+        event.matched(MatchSource::Paused);
+        event
+    }
+
+    /// Requests stay pending until their clocks end, and open repeats are counted together.
+    #[test]
+    fn tracks_pending_repeats_and_durations() {
+        let stats = DomainStats::default();
+        let first = allowed_stream_event();
+        stats.record_event(&first);
+        let retained = stats.allowances_snapshot().remove(0);
+        assert_eq!(retained.pending(), 1);
+        let serialized = serde_json::to_value(&retained).unwrap();
+        assert_eq!(serialized["pending"], 1);
+        assert_eq!(serialized["finished"], false);
+        assert!(serialized["duration_ms"].is_u64());
+
+        let second = allowed_stream_event();
+        stats.record_event(&second);
+        assert_eq!(stats.allowances_snapshot()[0].pending(), 2);
+
+        second.clock.finish();
+        let duration = stats.allowances_snapshot()[0].duration();
+        assert_eq!(stats.allowances_snapshot()[0].pending(), 1);
+        first.clock.finish();
+        let retained = stats.allowances_snapshot().remove(0);
+        assert_eq!(retained.pending(), 0);
+        assert_eq!(retained.duration(), duration);
+        assert_eq!(serde_json::to_value(&retained).unwrap()["finished"], true);
+        assert_eq!(retained.count, 2);
+
+        let third = allowed_stream_event();
+        third.clock.finish();
+        stats.record_event(&third);
+        let retained = stats.allowances_snapshot().remove(0);
+        assert_eq!(retained.pending(), 0);
+        assert_eq!(retained.count, 3);
     }
 }

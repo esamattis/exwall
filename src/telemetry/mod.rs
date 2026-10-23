@@ -17,7 +17,7 @@ pub use capture::{
     BodyRecorder, Capture, CaptureDetails, CaptureSettings, DEFAULT_BODY_LIMIT_KB,
     MAX_BODY_LIMIT_KB, MessageKind, Side, WEBSOCKET_MESSAGE_LIMIT,
 };
-pub use event::{Failure, Protocol, RequestEvent};
+pub use event::{Failure, Protocol, RequestClock, RequestEvent};
 pub use sink::{EventReceiver, EventSink, PendingEvent};
 pub use stats::{Counts, Direction, DomainStats, DomainSummary, HttpRequest, Transferred};
 pub use writer::{

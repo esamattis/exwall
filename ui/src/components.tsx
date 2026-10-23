@@ -460,6 +460,18 @@ export function formatBytes(bytes: number): string {
     return `${value.toFixed(digits)} ${byteUnits[unit]}`;
 }
 
+/** Format a duration in milliseconds for people, such as `850 ms`, `12.3 s`, or `4 min 5 s`. */
+export function formatDuration(ms: number): string {
+    if (ms < 1000) {
+        return `${ms} ms`;
+    }
+    if (ms < 59_950) {
+        return `${(ms / 1000).toFixed(1)} s`;
+    }
+    const total = Math.round(ms / 1000);
+    return `${Math.floor(total / 60)} min ${total % 60} s`;
+}
+
 /** Color HTTP methods by how much they can change on the server. */
 export function methodBadge(method: string): string {
     if (method === "GET" || method === "HEAD" || method === "OPTIONS") {

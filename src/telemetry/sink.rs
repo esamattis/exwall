@@ -1,6 +1,9 @@
 //! The handler-facing mailbox for request events and the cancellation guard.
 
-use super::{event::RequestEvent, stats::DomainStats};
+use super::{
+    event::{RequestClock, RequestEvent},
+    stats::DomainStats,
+};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -79,6 +82,7 @@ impl EventSink {
             sink: self.clone(),
             event: Some(event),
             recorded: false,
+            finishes_clock: true,
         }
     }
 }
@@ -91,6 +95,8 @@ pub struct PendingEvent {
     event: Option<RequestEvent>,
     /// Whether statistics already include the event, so dropping only writes the log row.
     recorded: bool,
+    /// Whether dropping the guard ends the request's clock.
+    finishes_clock: bool,
 }
 
 impl PendingEvent {
@@ -102,8 +108,8 @@ impl PendingEvent {
     /// Update statistics and request history from the event now, and write only the
     /// access-log row when the guard is dropped.
     ///
-    /// A WebSocket is shown in the web UI as soon as it opens, while its log row waits
-    /// for it to close so that the row can report how it ended.
+    /// An allowed request is shown in the web UI as pending as soon as it is authorized,
+    /// while its log row waits for the response so that the row can report the outcome.
     pub fn record_now(&mut self) {
         if std::mem::replace(&mut self.recorded, true) {
             return;
@@ -111,12 +117,25 @@ impl PendingEvent {
         let event = self.event.as_ref().expect("pending event exists until the guard is dropped");
         self.sink.stats.record_event(event);
     }
+
+    /// Return the request's clock for whatever outlives the guard to end it, such as a
+    /// streaming response body; dropping the guard no longer ends the clock.
+    pub fn hand_off_clock(&mut self) -> RequestClock {
+        self.finishes_clock = false;
+        self.event().clock.clone()
+    }
 }
 
 impl Drop for PendingEvent {
     /// Submit exactly one event, including requests interrupted before a response exists.
+    ///
+    /// Unless it was handed off, the request's clock ends first, so request history
+    /// never shows a finished request as pending.
     fn drop(&mut self) {
         if let Some(event) = self.event.take() {
+            if self.finishes_clock {
+                event.clock.finish();
+            }
             if self.recorded {
                 self.sink.log(event);
             } else {
@@ -170,5 +189,22 @@ mod tests {
             sink.submit(RequestEvent::dns());
         }
         assert_eq!(receiver.dropped.load(Ordering::Relaxed), 2);
+    }
+
+    /// Dropping a guard ends the request's clock unless the clock was handed off.
+    #[tokio::test]
+    async fn guards_end_clocks_unless_handed_off() {
+        let (sink, _receiver) = EventSink::channel(4);
+        let guard = sink.track(RequestEvent::http(Protocol::Http, "GET", "http://test/"));
+        let clock = guard.event.as_ref().unwrap().clock.clone();
+        drop(guard);
+        assert!(clock.is_finished());
+
+        let mut handed_off = sink.track(RequestEvent::http(Protocol::Http, "GET", "http://test/"));
+        let clock = handed_off.hand_off_clock();
+        drop(handed_off);
+        assert!(!clock.is_finished());
+        clock.finish();
+        assert!(clock.is_finished());
     }
 }

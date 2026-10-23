@@ -269,6 +269,7 @@ impl Proxy {
             }
         };
         record_plan(event.event(), &plan);
+        event.record_now();
         apply_plan(&mut request, &plan);
         if websocket {
             return Ok(self.websocket(request, event, capture, plan.host, target.slot).await);
@@ -277,7 +278,7 @@ impl Proxy {
         let host = plan.host;
         let request = request.map(|body| {
             let recorder = capture.as_ref().map(|capture| capture.recorder(Side::Request));
-            MeteredBody::wrap(body, stats.clone(), host.clone(), Direction::Up, recorder)
+            MeteredBody::wrap(body, stats.clone(), host.clone(), Direction::Up, recorder, None)
         });
         let failure = match timeout(self.upstream_timeout, self.upstream.send(request)).await {
             Ok(Ok(upstream)) if upstream.status() == StatusCode::SWITCHING_PROTOCOLS => {
@@ -300,6 +301,8 @@ impl Proxy {
     }
 
     /// Return an upstream response to the client, metering and capturing its body.
+    ///
+    /// The request stays pending until the response body ends or is abandoned.
     fn forward_response(
         &self,
         upstream: Response,
@@ -314,7 +317,10 @@ impl Proxy {
             capture.recorder(Side::Response)
         });
         let stats = self.sink.stats().clone();
-        upstream.map(|body| MeteredBody::wrap(body, stats, host, Direction::Down, recorder))
+        let clock = event.hand_off_clock();
+        upstream.map(|body| {
+            MeteredBody::wrap(body, stats, host, Direction::Down, recorder, Some(clock))
+        })
     }
 
     /// Forward an authorized WebSocket handshake over HTTP/1.1.
@@ -376,9 +382,10 @@ impl Proxy {
     /// Return the upstream's `101` response to the client and relay the WebSocket in
     /// a background task.
     ///
-    /// The WebSocket appears in statistics and request history now, while its
-    /// access-log row is written when it closes, reporting how it ended. Until then
-    /// it is presumed cancelled, so a relay cut short by a shutdown is logged as such.
+    /// The WebSocket is already in statistics and request history, pending until it
+    /// closes, while its access-log row is written when it closes, reporting how it
+    /// ended. Until then it is presumed cancelled, so a relay cut short by a shutdown
+    /// is logged as such.
     fn open_websocket(&self, open: OpenWebSocket) -> Response {
         let OpenWebSocket {
             upstream,
@@ -396,7 +403,6 @@ impl Proxy {
         let status = StatusCode::SWITCHING_PROTOCOLS.as_u16();
         event.event().respond_http(status);
         event.event().fail(Failure::Cancelled);
-        event.record_now();
         if let Some(capture) = &capture {
             capture.record_response(status, reply.headers());
             capture.start_websocket();
@@ -811,6 +817,24 @@ mod tests {
         );
     }
 
+    /// Allowed requests stay pending in request history until their response body ends,
+    /// while denied requests are recorded already finished.
+    #[tokio::test]
+    async fn tracks_pending_requests_until_the_response_ends() {
+        let (_directory, proxy, mut receiver, _upstream) = proxy(Behaviour::Status(200));
+        let request = Request::builder().uri("https://allowed.test/allowed").body(Body::empty());
+        let reply = proxy.http(request.unwrap(), Target::default()).await.unwrap();
+        let allowance = proxy.sink.stats().allowances_snapshot().remove(0);
+        assert_eq!(allowance.pending(), 1);
+        reply.into_body().collect().await.unwrap();
+        let allowance = proxy.sink.stats().allowances_snapshot().remove(0);
+        assert_eq!(allowance.pending(), 0);
+        receiver.events.recv().await.unwrap();
+
+        send(&proxy, &mut receiver, "https://allowed.test/denied", false).await;
+        assert_eq!(proxy.sink.stats().denials_snapshot()[0].pending(), 0);
+    }
+
     /// Captures record client headers before injection, both bodies, and local rejections.
     #[tokio::test]
     async fn captures_allowed_and_denied_requests() {
@@ -970,6 +994,7 @@ mod tests {
         assert_eq!(sent["sec-websocket-extensions"], "permessage-deflate");
         let allowance = proxy.sink.stats().allowances_snapshot().remove(0);
         assert_eq!((allowance.scheme, allowance.rule.as_deref()), ("wss", Some("test:allow#1")));
+        assert_eq!(allowance.pending(), 1);
 
         let mut client = open_client(upgrade).await;
         client.send(Message::text("hello")).await.unwrap();
@@ -983,6 +1008,7 @@ mod tests {
             format::message(&event),
             "wss ALLOW test:allow#1 GET wss://allowed.test:443/secure 101 - -"
         );
+        assert_eq!(proxy.sink.stats().allowances_snapshot()[0].pending(), 0);
         let summary = proxy.sink.stats().snapshot().remove(0);
         assert_eq!(summary.http.allow, 1);
         assert_eq!(

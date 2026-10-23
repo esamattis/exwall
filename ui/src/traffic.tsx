@@ -35,7 +35,7 @@ import {
     useNow,
     useToast,
 } from "./components.tsx";
-import { CaptureButton, RequestDialog, WebSocketBadge } from "./capture.tsx";
+import { CaptureButton, RequestDialog, RequestTiming, WebSocketBadge } from "./capture.tsx";
 import { ruleAnchor } from "./rules.tsx";
 
 /** The traffic views selectable from the tab bar; `requests` lists blocked requests. */
@@ -700,8 +700,9 @@ function RequestsTable({
             <p className="border-b border-white/5 px-4 py-2 text-xs text-zinc-500">
                 The {requestCapacity} most recently seen {verb} HTTP(S) requests, newest first, with
                 repeats of the same method, path, and query string counted together. WebSockets are
-                marked WS. Allowing a request adds a rule for its exact method and path, with any
-                query string. Click a request to see its details.
+                marked WS. Requests still waiting for or streaming a response are marked pending.
+                Allowing a request adds a rule for its exact method and path, with any query string.
+                Click a request to see its details.
             </p>
             <table className="w-full text-left text-sm">
                 <caption className="sr-only">{title}, latest first</caption>
@@ -717,6 +718,12 @@ function RequestsTable({
                             Count
                         </th>
                         <th className={headerCell}>{outcome === "allow" ? "Last seen" : "When"}</th>
+                        <th
+                            className={headerCell}
+                            title="How long the latest request took, and whether any are still open"
+                        >
+                            Duration
+                        </th>
                         {outcome === "allow" && <th className={headerCell}>Allowed by</th>}
                         <th className={`${headerCell} text-right`}>
                             <span className="sr-only">Actions</span>
@@ -790,6 +797,9 @@ function RequestsTable({
                                 </td>
                                 <td className="px-4 py-2.5 whitespace-nowrap text-zinc-400">
                                     <RelativeTime timestamp={request.timestamp} now={now} />
+                                </td>
+                                <td className="px-4 py-2.5 text-zinc-400">
+                                    <RequestTiming request={request} />
                                 </td>
                                 {outcome === "allow" && (
                                     <td className="max-w-[14rem] truncate px-4 py-2.5 font-mono text-[13px] text-zinc-400">

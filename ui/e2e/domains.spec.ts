@@ -350,6 +350,9 @@ interface HttpRequest {
     rule?: string;
     count: number;
     timestamp: string;
+    duration_ms: number;
+    finished: boolean;
+    pending: number;
 }
 
 test("last 200 unique HTTP denials refresh manually and allow only an exact method and pathname", async ({
@@ -505,6 +508,8 @@ test("last 200 unique HTTP denials refresh manually and allow only an exact meth
     });
     expect(allowances[0]).not.toHaveProperty("query");
     expect(allowances[1]).toMatchObject({ pathname, query: "another=query", rule });
+    expect(allowances[0]).toMatchObject({ finished: true, pending: 0 });
+    expect(allowances[0]!.duration_ms).toBeGreaterThanOrEqual(0);
     expect(allowances.find((request) => request.pathname === "/allowed")).toMatchObject({
         method: "GET",
         query: "upstream_status=502",
@@ -521,7 +526,8 @@ test("last 200 unique HTTP denials refresh manually and allow only an exact meth
     await expect(allowedRows.nth(1).getByRole("cell").nth(1)).toHaveText(
         `${pathname}?another=query`,
     );
-    await expect(allowedRows.nth(0).getByRole("cell").nth(4)).toHaveText(
+    await expect(allowedRows.nth(0).getByRole("cell").nth(4)).toHaveText(/^\d+(\.\d)? m?s$/);
+    await expect(allowedRows.nth(0).getByRole("cell").nth(5)).toHaveText(
         /^05-web\.toml:allow#\d+$/,
     );
     await expect(

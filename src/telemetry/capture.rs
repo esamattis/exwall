@@ -578,7 +578,7 @@ fn peer_name(direction: Direction) -> &'static str {
 }
 
 /// Convert a duration to whole milliseconds, saturating.
-fn duration_ms(duration: Duration) -> u64 {
+pub(super) fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 

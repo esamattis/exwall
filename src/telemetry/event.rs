@@ -3,6 +3,10 @@
 use super::capture::Capture;
 use crate::policy::{Decision, Host, MatchSource};
 use hickory_proto::op::ResponseCode;
+use std::{
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
+};
 
 /// The application protocol inspected by a request handler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +88,47 @@ impl Failure {
     }
 }
 
+/// Measures how long one request stays open, shared by the proxy and request history.
+///
+/// An HTTP request ends once its response is fully returned or abandoned, and a
+/// WebSocket once it closes.
+#[derive(Clone, Debug)]
+pub struct RequestClock(Arc<ClockState>);
+
+/// The shared state behind [`RequestClock`].
+#[derive(Debug)]
+struct ClockState {
+    /// When the request arrived.
+    started: Instant,
+    /// How long the request stayed open, once it has ended.
+    duration: OnceLock<Duration>,
+}
+
+impl RequestClock {
+    /// Start timing a request that arrives now.
+    pub fn start() -> Self {
+        Self(Arc::new(ClockState {
+            started: Instant::now(),
+            duration: OnceLock::new(),
+        }))
+    }
+
+    /// Mark the request as ended; only the first call counts.
+    pub fn finish(&self) {
+        let _ = self.0.duration.set(self.0.started.elapsed());
+    }
+
+    /// Report whether the request has ended.
+    pub fn is_finished(&self) -> bool {
+        self.0.duration.get().is_some()
+    }
+
+    /// Return how long the request stayed open, or has been open so far.
+    pub fn elapsed(&self) -> Duration {
+        self.0.duration.get().copied().unwrap_or_else(|| self.0.started.elapsed())
+    }
+}
+
 /// One request's arrival time, policy match, and response outcome.
 #[derive(Clone, Debug)]
 pub struct RequestEvent {
@@ -117,6 +162,8 @@ pub struct RequestEvent {
     pub dns_rcode: Option<ResponseCode>,
     /// A processing failure; new events assume cancellation until a response is recorded.
     pub failure: Option<Failure>,
+    /// Times the request from its arrival until it ends; never written to the access log.
+    pub clock: RequestClock,
 }
 
 impl RequestEvent {
@@ -147,6 +194,7 @@ impl RequestEvent {
             http_status: None,
             dns_rcode: None,
             failure: Some(Failure::Cancelled),
+            clock: RequestClock::start(),
         }
     }
 

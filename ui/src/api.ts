@@ -114,6 +114,12 @@ export interface HttpRequest {
     count: number;
     /** When the latest repeat was seen. */
     timestamp: string;
+    /** How long the latest repeat took, or had been open when fetched, in milliseconds. */
+    duration_ms: number;
+    /** Whether the latest repeat had ended when fetched. */
+    finished: boolean;
+    /** How many repeats were still open when fetched, waiting for or streaming a response. */
+    pending: number;
     /** The latest captured repeat's headers and bodies; absent when none was captured. */
     capture_id?: number;
 }
@@ -236,6 +242,8 @@ export interface CapturedWebSocket {
     /** How the WebSocket ended, or null while it is open. */
     ended: {
         duration_ms: number;
+        /** Whether the latest repeat had ended when fetched. */
+        finished: boolean;
         /** Which side sent the first close message, or null when neither did. */
         closed_by: "client" | "server" | null;
         /** The access-log error token for an abnormal end, or null. */

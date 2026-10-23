@@ -18,6 +18,7 @@ import {
     CloseIcon,
     CopyButton,
     ErrorBanner,
+    formatDuration,
     RecordIcon,
     RefreshIcon,
     RelativeTime,
@@ -355,18 +356,6 @@ function MessageView({
     );
 }
 
-/** Format a duration in milliseconds for people, such as `850 ms`, `12.3 s`, or `4 min 5 s`. */
-function formatDuration(ms: number): string {
-    if (ms < 1000) {
-        return `${ms} ms`;
-    }
-    if (ms < 59_950) {
-        return `${(ms / 1000).toFixed(1)} s`;
-    }
-    const total = Math.round(ms / 1000);
-    return `${Math.floor(total / 60)} min ${total % 60} s`;
-}
-
 /** Describe whether a WebSocket is open, or how and when it ended. */
 function webSocketState(websocket: CapturedWebSocket): string {
     const ended = websocket.ended;
@@ -595,6 +584,38 @@ export function WebSocketBadge() {
 }
 
 /**
+ * Show how long a request's latest repeat took, or has been open so far, and mark requests
+ * with repeats still waiting for or streaming a response as pending.
+ */
+export function RequestTiming({ request }: { request: HttpRequest }) {
+    const duration = formatDuration(request.duration_ms);
+    const label = request.pending === 1 ? "Pending" : `${request.pending} pending`;
+    return (
+        <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+            <span
+                className="tabular-nums"
+                title={
+                    request.finished
+                        ? "How long the latest request took"
+                        : "How long the latest request had been open when refreshed"
+                }
+            >
+                {request.finished ? duration : `${duration}…`}
+            </span>
+            {request.pending > 0 && (
+                <span
+                    className="badge badge-warn"
+                    title="Still waiting for or streaming a response when refreshed"
+                >
+                    <span className="size-1.5 animate-pulse rounded-full bg-amber-300" />
+                    {label}
+                </span>
+            )}
+        </span>
+    );
+}
+
+/**
  * A near full-window modal dialog describing one retained request: its URL parts with a
  * decoded query string, and its captured headers and bodies when capture was on.
  */
@@ -665,6 +686,7 @@ export function RequestDialog({
                                 {request.count === 1 ? "time" : "times"}, last{" "}
                                 <RelativeTime timestamp={request.timestamp} now={now} />
                             </span>
+                            <RequestTiming request={request} />
                             {outcome === "allow" && (
                                 <span className="font-mono">Allowed by {allowedBy}</span>
                             )}

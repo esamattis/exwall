@@ -1,9 +1,10 @@
-//! A body wrapper that counts forwarded bytes toward a domain's transfer totals and
-//! optionally captures the leading bytes for the web UI.
+//! A body wrapper that counts forwarded bytes toward a domain's transfer totals,
+//! optionally captures the leading bytes for the web UI, and optionally ends the
+//! request's clock when the body ends.
 
 use crate::{
     policy::Host,
-    telemetry::{BodyRecorder, Direction, DomainStats},
+    telemetry::{BodyRecorder, Direction, DomainStats, RequestClock},
 };
 use rama::{
     bytes::Bytes,
@@ -39,17 +40,21 @@ pub struct MeteredBody {
     pending: u64,
     /// Captures the body's leading bytes while request capturing is enabled.
     recorder: Option<BodyRecorder>,
+    /// The request's clock, ended with the body when it is a response body.
+    clock: Option<RequestClock>,
 }
 
 impl MeteredBody {
-    /// Wrap `inner` so its data bytes count toward `host` in `direction`, and are
-    /// captured by `recorder` if one is given.
+    /// Wrap `inner` so its data bytes count toward `host` in `direction`, are
+    /// captured by `recorder` if one is given, and end `clock`, if given, when the
+    /// body ends or is abandoned.
     pub fn wrap(
         inner: Body,
         stats: DomainStats,
         host: Host,
         direction: Direction,
         recorder: Option<BodyRecorder>,
+        clock: Option<RequestClock>,
     ) -> Body {
         Body::new(Self {
             inner,
@@ -58,6 +63,7 @@ impl MeteredBody {
             direction,
             pending: 0,
             recorder,
+            clock,
         })
     }
 
@@ -67,11 +73,14 @@ impl MeteredBody {
         self.stats.record_transfer(&self.host, self.direction, bytes);
     }
 
-    /// Record pending bytes and store the captured body, if any.
+    /// Record pending bytes, store the captured body, if any, and end the clock, if any.
     fn finish(&mut self, complete: bool) {
         self.flush();
         if let Some(recorder) = &mut self.recorder {
             recorder.finish(complete);
+        }
+        if let Some(clock) = &self.clock {
+            clock.finish();
         }
     }
 }
@@ -143,8 +152,14 @@ mod tests {
         let stats = DomainStats::default();
         let chunks = vec![Ok::<_, BoxError>(Bytes::from("hello")), Ok(Bytes::from(" world"))];
         let body = Body::from_stream(rama::stream::iter(chunks));
-        let metered =
-            MeteredBody::wrap(body, stats.clone(), Host::new("example.com"), Direction::Down, None);
+        let metered = MeteredBody::wrap(
+            body,
+            stats.clone(),
+            Host::new("example.com"),
+            Direction::Down,
+            None,
+            None,
+        );
         let bytes = metered.collect().await.unwrap().to_bytes();
         assert_eq!(bytes, "hello world");
         assert_eq!(transferred(&stats), (0, 11));
@@ -157,8 +172,14 @@ mod tests {
         let large = Bytes::from(vec![0; FLUSH_BYTES as usize]);
         let chunks = vec![Ok::<_, BoxError>(large), Ok(Bytes::from("tail"))];
         let body = Body::from_stream(rama::stream::iter(chunks));
-        let mut metered =
-            MeteredBody::wrap(body, stats.clone(), Host::new("example.com"), Direction::Up, None);
+        let mut metered = MeteredBody::wrap(
+            body,
+            stats.clone(),
+            Host::new("example.com"),
+            Direction::Up,
+            None,
+            None,
+        );
         metered.frame().await.unwrap().unwrap();
         assert_eq!(transferred(&stats), (FLUSH_BYTES, 0));
         metered.frame().await.unwrap().unwrap();
@@ -185,6 +206,7 @@ mod tests {
             Host::new("example.com"),
             Direction::Up,
             Some(recorder),
+            None,
         );
         let bytes = metered.collect().await.unwrap().to_bytes();
         assert_eq!(bytes.len(), 1100);
@@ -198,10 +220,44 @@ mod tests {
             Host::new("example.com"),
             Direction::Up,
             Some(capture.recorder(crate::telemetry::Side::Request)),
+            None,
         );
         drop(empty);
         let body = capture.details().request.body.unwrap();
         assert_eq!(body.size, 0);
         assert!(body.complete);
+    }
+
+    /// A response body ends its request's clock when it is read to the end or abandoned.
+    #[tokio::test]
+    async fn ends_the_clock_with_the_body() {
+        let stats = DomainStats::default();
+        let read = RequestClock::start();
+        let body = MeteredBody::wrap(
+            Body::from("done"),
+            stats.clone(),
+            Host::new("example.com"),
+            Direction::Down,
+            None,
+            Some(read.clone()),
+        );
+        assert!(!read.is_finished());
+        body.collect().await.unwrap();
+        assert!(read.is_finished());
+
+        let abandoned = RequestClock::start();
+        let chunks = vec![Ok::<_, BoxError>(Bytes::from("partial"))];
+        let mut body = MeteredBody::wrap(
+            Body::from_stream(rama::stream::iter(chunks)),
+            stats,
+            Host::new("example.com"),
+            Direction::Down,
+            None,
+            Some(abandoned.clone()),
+        );
+        body.frame().await.unwrap().unwrap();
+        assert!(!abandoned.is_finished());
+        drop(body);
+        assert!(abandoned.is_finished());
     }
 }
