@@ -156,6 +156,9 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
         .getByRole("button", { name: "Allow 127.0.0.1 completely", exact: true })
         .click();
     await expect(page.getByRole("status")).toHaveText("Domain allowed on all routes and methods.");
+    await expect(
+        page.getByRole("tabpanel").getByRole("link", { name: "Allowed · rule #1", exact: true }),
+    ).toHaveAttribute("href", "/rules/05-web.toml#rule-1");
     const persisted = await readFile(join(fixture.rules, "05-web.toml"), "utf8");
     expect(persisted).toContain('domain = "127.0.0.1"');
     expect(persisted).toContain('methods = "ANY"');
@@ -200,6 +203,38 @@ test("domains refresh manually without polling, aggregate decisions, and allow e
     await expect(rows).toHaveCount(3);
     await showTab(page, "Allowed domains");
     await expect(allowedRows.nth(0).getByRole("cell").nth(1)).toHaveText("4");
+
+    // Allowed domains offer the same actions; each badge follows its rule as others are added.
+    const allowedPanel = page.getByRole("tabpanel");
+    await allowedPanel
+        .getByRole("button", { name: "Allow 127.0.0.1 completely", exact: true })
+        .click();
+    await expect(allowedPanel.getByRole("link", { name: "Allowed · rule #1" })).toBeVisible();
+    await allowedPanel
+        .getByRole("button", { name: "Allow localhost DNS only", exact: true })
+        .click();
+    await expect(page.getByRole("status")).toHaveText("Domain allowed for DNS only.");
+    await expect(
+        allowedPanel.getByRole("link", { name: "DNS allowed · rule #1", exact: true }),
+    ).toBeVisible();
+    await expect(
+        allowedPanel.getByRole("link", { name: "Allowed · rule #2", exact: true }),
+    ).toHaveAttribute("href", "/rules/05-web.toml#rule-2");
+    await allowedPanel.getByRole("link", { name: "Allowed · rule #2", exact: true }).click();
+    await expect(page).toHaveURL(`${ui}/rules/05-web.toml#rule-2`);
+    await expect(page.getByRole("button", { name: "Rule 2", exact: true })).toHaveAttribute(
+        "aria-expanded",
+        "true",
+    );
+    await expect(page.getByRole("button", { name: "Rule 1", exact: true })).toHaveAttribute(
+        "aria-expanded",
+        "false",
+    );
+    await expect(page.getByRole("textbox", { name: "Rule 2 domains", exact: true })).toHaveValue(
+        "127.0.0.1",
+    );
+    await page.goBack();
+    await expect(allowedRows).toHaveCount(2);
 
     page.once("dialog", (dialog) => void dialog.accept());
     await page.getByRole("button", { name: "Reset", exact: true }).click();
@@ -310,6 +345,7 @@ interface HttpRequest {
     domain: string;
     method: string;
     pathname: string;
+    query?: string;
     rule?: string;
     count: number;
     timestamp: string;
@@ -367,7 +403,8 @@ test("last 200 unique HTTP denials refresh manually and allow only an exact meth
     expect(before[2]).toMatchObject({ pathname: "/denied/10", count: 3 });
     expect(before[199]!.pathname).toBe("/denied/6");
     expect(before[0]).not.toHaveProperty("rule");
-    expect(JSON.stringify(before)).not.toContain("secret");
+    expect(before[0]).not.toHaveProperty("query");
+    expect(before[1]!.query).toBe("secret=hidden");
     await expect(section.getByText("No blocked requests yet")).toBeVisible();
     await page.getByRole("button", { name: "Refresh", exact: true }).click();
     const rows = section
@@ -375,7 +412,7 @@ test("last 200 unique HTTP denials refresh manually and allow only an exact meth
         .locator("tbody tr");
     await expect(rows).toHaveCount(200);
     await expect(rows.nth(0).getByRole("rowheader")).toHaveText("localhost");
-    await expect(rows.nth(1).getByRole("cell").nth(1)).toHaveText(pathname);
+    await expect(rows.nth(1).getByRole("cell").nth(1)).toHaveText(`${pathname}?secret=hidden`);
     await expect(rows.nth(2).getByRole("cell").nth(2)).toHaveText("3");
     const button = section.getByRole("button", {
         name: `Allow 127.0.0.1 POST ${pathname}`,
@@ -425,31 +462,84 @@ test("last 200 unique HTTP denials refresh manually and allow only an exact meth
     await expect(rows).toHaveCount(200);
     expect((await http(pathname)).status).toBe(200);
 
-    // Allowed requests are grouped the same way and name the rule that allowed them.
+    // Allowed requests are grouped the same way, query string included, and name their rule.
     const allowances = await snapshot("http-allowances");
+    const rule = expect.stringMatching(/\/05-web\.toml:allow#\d+$/);
     expect(allowances[0]).toMatchObject({
         domain: "127.0.0.1",
         method: "POST",
         pathname,
-        rule: expect.stringMatching(/\/05-web\.toml:allow#\d+$/),
+        count: 1,
+        rule,
     });
-    expect(allowances[0]!.count).toBeGreaterThanOrEqual(2);
+    expect(allowances[0]).not.toHaveProperty("query");
+    expect(allowances[1]).toMatchObject({ pathname, query: "another=query", rule });
     expect(allowances.find((request) => request.pathname === "/allowed")).toMatchObject({
         method: "GET",
+        query: "upstream_status=502",
         count: 1,
     });
-    expect(JSON.stringify(allowances)).not.toContain("query");
     await page.getByRole("tab", { name: /^Allowed requests/ }).click();
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
     const allowedRows = page
         .getByRole("tabpanel")
         .getByRole("table", { name: "Allowed requests, latest first" })
         .locator("tbody tr");
     await expect(allowedRows).toHaveCount(allowances.length);
     await expect(allowedRows.nth(0).getByRole("cell").nth(1)).toHaveText(pathname);
+    await expect(allowedRows.nth(1).getByRole("cell").nth(1)).toHaveText(
+        `${pathname}?another=query`,
+    );
     await expect(allowedRows.nth(0).getByRole("cell").nth(4)).toHaveText(
         /^05-web\.toml:allow#\d+$/,
     );
-    await expect(allowedRows.nth(0).getByRole("button")).toHaveCount(0);
+    await expect(
+        allowedRows.nth(0).getByRole("link", { name: /^05-web\.toml:allow#\d+$/ }),
+    ).toHaveAttribute("href", /^\/rules\/05-web\.toml#rule-\d+$/);
+
+    // Allowing an already allowed request, such as one let through by a pause, adds its own rule.
+    const allowedPanel = page.getByRole("tabpanel");
+    await allowedPanel
+        .getByRole("button", { name: "Allow 127.0.0.1 GET /allowed", exact: true })
+        .click();
+    await expect(page.getByRole("status")).toHaveText("Method and pathname allowed.");
+    await allowedPanel.getByRole("link", { name: "Allowed · rule #1", exact: true }).click();
+    await expect(page).toHaveURL(`${ui}/rules/05-web.toml#rule-1`);
+    await expect(page.getByRole("button", { name: "Rule 1", exact: true })).toHaveAttribute(
+        "aria-expanded",
+        "true",
+    );
+    await expect(
+        page.getByRole("textbox", { name: "Rule 1 path regexes", exact: true }),
+    ).toHaveValue("\\A/allowed\\z");
+
+    // A rule fragment opens and scrolls to a rule far down a long file.
+    const current: RulesDocument = await (
+        await page.request.get(`${ui}/api/rules/05-web.toml`, {
+            headers: await sessionHeaders(page),
+        })
+    ).json();
+    for (let index = 0; index < 40; index += 1) {
+        current.rules.push({ index: null, fields: { domain: `filler${index}.test` } });
+    }
+    expect(
+        (
+            await page.request.put(`${ui}/api/rules/05-web.toml`, {
+                headers: await sessionHeaders(page),
+                data: current,
+            })
+        ).status(),
+    ).toBe(200);
+    const last = current.rules.length;
+    // Load the page afresh rather than changing only the fragment of the open editor.
+    await page.goto(`${ui}/rules`);
+    await page.goto(`${ui}/rules/05-web.toml#rule-${last}`);
+    const target = page.getByRole("region", { name: `Rule ${last}`, exact: true });
+    await expect(target.getByRole("textbox", { name: `Rule ${last} domains` })).toHaveValue(
+        "filler39.test",
+    );
+    await expect(target).toBeInViewport();
+    await expect(page.getByRole("region", { name: "Rule 1", exact: true })).not.toBeInViewport();
 });
 
 test("HTTP allow actions remove only fully covered DNS-only rules, including duplicate allowances", async ({

@@ -1,6 +1,6 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { Link, useLocation } from "@tanstack/react-router";
 import CodeMirror, { EditorView, Prec, keymap } from "@uiw/react-codemirror";
 import { StreamLanguage } from "@codemirror/language";
 import { toml } from "@codemirror/legacy-modes/mode/toml";
@@ -67,6 +67,17 @@ function methodMode(value: FieldValue | undefined): MethodMode {
         return "any";
     }
     return "custom";
+}
+
+/** The URL fragment, without `#`, that opens and scrolls to one rule in its file's editor. */
+export function ruleAnchor(number: number): string {
+    return `rule-${number}`;
+}
+
+/** Read the 1-based rule number from a URL fragment made by {@link ruleAnchor}. */
+function linkedRuleNumber(hash: string): number | null {
+    const match = /^#?rule-(\d+)$/.exec(hash);
+    return match?.[1] ? Number(match[1]) : null;
 }
 
 /** Find the 1-based rule number named in a server validation message. */
@@ -175,12 +186,32 @@ export function RuleFilesPage() {
     );
 }
 
-/** Load one rule file and remount the editor whenever a new revision arrives. */
+/**
+ * Load one rule file and remount the editor whenever a new revision arrives.
+ *
+ * A `#rule-N` URL fragment opens rule N in the form editor and scrolls it into view.
+ */
 export function RulesPage({ file }: { file: string }) {
+    const hash = useLocation({ select: (location) => location.hash });
+    const linked = linkedRuleNumber(hash);
     const [generation, setGeneration] = useState(0);
-    const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
+    const [expanded, setExpanded] = useState<Set<number>>(
+        () => new Set(linked === null ? [] : [linked - 1]),
+    );
     const [filter, setFilter] = useState("");
     const [mode, setMode] = useState<"form" | "toml">("form");
+    const [scrollTarget, setScrollTarget] = useState(linked);
+    const [seenHash, setSeenHash] = useState(hash);
+    // Following a new rule link while this file is open reveals that rule too.
+    if (hash !== seenHash) {
+        setSeenHash(hash);
+        if (linked !== null) {
+            setExpanded((previous) => new Set(previous).add(linked - 1));
+            setFilter("");
+            setMode("form");
+            setScrollTarget(linked);
+        }
+    }
     const rules = useQuery({
         queryKey: ["rules", file],
         queryFn: () => api<RuleFileContents>(rulesPath(file)),
@@ -243,6 +274,9 @@ export function RulesPage({ file }: { file: string }) {
             setExpanded={setExpanded}
             filter={filter}
             setFilter={setFilter}
+            linked={linked}
+            scrollTarget={scrollTarget}
+            onScrolled={() => setScrollTarget(null)}
             onReload={reload}
             onDiscard={discard}
             onEditToml={() => setMode("toml")}
@@ -487,6 +521,9 @@ function Editor({
     setExpanded,
     filter,
     setFilter,
+    linked,
+    scrollTarget,
+    onScrolled,
     onReload,
     onDiscard,
     onEditToml,
@@ -498,6 +535,12 @@ function Editor({
     setExpanded: (update: (previous: Set<number>) => Set<number>) => void;
     filter: string;
     setFilter: (value: string) => void;
+    /** The rule number named in the URL fragment, highlighted while the fragment stays. */
+    linked: number | null;
+    /** The rule number to scroll into view once it renders. */
+    scrollTarget: number | null;
+    /** Forget the scroll target once it has been scrolled to. */
+    onScrolled: () => void;
     onReload: () => Promise<void>;
     onDiscard: () => void;
     onEditToml: () => void;
@@ -701,6 +744,9 @@ function Editor({
                         rule={rule}
                         open={expanded.has(position)}
                         invalid={invalid === position + 1}
+                        linked={linked === position + 1}
+                        scrollIntoView={scrollTarget === position + 1}
+                        onScrolled={onScrolled}
                         disabled={save.isPending}
                         onToggle={() =>
                             setExpanded((previous) => {
@@ -830,6 +876,9 @@ function RuleCard({
     rule,
     open,
     invalid,
+    linked,
+    scrollIntoView,
+    onScrolled,
     disabled,
     onToggle,
     onChange,
@@ -839,21 +888,38 @@ function RuleCard({
     rule: RuleDraft;
     open: boolean;
     invalid: boolean;
+    /** Whether the URL fragment names this rule. */
+    linked: boolean;
+    /** Whether to scroll this rule into view, after which `onScrolled` is called. */
+    scrollIntoView: boolean;
+    onScrolled: () => void;
     disabled: boolean;
     onToggle: () => void;
     onChange: (fields: Record<string, FieldValue>) => void;
     onRemove: () => void;
 }) {
+    const section = useRef<HTMLElement>(null);
+    useEffect(() => {
+        if (scrollIntoView) {
+            section.current?.scrollIntoView({ block: "start" });
+            onScrolled();
+        }
+    }, [scrollIntoView, onScrolled]);
     let ring = "border-white/10";
     if (invalid) {
         ring = "border-rose-500/60";
+    } else if (linked) {
+        ring = "border-emerald-400/60";
     } else if (open) {
         ring = "border-white/20";
     }
     return (
         <section
+            ref={section}
+            id={ruleAnchor(number)}
             aria-label={`Rule ${number}`}
-            className={`rounded-xl border bg-zinc-900/60 transition ${ring}`}
+            aria-current={linked ? "location" : undefined}
+            className={`scroll-mt-28 rounded-xl border bg-zinc-900/60 transition ${ring}`}
         >
             <div className="flex items-center gap-2 pr-2">
                 <button

@@ -1017,8 +1017,8 @@ mod tests {
         let harness = harness(temporary.path(), "secret");
         let stats = &harness.api.stats;
         stats.record(&Host::new("example.com"), crate::telemetry::Protocol::Dns, true);
-        stats.record_denial(&Host::new("example.com"), "GET", "/denied");
-        stats.record_allowance(&Host::new("example.com"), "GET", "/allowed", None);
+        stats.record_denial(&Host::new("example.com"), "GET", "/denied", None);
+        stats.record_allowance(&Host::new("example.com"), "GET", "/allowed", None, None);
         let body = serde_json::json!({});
         let anonymous = request(Method::POST, "/api/traffic/reset", None, &body);
         let response = harness.api.response(anonymous).await;

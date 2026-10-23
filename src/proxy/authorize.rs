@@ -581,6 +581,7 @@ pub fn initial_event(request: &Request, target: &Target) -> RequestEvent {
     let mut event = RequestEvent::http(protocol, request.method().as_str(), url);
     if !is_connect {
         event.pathname = Some(request.uri().path_or_root().into_owned());
+        event.query = request.uri().query().map(|query| query.to_string());
     }
     event
 }
@@ -1044,7 +1045,7 @@ inject_headers = [{ name = 'Authorization', value = 'secret' }]
         assert_eq!(plan.source, MatchSource::Paused);
     }
 
-    /// Initial events capture full URLs and query-free pathnames, but no pathname for CONNECT.
+    /// Initial events capture full URLs, pathnames, and query strings, but no path for CONNECT.
     #[test]
     fn initial_events_describe_requests() {
         let event = initial_event(
@@ -1057,6 +1058,9 @@ inject_headers = [{ name = 'Authorization', value = 'secret' }]
         assert_eq!(event.protocol, Protocol::Https);
         assert_eq!(event.url, "https://h.test:8080/p?q=1");
         assert_eq!(event.pathname.as_deref(), Some("/p"));
+        assert_eq!(event.query.as_deref(), Some("q=1"));
+        let event = initial_event(&request("/p", &[("Host", "h.test")]), &Target::default());
+        assert_eq!(event.query, None);
         let event = initial_event(
             &connect_request("h.test:443"),
             &Target {
@@ -1066,5 +1070,6 @@ inject_headers = [{ name = 'Authorization', value = 'secret' }]
         );
         assert_eq!(event.url, "https://h.test:443/");
         assert_eq!(event.pathname, None);
+        assert_eq!(event.query, None);
     }
 }

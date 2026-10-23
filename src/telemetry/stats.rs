@@ -62,10 +62,9 @@ pub struct DomainSummary {
     pub last_updated: jiff::Timestamp,
 }
 
-/// Repeats of one allowed or denied HTTP or HTTPS request, excluding query strings and
-/// CONNECT setup.
+/// Repeats of one allowed or denied HTTP or HTTPS request, excluding CONNECT setup.
 ///
-/// Requests are grouped by domain, method, and pathname.
+/// Requests are grouped by domain, method, pathname, and query string.
 #[derive(Clone, Debug, Serialize)]
 pub struct HttpRequest {
     /// The normalized request host.
@@ -74,6 +73,9 @@ pub struct HttpRequest {
     pub method: String,
     /// The query-free pathname.
     pub pathname: String,
+    /// The raw query string without `?`; absent when the request had none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
     /// What allowed the latest repeat, as its access-log label; absent for denials.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule: Option<String>,
@@ -90,6 +92,7 @@ impl HttpRequest {
         self.domain == other.domain
             && self.method == other.method
             && self.pathname == other.pathname
+            && self.query == other.query
     }
 }
 
@@ -211,11 +214,12 @@ impl DomainStats {
         else {
             return;
         };
+        let query = event.query.as_deref();
         if allowed {
             let rule = event.matches.first().and_then(Option::as_ref).map(ToString::to_string);
-            self.record_allowance(host, method, pathname, rule);
+            self.record_allowance(host, method, pathname, query, rule);
         } else {
-            self.record_denial(host, method, pathname);
+            self.record_denial(host, method, pathname, query);
         }
     }
 
@@ -268,8 +272,8 @@ impl DomainStats {
     }
 
     /// Retain the latest denied requests without writing request history to disk.
-    pub fn record_denial(&self, host: &Host, method: &str, pathname: &str) {
-        self.denials.push(http_request(host, method, pathname, None));
+    pub fn record_denial(&self, host: &Host, method: &str, pathname: &str, query: Option<&str>) {
+        self.denials.push(http_request(host, method, pathname, query, None));
     }
 
     /// Retain the latest allowed requests and what allowed them, without writing to disk.
@@ -278,9 +282,10 @@ impl DomainStats {
         host: &Host,
         method: &str,
         pathname: &str,
+        query: Option<&str>,
         rule: Option<String>,
     ) {
-        self.allowances.push(http_request(host, method, pathname, rule));
+        self.allowances.push(http_request(host, method, pathname, query, rule));
     }
 
     /// Return unique denied HTTP requests with the most recently seen first.
@@ -311,11 +316,18 @@ impl DomainStats {
 }
 
 /// Describe a single occurrence of a request whose outcome is being recorded now.
-fn http_request(host: &Host, method: &str, pathname: &str, rule: Option<String>) -> HttpRequest {
+fn http_request(
+    host: &Host,
+    method: &str,
+    pathname: &str,
+    query: Option<&str>,
+    rule: Option<String>,
+) -> HttpRequest {
     HttpRequest {
         domain: host.to_string(),
         method: method.to_owned(),
         pathname: pathname.to_owned(),
+        query: query.map(str::to_owned),
         rule,
         count: 1,
         timestamp: jiff::Timestamp::now(),
@@ -398,7 +410,7 @@ mod tests {
         let stats = DomainStats::default();
         let extra = 5;
         for index in 0..REQUEST_CAPACITY + extra {
-            stats.record_denial(&host("Example.COM."), "POST", &format!("/request/{index}"));
+            stats.record_denial(&host("Example.COM."), "POST", &format!("/request/{index}"), None);
         }
         let newest = format!("/request/{}", REQUEST_CAPACITY + extra - 1);
         let oldest = format!("/request/{extra}");
@@ -410,9 +422,9 @@ mod tests {
         assert_eq!(snapshot[0].count, 1);
 
         // A repeat of the oldest request moves it to the front instead of evicting it.
-        stats.record_denial(&host("example.com"), "POST", &oldest);
-        stats.record_denial(&host("example.com"), "POST", &oldest);
-        stats.record_denial(&host("example.com"), "GET", &oldest);
+        stats.record_denial(&host("example.com"), "POST", &oldest, None);
+        stats.record_denial(&host("example.com"), "POST", &oldest, None);
+        stats.record_denial(&host("example.com"), "GET", &oldest, None);
         let latest = stats.denials_snapshot();
         assert_eq!(latest.len(), REQUEST_CAPACITY);
         assert_eq!((latest[0].method.as_str(), latest[0].count), ("GET", 1));
@@ -425,14 +437,43 @@ mod tests {
         assert!(serialized.get("rule").is_none());
     }
 
+    /// Group repeats only when the query string matches too, and record it from events.
+    #[test]
+    fn groups_requests_by_query_string() {
+        let stats = DomainStats::default();
+        let host = host("example.com");
+        stats.record_denial(&host, "GET", "/search", Some("q=a"));
+        stats.record_denial(&host, "GET", "/search", Some("q=b"));
+        stats.record_denial(&host, "GET", "/search", Some("q=a"));
+        stats.record_denial(&host, "GET", "/search", None);
+        let denials = stats.denials_snapshot();
+        let summary: Vec<_> =
+            denials.iter().map(|request| (request.query.as_deref(), request.count)).collect();
+        assert_eq!(summary, [(None, 1), (Some("q=a"), 2), (Some("q=b"), 1)]);
+        assert!(serde_json::to_value(&denials[0]).unwrap().get("query").is_none());
+        assert_eq!(serde_json::to_value(&denials[1]).unwrap()["query"], "q=a");
+
+        let mut event = RequestEvent::http(Protocol::Https, "POST", "-");
+        event.subjects = vec![host.clone()];
+        event.pathname = Some("/submit".into());
+        event.query = Some("token=x".into());
+        event.decide(Decision::Allow);
+        event.matched(MatchSource::Paused);
+        stats.record_event(&event);
+        let allowance = stats.allowances_snapshot().remove(0);
+        assert_eq!(allowance.pathname, "/submit");
+        assert_eq!(allowance.query.as_deref(), Some("token=x"));
+        assert_eq!(allowance.rule.as_deref(), Some("@paused"));
+    }
+
     /// Keep allowed requests separate from denials and report the latest allowing rule.
     #[test]
     fn tracks_allowed_requests_with_their_latest_rule() {
         let stats = DomainStats::default();
         let rule = MatchSource::Rule(RuleId::new("t.toml", 1));
-        stats.record_allowance(&host("example.com"), "GET", "/", Some(rule.to_string()));
-        stats.record_allowance(&host("example.com"), "GET", "/", Some("@paused".into()));
-        stats.record_denial(&host("example.com"), "GET", "/");
+        stats.record_allowance(&host("example.com"), "GET", "/", None, Some(rule.to_string()));
+        stats.record_allowance(&host("example.com"), "GET", "/", None, Some("@paused".into()));
+        stats.record_denial(&host("example.com"), "GET", "/", None);
         let allowances = stats.allowances_snapshot();
         assert_eq!(allowances.len(), 1);
         assert_eq!(allowances[0].count, 2);
@@ -502,8 +543,8 @@ mod tests {
         let stats = DomainStats::default();
         stats.record(&host("example.com"), Protocol::Dns, true);
         stats.record_transfer(&host("example.com"), Direction::Down, 100);
-        stats.record_denial(&host("example.com"), "GET", "/denied");
-        stats.record_allowance(&host("example.com"), "GET", "/allowed", None);
+        stats.record_denial(&host("example.com"), "GET", "/denied", None);
+        stats.record_allowance(&host("example.com"), "GET", "/allowed", None, None);
         stats.reset();
         assert!(stats.snapshot().is_empty());
         assert!(stats.denials_snapshot().is_empty());
@@ -542,7 +583,7 @@ mod tests {
         assert_eq!(inner.order.len(), DOMAIN_CAPACITY);
     }
 
-    /// Retain only evaluated HTTP requests, with normalized hosts and query-free pathnames.
+    /// Retain only evaluated HTTP requests, with normalized hosts and pathnames.
     #[test]
     fn tracks_http_requests_without_dns_connect_or_unevaluated_requests() {
         let stats = DomainStats::default();

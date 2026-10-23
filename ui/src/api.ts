@@ -43,6 +43,23 @@ export interface RuleFileSummary {
 /** The rule file that Traffic page allowances extend; the service always creates it. */
 export const webRulesFile = "05-web.toml";
 
+/** Where an allowing rule lives, for linking to it in the rule editor. */
+export interface RuleLocation {
+    /** The rule file name in the rules directory. */
+    file: string;
+    /** The 1-based rule number, as in `allow#N` access-log labels. */
+    rule: number;
+}
+
+/** Locate the rule named by an access-log label such as `/etc/exwall/rules/web.toml:allow#2`. */
+export function parseRuleLabel(label: string): RuleLocation | null {
+    const match = /([^/]+):allow#(\d+)$/.exec(label);
+    if (!match?.[1] || !match[2]) {
+        return null;
+    }
+    return { file: match[1], rule: Number(match[2]) };
+}
+
 /** The API path of one rule file. */
 export function rulesPath(file: string): string {
     return `rules/${encodeURIComponent(file)}`;
@@ -80,11 +97,13 @@ export interface DomainStats {
     last_denied: string | null;
 }
 
-/** One retained HTTP request and its repeats, with the exact pathname and no query string. */
+/** One retained HTTP request and its repeats, grouped by method, pathname, and query string. */
 export interface HttpRequest {
     domain: string;
     method: string;
     pathname: string;
+    /** The raw query string without `?`; absent when the request had none. */
+    query?: string;
     /** The rule or exception that allowed the latest repeat; absent for denials. */
     rule?: string;
     /** How many times the request was seen since it was first retained. */
@@ -226,68 +245,77 @@ function removeCoveredDnsRules(
     return document.rules.length !== previousCount;
 }
 
-/** Add a rule allowing a domain, unless an equivalent rule already exists. */
-export async function allowDomain({
+/** Match rules that already allow everything a domain allowance would add. */
+export function coversDomain({
     domain,
     dnsOnly,
     includeSubdomains = false,
-}: DomainAllowance): Promise<RulesDocument> {
-    const document = await readWebRules();
-    let changed = !dnsOnly && removeCoveredDnsRules(document, domain, includeSubdomains);
-    if (
-        !document.rules.some(
-            (rule) =>
-                rule.fields.domain === domain &&
-                (!includeSubdomains || rule.fields.include_subdomains === true) &&
-                (dnsOnly ||
-                    (rule.fields.dns_only !== true &&
-                        rule.fields.methods === "ANY" &&
-                        rule.fields.pathname_pattern === undefined &&
-                        rule.fields.pathname_regex === undefined &&
-                        rule.fields.inject_headers === undefined)),
-        )
-    ) {
-        document.rules.unshift({
-            index: null,
-            fields: {
-                domain,
-                ...(dnsOnly ? { dns_only: true } : { methods: "ANY" }),
-                ...(includeSubdomains ? { include_subdomains: true } : {}),
-            },
-        });
-        changed = true;
-    }
-    return changed ? api<RulesDocument>(rulesPath(webRulesFile), "PUT", document) : document;
+}: DomainAllowance): (rule: RuleDraft) => boolean {
+    return (rule) =>
+        rule.fields.domain === domain &&
+        (!includeSubdomains || rule.fields.include_subdomains === true) &&
+        (dnsOnly ||
+            (rule.fields.dns_only !== true &&
+                rule.fields.methods === "ANY" &&
+                rule.fields.pathname_pattern === undefined &&
+                rule.fields.pathname_regex === undefined &&
+                rule.fields.inject_headers === undefined));
 }
 
-/** Add a rule allowing one denied request's exact method and pathname. */
-export async function allowRequest(denial: HttpRequest): Promise<RulesDocument> {
-    const document = await readWebRules();
-    const pathnameRegex = exactPathRegex(denial.pathname);
-    let changed = removeCoveredDnsRules(document, denial.domain);
-    if (
-        !document.rules.some(
-            (rule) =>
-                rule.fields.domain === denial.domain &&
-                rule.fields.dns_only !== true &&
-                Array.isArray(rule.fields.methods) &&
-                rule.fields.methods.some((method) => method === denial.method) &&
-                rule.fields.pathname_regex === pathnameRegex &&
-                rule.fields.pathname_pattern === undefined &&
-                rule.fields.inject_headers === undefined,
-        )
-    ) {
-        document.rules.unshift({
-            index: null,
-            fields: {
-                domain: denial.domain,
-                methods: [denial.method],
-                pathname_regex: pathnameRegex,
-            },
-        });
-        changed = true;
+/** Match rules that already allow exactly what allowing one request would add. */
+export function coversRequest(request: HttpRequest): (rule: RuleDraft) => boolean {
+    const pathnameRegex = exactPathRegex(request.pathname);
+    return (rule) =>
+        rule.fields.domain === request.domain &&
+        rule.fields.dns_only !== true &&
+        Array.isArray(rule.fields.methods) &&
+        rule.fields.methods.some((method) => method === request.method) &&
+        rule.fields.pathname_regex === pathnameRegex &&
+        rule.fields.pathname_pattern === undefined &&
+        rule.fields.inject_headers === undefined;
+}
+
+/**
+ * Add `fields` as the first web rule unless a rule matching `covers` exists, then save the
+ * web rules if anything changed.
+ */
+async function ensureWebRule(
+    document: RulesDocument,
+    changed: boolean,
+    covers: (rule: RuleDraft) => boolean,
+    fields: Record<string, FieldValue>,
+): Promise<RulesDocument> {
+    const exists = document.rules.some(covers);
+    if (!exists) {
+        document.rules.unshift({ index: null, fields });
     }
-    return changed ? api<RulesDocument>(rulesPath(webRulesFile), "PUT", document) : document;
+    if (changed || !exists) {
+        return api<RulesDocument>(rulesPath(webRulesFile), "PUT", document);
+    }
+    return document;
+}
+
+/** Add a rule allowing a domain, unless an equivalent rule already exists. */
+export async function allowDomain(allowance: DomainAllowance): Promise<RulesDocument> {
+    const { domain, dnsOnly, includeSubdomains = false } = allowance;
+    const document = await readWebRules();
+    const changed = !dnsOnly && removeCoveredDnsRules(document, domain, includeSubdomains);
+    return ensureWebRule(document, changed, coversDomain(allowance), {
+        domain,
+        ...(dnsOnly ? { dns_only: true } : { methods: "ANY" }),
+        ...(includeSubdomains ? { include_subdomains: true } : {}),
+    });
+}
+
+/** Add a rule allowing one request's exact method and pathname, with any query string. */
+export async function allowRequest(request: HttpRequest): Promise<RulesDocument> {
+    const document = await readWebRules();
+    const changed = removeCoveredDnsRules(document, request.domain);
+    return ensureWebRule(document, changed, coversRequest(request), {
+        domain: request.domain,
+        methods: [request.method],
+        pathname_regex: exactPathRegex(request.pathname),
+    });
 }
 
 /** Whether blocking is enforced or temporarily paused. */

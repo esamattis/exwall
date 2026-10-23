@@ -79,8 +79,11 @@ pub struct RequestEvent {
     pub url: String,
     /// Normalized hosts the decision applies to, for domain statistics.
     pub subjects: Vec<Host>,
-    /// The query-free HTTP pathname, retained for denial history; `None` for CONNECT and DNS.
+    /// The query-free HTTP pathname, retained for request history; `None` for CONNECT and DNS.
     pub pathname: Option<String>,
+    /// The raw HTTP query string without `?`, retained for request history; `None` when the
+    /// request has no query, and for CONNECT and DNS.
+    pub query: Option<String>,
     /// The HTTP status returned to the client.
     pub http_status: Option<u16>,
     /// The DNS response code returned to the client.
@@ -111,6 +114,7 @@ impl RequestEvent {
             url,
             subjects: Vec::new(),
             pathname: None,
+            query: None,
             http_status: None,
             dns_rcode: None,
             failure: Some(Failure::Cancelled),

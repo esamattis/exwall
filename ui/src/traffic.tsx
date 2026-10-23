@@ -1,14 +1,22 @@
 import { useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
     allowDomain,
     allowRequest,
     api,
+    coversDomain,
+    coversRequest,
+    parseRuleLabel,
     resetTraffic,
+    rulesPath,
+    webRulesFile,
     type DomainAllowance,
     type DomainStats,
     type HttpRequest,
+    type RuleDraft,
+    type RuleFileContents,
+    type RuleLocation,
 } from "./api.ts";
 import {
     CheckIcon,
@@ -23,6 +31,7 @@ import {
     useNow,
     useToast,
 } from "./components.tsx";
+import { ruleAnchor } from "./rules.tsx";
 
 /** The traffic views selectable from the tab bar; `requests` lists blocked requests. */
 export type TrafficView = "blocked" | "allowed" | "requests" | "allowed-requests";
@@ -44,6 +53,9 @@ const manualQuery = {
     refetchOnReconnect: false,
     retry: false,
 };
+
+/** Find the current position of the first web rule matching `covers`, if any. */
+type LocateRule = (covers: (rule: RuleDraft) => boolean) => RuleLocation | undefined;
 
 /** A domain row paired with the timestamp of the outcome its table shows. */
 interface DomainEntry {
@@ -112,6 +124,17 @@ export function TrafficPage({ view }: { view: TrafficView }) {
     const [filter, setFilter] = useState("");
     const [allowedDomains, setAllowedDomains] = useState<Record<string, DomainAllowance>>({});
     const [allowedRequests, setAllowedRequests] = useState<Record<string, boolean>>({});
+    // Rules shift as others are added, so links look up their rule in the current file.
+    const webRules = useQuery({
+        queryKey: ["rules", webRulesFile],
+        queryFn: () => api<RuleFileContents>(rulesPath(webRulesFile)),
+        enabled: Object.keys(allowedDomains).length + Object.keys(allowedRequests).length > 0,
+        ...manualQuery,
+    });
+    const locateRule: LocateRule = (covers) => {
+        const position = webRules.data?.rules?.findIndex(covers) ?? -1;
+        return position === -1 ? undefined : { file: webRulesFile, rule: position + 1 };
+    };
     const domains = useQuery({
         queryKey: ["domains"],
         queryFn: () => api<DomainStats[]>("domains"),
@@ -129,7 +152,8 @@ export function TrafficPage({ view }: { view: TrafficView }) {
     });
     const domainAllow = useMutation({
         mutationFn: allowDomain,
-        onSuccess: async (_, allowance) => {
+        onSuccess: async (document, allowance) => {
+            client.setQueryData(["rules", webRulesFile], document);
             setAllowedDomains((previous) => ({ ...previous, [allowance.domain]: allowance }));
             toast(allowanceMessage(allowance));
             await client.invalidateQueries({ queryKey: ["rules"] });
@@ -137,8 +161,9 @@ export function TrafficPage({ view }: { view: TrafficView }) {
     });
     const requestAllow = useMutation({
         mutationFn: allowRequest,
-        onSuccess: async (_, denial) => {
-            setAllowedRequests((previous) => ({ ...previous, [requestKey(denial)]: true }));
+        onSuccess: async (document, request) => {
+            client.setQueryData(["rules", webRulesFile], document);
+            setAllowedRequests((previous) => ({ ...previous, [requestKey(request)]: true }));
             toast("Method and pathname allowed.");
             await client.invalidateQueries({ queryKey: ["rules"] });
         },
@@ -182,12 +207,13 @@ export function TrafficPage({ view }: { view: TrafficView }) {
                 requests={requests.filter(
                     (request) =>
                         request.domain.toLowerCase().includes(needle) ||
-                        request.pathname.toLowerCase().includes(needle),
+                        requestPath(request).toLowerCase().includes(needle),
                 )}
                 filtered={needle !== "" && requests.length > 0}
                 now={now}
                 isPending={requestAllow.isPending}
                 allowed={allowedRequests}
+                locateRule={locateRule}
                 onAllow={requestAllow.mutate}
             />
         );
@@ -201,6 +227,7 @@ export function TrafficPage({ view }: { view: TrafficView }) {
                 now={now}
                 isPending={domainAllow.isPending}
                 allowed={allowedDomains}
+                locateRule={locateRule}
                 onAllow={domainAllow.mutate}
             />
         );
@@ -376,7 +403,7 @@ function StatTiles({ domains }: { domains: DomainStats[] | undefined }) {
 /** Shared header cell styling for traffic tables. */
 const headerCell = "px-4 py-2.5 text-xs font-medium tracking-wide text-zinc-500 uppercase";
 
-/** Show domains with one outcome, with allow actions for blocked domains. */
+/** Show domains with one outcome, with allow actions that link to the rule they add. */
 function DomainsTable({
     outcome,
     entries,
@@ -384,6 +411,7 @@ function DomainsTable({
     now,
     isPending,
     allowed,
+    locateRule,
     onAllow,
 }: {
     outcome: "allow" | "block";
@@ -392,6 +420,7 @@ function DomainsTable({
     now: number;
     isPending: boolean;
     allowed: Record<string, DomainAllowance>;
+    locateRule: LocateRule;
     onAllow: (allowance: DomainAllowance) => void;
 }) {
     const title = outcome === "allow" ? "Allowed domains" : "Blocked domains";
@@ -435,11 +464,9 @@ function DomainsTable({
                         <th className={headerCell}>
                             {outcome === "allow" ? "Last allowed" : "Last blocked"}
                         </th>
-                        {outcome === "block" && (
-                            <th className={`${headerCell} text-right`}>
-                                <span className="sr-only">Actions</span>
-                            </th>
-                        )}
+                        <th className={`${headerCell} text-right`}>
+                            <span className="sr-only">Actions</span>
+                        </th>
                     </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
@@ -478,61 +505,15 @@ function DomainsTable({
                                 <td className="px-4 py-2.5 text-zinc-400">
                                     <RelativeTime timestamp={timestamp} now={now} />
                                 </td>
-                                {outcome === "block" && (
-                                    <td className="px-4 py-2">
-                                        <div className="flex items-center justify-end gap-1.5">
-                                            {done && (
-                                                <span className="badge badge-allow mr-1">
-                                                    <CheckIcon className="size-3" />
-                                                    {allowanceLabel(done)}
-                                                </span>
-                                            )}
-                                            <button
-                                                type="button"
-                                                className="btn btn-sm btn-primary"
-                                                aria-label={`Allow ${entry.domain} completely`}
-                                                title="Allow DNS and every HTTP(S) method and path"
-                                                disabled={isPending}
-                                                onClick={() =>
-                                                    onAllow({
-                                                        domain: entry.domain,
-                                                        dnsOnly: false,
-                                                    })
-                                                }
-                                            >
-                                                Allow
-                                            </button>
-                                            <button
-                                                type="button"
-                                                className="btn btn-sm btn-secondary"
-                                                aria-label={`Allow ${entry.domain} with subdomains`}
-                                                title="Allow this domain and all of its subdomains completely"
-                                                disabled={isPending}
-                                                onClick={() =>
-                                                    onAllow({
-                                                        domain: entry.domain,
-                                                        dnsOnly: false,
-                                                        includeSubdomains: true,
-                                                    })
-                                                }
-                                            >
-                                                + Subdomains
-                                            </button>
-                                            <button
-                                                type="button"
-                                                className="btn btn-sm btn-secondary"
-                                                aria-label={`Allow ${entry.domain} DNS only`}
-                                                title="Resolve this name but keep blocking HTTP(S)"
-                                                disabled={isPending}
-                                                onClick={() =>
-                                                    onAllow({ domain: entry.domain, dnsOnly: true })
-                                                }
-                                            >
-                                                DNS only
-                                            </button>
-                                        </div>
-                                    </td>
-                                )}
+                                <td className="px-4 py-2">
+                                    <DomainActions
+                                        domain={entry.domain}
+                                        done={done}
+                                        location={done && locateRule(coversDomain(done))}
+                                        isPending={isPending}
+                                        onAllow={onAllow}
+                                    />
+                                </td>
                             </tr>
                         );
                     })}
@@ -542,14 +523,141 @@ function DomainsTable({
     );
 }
 
-/** Identify a denial by the rule it would create. */
-function requestKey(denial: HttpRequest): string {
-    return `${denial.domain} ${denial.method} ${denial.pathname}`;
+/** Link to a rule in its file's editor, which opens the rule and scrolls to it. */
+function RuleLink({
+    location,
+    className,
+    title,
+    children,
+}: {
+    location: RuleLocation;
+    className: string;
+    title: string;
+    children: ReactNode;
+}) {
+    return (
+        <Link
+            to="/rules/$file"
+            params={{ file: location.file }}
+            hash={ruleAnchor(location.rule)}
+            className={className}
+            title={title}
+        >
+            {children}
+        </Link>
+    );
 }
 
-/** Shorten a rule label such as `/etc/exwall/rules/web.toml:allow#2` to its file name. */
-function ruleLabel(rule: string): string {
-    return rule.slice(rule.lastIndexOf("/") + 1);
+/**
+ * Confirm a completed allow action, linking to the rule that now allows the traffic while
+ * that rule is still in the web rules file.
+ */
+function AllowedBadge({ location, label }: { location: RuleLocation | undefined; label: string }) {
+    const className = "badge badge-allow mr-1 whitespace-nowrap";
+    if (location === undefined) {
+        return (
+            <span className={className}>
+                <CheckIcon className="size-3" />
+                {label}
+            </span>
+        );
+    }
+    return (
+        <RuleLink
+            location={location}
+            className={`${className} transition hover:brightness-125`}
+            title={`Open rule #${location.rule} in ${location.file}`}
+        >
+            <CheckIcon className="size-3" />
+            {label} · rule #{location.rule}
+        </RuleLink>
+    );
+}
+
+/** Offer every way to allow a domain, linking to the rule once one is added. */
+function DomainActions({
+    domain,
+    done,
+    location,
+    isPending,
+    onAllow,
+}: {
+    domain: string;
+    /** The latest allow action completed for this domain. */
+    done: DomainAllowance | undefined;
+    /** The rule that action added or found. */
+    location: RuleLocation | undefined;
+    isPending: boolean;
+    onAllow: (allowance: DomainAllowance) => void;
+}) {
+    return (
+        <div className="flex items-center justify-end gap-1.5">
+            {done && <AllowedBadge location={location} label={allowanceLabel(done)} />}
+            <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                aria-label={`Allow ${domain} completely`}
+                title="Allow DNS and every HTTP(S) method and path"
+                disabled={isPending}
+                onClick={() => onAllow({ domain, dnsOnly: false })}
+            >
+                Allow
+            </button>
+            <button
+                type="button"
+                className="btn btn-sm btn-secondary"
+                aria-label={`Allow ${domain} with subdomains`}
+                title="Allow this domain and all of its subdomains completely"
+                disabled={isPending}
+                onClick={() => onAllow({ domain, dnsOnly: false, includeSubdomains: true })}
+            >
+                + Subdomains
+            </button>
+            <button
+                type="button"
+                className="btn btn-sm btn-secondary"
+                aria-label={`Allow ${domain} DNS only`}
+                title="Resolve this name but keep blocking HTTP(S)"
+                disabled={isPending}
+                onClick={() => onAllow({ domain, dnsOnly: true })}
+            >
+                DNS only
+            </button>
+        </div>
+    );
+}
+
+/** Show a request's pathname with its query string, if any. */
+function requestPath(request: HttpRequest): string {
+    return request.query === undefined ? request.pathname : `${request.pathname}?${request.query}`;
+}
+
+/** Identify a request by the rule allowing it would create, which ignores the query string. */
+function requestKey(request: HttpRequest): string {
+    return `${request.domain} ${request.method} ${request.pathname}`;
+}
+
+/**
+ * Show what allowed a request: a link to the matching rule, shortened to its file name and
+ * number, or an exception label such as `@paused`.
+ */
+function RuleSource({ rule }: { rule: string | undefined }) {
+    if (rule === undefined) {
+        return "–";
+    }
+    const location = parseRuleLabel(rule);
+    if (location === null) {
+        return <span title={rule}>{rule}</span>;
+    }
+    return (
+        <RuleLink
+            location={location}
+            className="text-zinc-300 underline decoration-white/20 underline-offset-2 transition hover:text-white hover:decoration-white/60"
+            title={`Open ${rule}`}
+        >
+            {location.file}:allow#{location.rule}
+        </RuleLink>
+    );
 }
 
 /** Color HTTP methods by how much they can change on the server. */
@@ -565,7 +673,8 @@ function methodBadge(method: string): string {
 
 /**
  * Show the most recently seen unique HTTP requests with one outcome and how often each repeated.
- * Denied requests can be allowed by exact method and path; allowed requests show what allowed them.
+ * Each can be allowed by exact method and path, which also keeps requests made while blocking is
+ * paused allowed afterwards; allowed requests also show what allowed them.
  */
 function RequestsTable({
     outcome,
@@ -574,6 +683,7 @@ function RequestsTable({
     now,
     isPending,
     allowed,
+    locateRule,
     onAllow,
 }: {
     outcome: "allow" | "block";
@@ -582,7 +692,8 @@ function RequestsTable({
     now: number;
     isPending: boolean;
     allowed: Record<string, boolean>;
-    onAllow: (denial: HttpRequest) => void;
+    locateRule: LocateRule;
+    onAllow: (request: HttpRequest) => void;
 }) {
     const title = outcome === "allow" ? "Allowed requests" : "Blocked requests";
     const verb = outcome === "allow" ? "allowed" : "denied";
@@ -601,10 +712,8 @@ function RequestsTable({
         <div className="relative overflow-x-auto">
             <p className="border-b border-white/5 px-4 py-2 text-xs text-zinc-500">
                 The {requestCapacity} most recently seen {verb} HTTP(S) requests, newest first, with
-                repeats of the same method and path counted together. Query strings are not recorded
-                {outcome === "block" &&
-                    "; allowing a request matches its exact method and path only"}
-                .
+                repeats of the same method, path, and query string counted together. Allowing a
+                request adds a rule for its exact method and path, with any query string.
             </p>
             <table className="w-full text-left text-sm">
                 <caption className="sr-only">{title}, latest first</caption>
@@ -620,20 +729,22 @@ function RequestsTable({
                             Count
                         </th>
                         <th className={headerCell}>{outcome === "allow" ? "Last seen" : "When"}</th>
-                        {outcome === "allow" ? (
-                            <th className={headerCell}>Allowed by</th>
-                        ) : (
-                            <th className={`${headerCell} text-right`}>
-                                <span className="sr-only">Actions</span>
-                            </th>
-                        )}
+                        {outcome === "allow" && <th className={headerCell}>Allowed by</th>}
+                        <th className={`${headerCell} text-right`}>
+                            <span className="sr-only">Actions</span>
+                        </th>
                     </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
                     {requests.map((request) => {
                         const label = requestKey(request);
+                        const path = requestPath(request);
+                        const done = allowed[label] === true;
                         return (
-                            <tr key={label} className="transition hover:bg-white/[0.03]">
+                            <tr
+                                key={`${request.domain} ${request.method} ${path}`}
+                                className="transition hover:bg-white/[0.03]"
+                            >
                                 <th
                                     scope="row"
                                     className="max-w-[14rem] truncate px-4 py-2.5 font-mono text-[13px] font-medium text-zinc-100"
@@ -650,9 +761,12 @@ function RequestsTable({
                                 </td>
                                 <td
                                     className="max-w-md truncate px-4 py-2.5 font-mono text-[13px] text-zinc-300"
-                                    title={request.pathname}
+                                    title={path}
                                 >
                                     {request.pathname}
+                                    {request.query !== undefined && (
+                                        <span className="text-zinc-500">?{request.query}</span>
+                                    )}
                                 </td>
                                 <td className="px-4 py-2.5 text-right text-zinc-300 tabular-nums">
                                     {request.count.toLocaleString()}
@@ -660,35 +774,31 @@ function RequestsTable({
                                 <td className="px-4 py-2.5 whitespace-nowrap text-zinc-400">
                                     <RelativeTime timestamp={request.timestamp} now={now} />
                                 </td>
-                                {outcome === "allow" ? (
-                                    <td
-                                        className="max-w-[14rem] truncate px-4 py-2.5 font-mono text-[13px] text-zinc-400"
-                                        title={request.rule}
-                                    >
-                                        {request.rule === undefined ? "–" : ruleLabel(request.rule)}
-                                    </td>
-                                ) : (
-                                    <td className="px-4 py-2">
-                                        <div className="flex items-center justify-end gap-1.5">
-                                            {allowed[label] && (
-                                                <span className="badge badge-allow">
-                                                    <CheckIcon className="size-3" />
-                                                    Allowed
-                                                </span>
-                                            )}
-                                            <button
-                                                type="button"
-                                                className="btn btn-sm btn-secondary"
-                                                aria-label={`Allow ${label}`}
-                                                title="Allow exactly this method and path"
-                                                disabled={isPending}
-                                                onClick={() => onAllow(request)}
-                                            >
-                                                Allow request
-                                            </button>
-                                        </div>
+                                {outcome === "allow" && (
+                                    <td className="max-w-[14rem] truncate px-4 py-2.5 font-mono text-[13px] text-zinc-400">
+                                        <RuleSource rule={request.rule} />
                                     </td>
                                 )}
+                                <td className="px-4 py-2">
+                                    <div className="flex items-center justify-end gap-1.5">
+                                        {done && (
+                                            <AllowedBadge
+                                                location={locateRule(coversRequest(request))}
+                                                label="Allowed"
+                                            />
+                                        )}
+                                        <button
+                                            type="button"
+                                            className="btn btn-sm btn-secondary"
+                                            aria-label={`Allow ${label}`}
+                                            title="Add a rule allowing exactly this method and path"
+                                            disabled={isPending}
+                                            onClick={() => onAllow(request)}
+                                        >
+                                            Allow request
+                                        </button>
+                                    </div>
+                                </td>
                             </tr>
                         );
                     })}
