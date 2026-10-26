@@ -416,9 +416,13 @@ impl Api {
             return self.capture_details(id).await;
         }
         match (method, path.as_str()) {
-            (Method::GET, "/api/session") => {
-                Ok(json(StatusCode::OK, &serde_json::json!({ "username": self.auth.username() })))
-            }
+            (Method::GET, "/api/session") => Ok(json(
+                StatusCode::OK,
+                &serde_json::json!({
+                    "username": self.auth.username(),
+                    "version": env!("CARGO_PKG_VERSION"),
+                }),
+            )),
             (Method::POST, "/api/logout") => {
                 self.auth.logout(request.headers()).await?;
                 Ok(with_cleared_cookie(json(StatusCode::OK, &serde_json::json!({}))))
@@ -850,7 +854,9 @@ mod tests {
             .response(request(Method::GET, "/api/session", Some(("authorization", &bearer)), &()))
             .await;
         assert_eq!(session.status(), StatusCode::OK);
-        assert_eq!(decode::<serde_json::Value>(session).await["username"], "admin");
+        let session = decode::<serde_json::Value>(session).await;
+        assert_eq!(session["username"], "admin");
+        assert_eq!(session["version"], env!("CARGO_PKG_VERSION"));
         let changed = self::harness(temporary.path(), "changed");
         let rejected = changed
             .api

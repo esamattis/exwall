@@ -189,9 +189,19 @@ function AppShell() {
         <div className="min-h-screen">
             <header className="sticky top-0 z-30 border-b border-white/10 bg-zinc-950/80 backdrop-blur">
                 <div className="mx-auto flex h-14 max-w-6xl items-center gap-6 px-4 sm:px-6">
-                    <Link to="/traffic" aria-label="exwall home">
-                        <Brand />
-                    </Link>
+                    <div className="flex items-center gap-2">
+                        <Link to="/traffic" aria-label="exwall home">
+                            <Brand />
+                        </Link>
+                        {session.data && (
+                            <span
+                                className="font-mono text-[10px] text-zinc-500"
+                                title={`exwall version ${session.data.version}`}
+                            >
+                                v{session.data.version}
+                            </span>
+                        )}
+                    </div>
                     <HostLabel />
                     <nav aria-label="Main" className="flex gap-1">
                         <Link

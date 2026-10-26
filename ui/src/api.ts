@@ -290,9 +290,11 @@ export interface InterfaceAddress {
     interface: string;
 }
 
-/** The signed-in account. */
+/** The signed-in account and the exwall build serving it. */
 export interface Session {
     username: string;
+    /** The running exwall version, such as 0.4.0. */
+    version: string;
 }
 
 /** Parameters shared by domain allowance actions. */
